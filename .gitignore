@@ -1,0 +1,14 @@
+# Project place file
+/NewRobloxFlyingGame.rbxlx
+
+# Roblox Studio lock files
+/*.rbxlx.lock
+/*.rbxl.lock
+
+# Generated from default.project.json by `rojo sourcemap`
+sourcemap.json
+
+# Wally-installed dependencies (restored via `wally install`)
+/Packages
+/ServerPackages
+/DevPackages
