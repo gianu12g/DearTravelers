@@ -140,7 +140,7 @@ function Transitions.prepare(root: GuiObject)
 	prepared[root] = {
 		root = root,
 		basePosition = root.Position,
-		-- Every managed screen gets responsive scaling for free. This is what
+		-- Every managed screen gets its UIScale for free. This is what
 		-- Scaling.luau's header asks for -- one UIScale per ScreenGui root --
 		-- and there is no reason to make each screen ask for it by hand.
 		uiScale = Scaling.attach(root),
@@ -241,9 +241,8 @@ function Transitions.begin(root: GuiObject, name: Name): Pose
 		if offset ~= nil then
 			entry.root.Position = entry.basePosition + UDim2.fromScale(offset.X * alpha, offset.Y * alpha)
 		elseif scaled then
-			-- Through Scaling, never straight onto UIScale.Scale: the viewport
-			-- can change mid-transition, and whichever of the two wrote last
-			-- would win and strand the screen at the wrong size.
+			-- Through Scaling, never straight onto UIScale.Scale: Scaling owns
+			-- that property, and poses ask for it via setMultiplier.
 			Scaling.setMultiplier(entry.uiScale, 1 - (1 - SCALE_FROM) * alpha)
 		end
 	end

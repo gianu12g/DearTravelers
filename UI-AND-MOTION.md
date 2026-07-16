@@ -106,7 +106,7 @@ end
 | `UI/Transitions.luau` | What a transition *is*. Poses, not animations. |
 | `UI/Motion.luau` | TweenService plus a cancel handle. |
 | `UI/Buttons.luau` | The `UIButton` tag. |
-| `UI/Scaling.luau` | Responsive scale. Every registered screen gets it free. |
+| `UI/Scaling.luau` | The UIScale on each screen root. Transitions drive it; it does not read the viewport. |
 
 ### Poses, not animations
 
@@ -122,10 +122,9 @@ meet during a bug.
 
 ### Nobody writes `UIScale.Scale` except Scaling
 
-`Scaling` owns that property; a transition asks for a multiplier
-(`Scaling.setMultiplier`) and the two compose. Two systems assigning one property
-compose by whoever ran last — which is how a menu ends up stuck at 0.92 because the
-player resized the window mid-transition.
+`Scaling` owns that property; a transition asks for it through
+`Scaling.setMultiplier` rather than assigning `.Scale` directly, so there is always
+exactly one writer and never two disagreeing about the current value.
 
 ---
 
