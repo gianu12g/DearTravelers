@@ -91,6 +91,35 @@ function DataController.getData(): any?
 	return if dataReplica ~= nil then dataReplica.Data else nil
 end
 
+local function readPath(root: any, path: { string | number }): any
+	local current: any = root
+	for _, key in path do
+		if current == nil then
+			return nil
+		end
+		current = current[key]
+	end
+	return current
+end
+
+--[[
+	True when one path is a prefix of the other (either direction).
+
+	Both directions matter, and for different reasons:
+	  {"Settings"} vs {"Settings","MusicEnabled"} -- a write AT or ABOVE us: our
+	      value was replaced wholesale.
+	  {"Inventory","Sword"} vs {"Inventory"} -- a write BELOW us: our table's
+	      contents changed, though the table itself is the same object.
+]]
+local function pathsIntersect(a: { string | number }, b: { string | number }): boolean
+	for i = 1, math.min(#a, #b) do
+		if a[i] ~= b[i] then
+			return false
+		end
+	end
+	return true
+end
+
 --[[
 	Fires when a path changes, AND immediately with the current value -- so a UI
 	binding is one call with no "connect, then also read once" boilerplate, and
@@ -99,6 +128,18 @@ end
 		DataController.observe({"Coins"}, function(coins)
 			label.Text = `{coins}`
 		end)
+
+	Built on OnChange, NOT OnSet, and that is load-bearing. OnSet is keyed on an
+	exact concatenated path string and is fired ONLY by Replica:Set
+	(ReplicaClient.luau:393). SetValues, TableInsert and TableRemove fire the
+	changed_listeners signal and nothing else. An OnSet-based observer is
+	therefore blind to three of the four write actions, and blind to nested
+	writes under the path it watches -- it just never fires, with no error. That
+	is not a defect you find by reading the call site.
+
+	Cost: every observer is consulted on every change to the replica, rather than
+	a single hash lookup. For player data that is a handful of comparisons on a
+	human-paced event. Correctness is worth more here.
 ]]
 function DataController.observe(path: { string | number }, listener: (value: any, old: any?) -> ())
 	task.spawn(function()
@@ -107,17 +148,34 @@ function DataController.observe(path: { string | number }, listener: (value: any
 			return
 		end
 
-		dataReplica:OnSet(path, listener)
+		local last: any = readPath(dataReplica.Data, path)
 
-		-- Fire once with the value that's already there.
-		local current: any = dataReplica.Data
-		for _, key in path do
-			if current == nil then
-				break
+		dataReplica:OnChange(function(_action: string, changedPath: { string | number })
+			if not pathsIntersect(path, changedPath) then
+				return
 			end
-			current = current[key]
-		end
-		listener(current, nil)
+
+			local current: any = readPath(dataReplica.Data, path)
+
+			--[[
+				Suppress no-op fires for scalars -- SetValues on a sibling key
+				intersects us but leaves our value alone.
+
+				Tables are deliberately exempt: an in-place child write keeps the
+				same table object, so `current == last` is true even though the
+				contents just changed. Comparing identity there would reintroduce
+				the exact silence this function exists to remove.
+			]]
+			if current == last and type(current) ~= "table" then
+				return
+			end
+
+			local old: any = last
+			last = current
+			listener(current, old)
+		end)
+
+		listener(last, nil)
 	end)
 end
 

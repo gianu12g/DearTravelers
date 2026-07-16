@@ -29,6 +29,13 @@ local Scaling = {}
 
 local tracked: { [UIScale]: true } = {}
 
+-- Transient motion factors, keyed by the same UIScale. Kept apart from .Scale so
+-- that this module stays the only writer of that property: a transition and a
+-- viewport change have to COMPOSE, and two systems assigning one property
+-- compose by whoever ran last. That is how a menu ends up stuck at 0.92 because
+-- the player resized the window while it was opening.
+local multipliers: { [UIScale]: number } = {}
+
 function Scaling.compute(viewport: Vector2): number
 	-- min() of both axes so content overflows on neither.
 	local raw = math.min(viewport.X / REFERENCE.X, viewport.Y / REFERENCE.Y)
@@ -48,7 +55,7 @@ end
 local function applyAll()
 	local scale = Scaling.compute(currentViewport())
 	for uiScale in tracked do
-		uiScale.Scale = scale
+		uiScale.Scale = scale * (multipliers[uiScale] or 1)
 	end
 end
 
@@ -64,10 +71,23 @@ function Scaling.attach(root: GuiObject): UIScale
 	tracked[uiScale] = true
 	uiScale.Destroying:Connect(function()
 		tracked[uiScale] = nil
+		multipliers[uiScale] = nil
 	end)
 
-	uiScale.Scale = Scaling.compute(currentViewport())
+	uiScale.Scale = Scaling.compute(currentViewport()) * (multipliers[uiScale] or 1)
 	return uiScale
+end
+
+--[[
+	Multiplies a transient factor into the responsive scale -- an open
+	transition, a hover pop, a screen shake. Pass 1 to clear it.
+
+	Callers must not assign UIScale.Scale directly. This module owns it; the
+	multiplier is how you get a say without racing a viewport change.
+]]
+function Scaling.setMultiplier(uiScale: UIScale, multiplier: number)
+	multipliers[uiScale] = if multiplier == 1 then nil else multiplier
+	uiScale.Scale = Scaling.compute(currentViewport()) * multiplier
 end
 
 function Scaling.getReference(): Vector2
