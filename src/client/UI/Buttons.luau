@@ -108,9 +108,9 @@ local function bind(instance: Instance)
 	end
 
 	-- The button's OWN UIScale, never the screen root's. Nested UIScales
-	-- multiply, so hover motion composes with Scaling's responsive scale instead
-	-- of overwriting it and making the button the only thing on screen that
-	-- ignores the viewport.
+	-- multiply, so hover motion composes with the root's scale instead of
+	-- overwriting it -- the root's UIScale belongs to Transitions during a
+	-- "Scale" transition; a button writing it would fight over the same property.
 	local uiScale = instance:FindFirstChildOfClass("UIScale") or Instance.new("UIScale")
 	uiScale.Parent = instance
 
