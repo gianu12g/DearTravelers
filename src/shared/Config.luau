@@ -29,6 +29,7 @@
 ]]
 
 local RunService = game:GetService("RunService")
+local GroupService = game:GetService("GroupService")
 
 local Config = {}
 
@@ -41,7 +42,7 @@ function Config.isDeveloper(player: Player): boolean
 		return true
 	end
 
-	local ok, rank = pcall(player.GetRankInGroup, player, Config.GROUP_ID)
+	local ok, rank = pcall(GroupService.GetRolesInGroupAsync, GroupService, player, Config.GROUP_ID)
 	if not ok then
 		return false
 	end
