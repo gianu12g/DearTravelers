@@ -78,10 +78,11 @@ local PLAYER_DATA_TOKEN = Replica.Token("PlayerData")
 	(require caches), so doing it here is idempotent by construction; doing it in
 	Init() is only correct as long as nothing ever calls Init() twice.
 ]]
-local store = ProfileStore.New(PROFILE_STORE_NAME, TEMPLATE)
-if RunService:IsStudio() then
-	store = store.Mock
-end
+local liveStore = ProfileStore.New(PROFILE_STORE_NAME, TEMPLATE)
+-- Both branches expose the same persistence methods. Typing the result as the
+-- mock interface also accepts the live store, whose extra `.Mock` field is not
+-- needed below.
+local store: typeof(liveStore.Mock) = if RunService:IsStudio() then liveStore.Mock else liveStore
 
 local profiles: { [Player]: any } = {}
 local replicas: { [Player]: any } = {}
@@ -135,7 +136,10 @@ local function onPlayerAdded(player: Player)
 		the client so it can tell whose replica this is.
 	]]
 	local replica = Replica.New({
-		Token = PLAYER_DATA_TOKEN,
+		-- Replica.Token() returns the correct object at runtime. ReplicaServer's
+		-- bundled annotation mistakenly asks for its internal token class instead
+		-- of the returned token instance, so keep this compatibility cast local.
+		Token = PLAYER_DATA_TOKEN :: any,
 		Tags = { UserId = player.UserId },
 		Data = profile.Data,
 	})

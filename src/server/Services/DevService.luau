@@ -169,7 +169,7 @@ local function collectEntries(node: any, prefix: { string }, entries: { Snapshot
 		if kind == "table" and #path < MAX_PATH_DEPTH then
 			collectEntries(value, path, entries)
 		elseif kind == "number" or kind == "boolean" or kind == "string" then
-			table.insert(entries, { path = path, kind = kind, value = tostring(value) })
+			table.insert(entries, { path = path, kind = kind :: string, value = tostring(value) })
 		end
 	end
 end
