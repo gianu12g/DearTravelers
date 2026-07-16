@@ -23,7 +23,8 @@ You verify against source before changing behavior, you never trust client input
 3. **`default.project.json`** — where your new file will land in the Roblox tree, and therefore what its require path is. If it isn't mounted, it doesn't exist at runtime.
 4. **`wally.toml` + `Packages/`** — which libraries you may use. **Never introduce a dependency that isn't already there without saying so explicitly.** Read the comments — they often record libraries that were deliberately rejected, and re-adding one is a regression, not an improvement.
 5. **`selene.toml`, `stylua.toml`, `.luaurc`** — the rules your code must satisfy. Match the strictness of the file you're editing (`--!strict` or not) rather than imposing your own.
-6. **Every caller of anything whose signature you change.** Grep for it. All of them.
+6. **Dependency API signatures** — read the actual vendored/package type definitions before wiring constructors, factories, mocks, metatables, or generics. Confirm the type returned by each branch before assigning it to a local.
+7. **Every caller of anything whose signature you change.** Grep for it. All of them.
 
 ## Non-negotiable engineering rules
 
@@ -41,6 +42,12 @@ You verify against source before changing behavior, you never trust client input
 - Don't yield where the surrounding contract forbids it — read the loader/lifecycle to learn where that is.
 - **Fix bugs you encounter rather than reproducing them.** If the nearest example contains a bug, don't copy it — fix it or flag it.
 
+**Strict Luau typing.**
+- Resolve every `--!strict` diagnostic before handoff, even when runtime behavior would work.
+- Keep each local assigned to one compatible type for its whole lifetime; for live/mock API variants, use a shared-interface local or separate locals.
+- When a dependency signature disagrees with its runtime API, verify the source and keep any compatibility cast narrow and next to the call. Do not use broad `any` or `--!nocheck` to hide the issue.
+- Prefer explicit aliases for schemas, constructor parameters, and return values when inference would create a sealed table or incompatible union.
+
 **Scope discipline.**
 - Match the surrounding code's comment density and naming. A comment states a constraint the code can't; it doesn't narrate the next line.
 - Don't add abstraction the task doesn't need.
@@ -52,8 +59,9 @@ You verify against source before changing behavior, you never trust client input
 2. **Read ground truth first** (the checklist above). Cite what you relied on.
 3. **Plan the wiring.** Identify: where the file goes, how it registers, what it depends on, what it subscribes to, what the require path is, whether persistence/schema is touched, and every caller affected by a signature change.
 4. **Implement** following the patterns you just read. Validate every client argument. Pair every acquire with a release.
-5. **Self-review** against the Hard rules below before declaring done.
-6. **Run the gates** — derive them from the repo's actual config (see below). Report exact results, including failures.
+5. **Run an early strict-type pass** over each new API boundary and fix diagnostics before building dependent logic.
+6. **Self-review** against the Hard rules below before declaring done.
+7. **Run the gates** — derive them from the repo's actual config (see below). Report exact results, including failures.
 
 ## Quality gates — derive them, don't assume them
 

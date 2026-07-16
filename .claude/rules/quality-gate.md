@@ -95,6 +95,13 @@ Re-read every `.luau` file you changed and check each item. These are real parse
 
 ---
 
+### Strict typing and dependency boundaries
+
+- Design strict-typed locals before implementation. Values from different API variants, such as live and mock stores, may expose structurally different types; use separate locals or an explicit shared interface instead of late reassignment.
+- Read the actual vendored/package signature before calling constructors, factories, metatable APIs, or generics. Confirm parameter and return types at the boundary.
+- If a dependency signature is inaccurate but the runtime contract is verified, use one narrow, documented compatibility cast at that call site. Never spread `any` through the module or disable strict checking.
+- Treat every `--!strict` diagnostic as a defect to resolve before handoff, even when the code would run correctly.
+
 ## Gate 3: Runtime verification via the Roblox Studio MCP
 
 If Studio is running, verify behavior — a green build proves compilation, not that it works.
