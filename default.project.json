@@ -29,6 +29,9 @@
       "Services": {
         "$path": "src/server/Services"
       },
+      "Modules": {
+        "$path": "src/server/Modules"
+      },
       "ServerPackages": {
         "$path": "ServerPackages"
       },

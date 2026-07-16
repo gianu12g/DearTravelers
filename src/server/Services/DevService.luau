@@ -1,7 +1,7 @@
 --!strict
 --[[
-	Server authority for the developer console (Config.isDeveloper decides who,
-	Controllers/DevConsoleController is the UI). Every mutation a developer
+	Server authority for the developer console (the `developers` config below
+	decides who, Controllers/DevConsoleController is the UI). Every mutation a developer
 	makes goes through DataService.set -- the exact same write path a normal
 	gameplay service uses -- so a dev edit persists, replicates, and can never
 	touch profile.Data directly or produce a shape Replica can't send.
@@ -26,15 +26,43 @@
 	  broken profile. Refusing that shape here is cheaper than ever debugging it.
 ]]
 
+local ConfigService = game:GetService("ConfigService")
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Config = require(ReplicatedStorage.Shared.Config)
 local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("DevService")
+
+--[[
+	WHO is a developer now lives in the Creator Dashboard, not in this codebase.
+
+	Configs page -> key `developers`, type JSON object:
+		{ "userIds": [123, 456] }
+
+	Add a UserId there and they have the console within seconds -- no code change,
+	no republish. That is the entire reason this reads ConfigService rather than a
+	hardcoded list.
+
+	This replaced a group-rank check, and deliberately so. There is no IsStudio()
+	bypass: Studio reads the STAGED value of the config, so Studio tests the same
+	code path that ships. The old ALLOW_IN_STUDIO short-circuit is exactly what let
+	a broken live gate look healthy in Studio for as long as it did.
+
+	ConfigService is SERVER-ONLY -- "Attempting to call its methods from a client
+	script results in an error" -- which is why the client is TOLD its status over
+	Net.devAccess instead of computing it. That is not a weakening: authority was
+	never the client's to hold, and checkAccess below still re-checks every packet.
+
+	GetConfigAsync YIELDS and THROWS if the config has never loaded, so it lives in
+	Start(), never Init() (the Loader hard-errors on a yielding Init). Every failure
+	path leaves developerIds empty, which denies everyone -- fail closed, same as the
+	old code did on a group-API blip.
+]]
+local DEVELOPERS_CONFIG_KEY = "developers"
 
 local MAX_PATH_DEPTH = 6
 local MAX_KEY_LENGTH = 64
@@ -50,6 +78,57 @@ type SnapshotEntry = {
 
 local lastCommandAt: { [Player]: number } = {}
 local lastWarnAt: { [Player]: number } = {}
+
+-- A set, not an array: checkAccess runs this lookup on EVERY packet, so a linear
+-- scan of the list would be on the hot path. Empty until the config loads, and
+-- empty means nobody is a developer -- that is the fail-closed default, and every
+-- error path below deliberately leaves it that way.
+local developerIds: { [number]: true } = {}
+
+--[[
+	Roblox does not document whether GetValue() on a JSON-object config hands back
+	a decoded table or the raw JSON string -- the reference says only "Variant",
+	and this could not be tested against a live Studio session. So both shapes are
+	accepted. This is not defensive clutter; it is an undocumented API boundary,
+	and guessing wrong would silently deny every developer with no error to read.
+]]
+local function decodeDevelopers(raw: any): { [number]: true }
+	local ids: { [number]: true } = {}
+
+	local decoded: any = raw
+	if type(raw) == "string" then
+		-- JSONDecode throws on malformed input.
+		local ok, result = pcall(HttpService.JSONDecode, HttpService, raw)
+		if not ok then
+			log.warn(`config "{DEVELOPERS_CONFIG_KEY}" is not valid JSON -- nobody has console access`)
+			return ids
+		end
+		decoded = result
+	end
+
+	if type(decoded) ~= "table" or type(decoded.userIds) ~= "table" then
+		log.warn(`config "{DEVELOPERS_CONFIG_KEY}" is missing a userIds array -- nobody has console access`)
+		return ids
+	end
+
+	for _, id in decoded.userIds do
+		-- NaN defeats a range check (it fails every comparison), so it is rejected
+		-- explicitly rather than left to `id > 0` -- quality-gate.md trap #8.
+		if type(id) == "number" and id == id and id % 1 == 0 and id > 0 then
+			ids[id] = true
+		end
+	end
+
+	return ids
+end
+
+local function isDeveloper(player: Player): boolean
+	return developerIds[player.UserId] == true
+end
+
+local function publishAccess(player: Player)
+	Net.devAccess.sendTo({ allowed = isDeveloper(player) }, player)
+end
 
 local function withKey(prefix: { string }, key: string): { string }
 	local path: { string } = {}
@@ -206,14 +285,14 @@ local function checkAccess(player: Player): boolean
 	end
 	lastCommandAt[player] = now
 
-	if Config.isDeveloper(player) then
+	if isDeveloper(player) then
 		return true
 	end
 
 	local lastWarn = lastWarnAt[player]
 	if lastWarn == nil or now - lastWarn >= WARN_THROTTLE then
 		lastWarnAt[player] = now
-		log.warn(`{player.Name} ({player.UserId}) sent a dev command without the rank for it -- denied`)
+		log.warn(`{player.Name} ({player.UserId}) sent a dev command without being on the developers list -- denied`)
 	end
 	Net.devResult.sendTo({ ok = false, message = "not authorised" }, player)
 	return false
@@ -307,19 +386,83 @@ function DevService.Init()
 			onSet(data, player)
 		end
 	end)
+
+	Net.devRequestAccess.listen(function(_, player)
+		if player == nil then
+			return
+		end
+
+		--[[
+			Rate limited like every other packet, and for the reason the top
+			comment gives: anyone can send this, so a flood must cost us nothing.
+			It shares lastCommandAt deliberately -- a separate table would be a
+			third thing to remember to clear on PlayerRemoving.
+
+			No auth check: the answer IS the player's auth state, and telling
+			someone "no" reveals nothing they could not infer from the absence of
+			an icon.
+		]]
+		local now = os.clock()
+		local last = lastCommandAt[player]
+		if last ~= nil and now - last < MIN_COMMAND_INTERVAL then
+			return
+		end
+		lastCommandAt[player] = now
+
+		publishAccess(player)
+	end)
 end
 
 function DevService.Start()
-	-- Guard the ~= 0: an unpublished local place reports CreatorId 0, which is
-	-- neither "us" nor "someone else", just "not published yet" -- warning
-	-- there would be noise on every solo playtest.
-	if game.CreatorId ~= 0 and game.CreatorId ~= Config.GROUP_ID then
-		log.warn(
-			`this place's CreatorId ({game.CreatorId}) is not group {Config.GROUP_ID} -- nobody will ever pass the rank check here. Publish under the configured group, or update Config.GROUP_ID.`
-		)
+	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	Players.PlayerAdded:Connect(publishAccess)
+
+	--[[
+		GetConfigAsync yields, and throws if the config has never loaded -- hence
+		Start() and hence the pcall. A throw here is not fatal: developerIds stays
+		empty, every check denies, and the game runs fine without a dev console.
+	]]
+	local ok, snapshot = pcall(function()
+		return ConfigService:GetConfigAsync()
+	end)
+
+	if not ok then
+		log.warn(`could not load configs ({snapshot}) -- nobody has console access this server`)
+		return
 	end
 
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	local function reload()
+		developerIds = decodeDevelopers(snapshot:GetValue(DEVELOPERS_CONFIG_KEY))
+
+		local count = 0
+		for _ in developerIds do
+			count += 1
+		end
+		log.info(`{count} developer(s) on the list`)
+
+		-- Re-tell everyone: this is what makes adding a UserId in the dashboard
+		-- take effect on a running server instead of at the next restart.
+		for _, player in Players:GetPlayers() do
+			publishAccess(player)
+		end
+	end
+
+	reload()
+
+	--[[
+		The snapshot is a point-in-time object -- UpdateAvailable announces that
+		newer values exist but does NOT apply them, so Refresh() is ours to call.
+		Miss this and the dashboard's "no republish" promise quietly becomes
+		"no republish, but do restart the server".
+	]]
+	snapshot.UpdateAvailable:Connect(function()
+		local refreshed = pcall(function()
+			snapshot:Refresh()
+		end)
+		if refreshed then
+			reload()
+		end
+	end)
 
 	log.info("ready")
 end

@@ -44,6 +44,7 @@ local TEMPLATE = {
 	Version = DATA_VERSION,
 	Coins = 0,
 	Level = 1,
+	Experience = 0,
 	-- Nested tables are fine -- this is the whole reason Replica exists.
 	Inventory = {} :: { [string]: number },
 	Settings = {

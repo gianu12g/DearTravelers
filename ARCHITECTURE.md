@@ -5,7 +5,8 @@
 | Where | What lives there | Studio-safe to edit? |
 |---|---|---|
 | `src/server/Main.server.luau` | → `ServerScriptService.Main`. The only script in SSS. | **No — Rojo overwrites** |
-| `src/server/Services/` | → `ServerStorage.Services`. All server logic. | **No — Rojo overwrites** |
+| `src/server/Services/` | → `ServerStorage.Services`. Server lifecycle modules. | **No — Rojo overwrites** |
+| `src/server/Modules/` | → `ServerStorage.Modules`. Server helpers, no lifecycle. | **No — Rojo overwrites** |
 | `src/client/Main.client.luau` | → `StarterPlayerScripts.Main` | **No — Rojo overwrites** |
 | `src/client/Controllers/` | → `StarterPlayerScripts.Controllers`. All client logic. | **No — Rojo overwrites** |
 | `src/client/UI/` | → `StarterPlayerScripts.UI`. UI helpers, no lifecycle. | **No — Rojo overwrites** |

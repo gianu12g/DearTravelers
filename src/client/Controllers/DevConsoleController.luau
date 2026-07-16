@@ -1,7 +1,8 @@
 --!strict
 --[[
-	The developer console. Gated by Config.isDeveloper -- see
-	Services/DevService.luau for the server-side re-check that actually matters.
+	The developer console. Built only when the server tells us we're a developer
+	(Net.devAccess) -- see Services/DevService.luau, which owns that list and
+	performs the server-side re-check that actually matters.
 
 	Deliberately breaks UI-AND-MOTION.md's "Studio owns the GUIs" rule: this UI
 	is built here, in code, rather than authored under StarterGui.Screens.
@@ -18,17 +19,16 @@
 
 	Hiding the UI is NOT the security control. Rojo has no concept of "ship
 	this script to some players" -- every client downloads this LocalScript
-	regardless of rank, so a non-developer could still fire Net.devSet by hand
-	without ever seeing this icon. The only real gate is the rank re-check
-	DevService does on every packet. The Config.isDeveloper check below exists
-	so non-developers don't pay for a UI they can never use, not to keep
-	anyone out.
+	regardless, so a non-developer could still fire Net.devSet by hand without
+	ever seeing this icon. The only real gate is the re-check DevService does on
+	every packet. The devAccess packet exists so non-developers don't pay for a
+	UI they can never use, not to keep anyone out -- which is also why it is
+	safe for the server to simply tell us the answer.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Config = require(ReplicatedStorage.Shared.Config)
 local Icon = require(ReplicatedStorage.Packages.TopbarPlus)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -541,9 +541,50 @@ local function buildUI()
 	end)
 end
 
+--[[
+	The server told us whether we're a developer. We never work this out
+	ourselves any more: the list lives in a ConfigService config, and
+	ConfigService is server-only -- calling it from a client script errors.
+
+	Idempotent on purpose. The server re-sends this to everyone on every config
+	change, so the common case is being told the same answer we already have.
+]]
+local function setAccess(allowed: boolean)
+	if allowed then
+		if screenGui == nil then
+			buildUI()
+			log.info("ready")
+		end
+		return
+	end
+
+	--[[
+		Revoked mid-session -- removed from the list, config republished. Tear the
+		console down rather than leave a UI whose every command the server now
+		rejects. Purely cosmetic, like the rest of this check: authority is the
+		server's and DevService re-checks it per packet.
+	]]
+	local gui = screenGui
+	if gui ~= nil then
+		screenGui = nil
+		gui:Destroy()
+	end
+	cleanup()
+end
+
 local DevConsoleController = {}
 
 function DevConsoleController.Init()
+	--[[
+		Registered in Init, not Start. The server sends devAccess as soon as it
+		sees us join, and a listener that does not exist yet misses it
+		permanently and silently -- the same trap DataController.luau documents
+		for Replica.OnNew, and the reason Init and Start are separate phases.
+	]]
+	Net.devAccess.listen(function(data)
+		setAccess(data.allowed)
+	end)
+
 	Net.devResult.listen(function(data)
 		applyResult(data)
 		if data.ok then
@@ -563,15 +604,18 @@ function DevConsoleController.Init()
 	end)
 end
 
-function DevConsoleController.Start()
-	-- GetRankInGroup yields on its first call this session -- that's exactly
-	-- why this check lives here and not in Init, which must never yield.
-	if not Config.isDeveloper(player) then
-		return
-	end
+--[[
+	Ask the server whether we're a developer. The console is then built by
+	setAccess() when devAccess comes back.
 
-	buildUI()
-	log.info("ready")
+	Asking here rather than waiting to be told is deliberate. The server also
+	pushes devAccess when it sees us join, but that push races us: a RemoteEvent
+	fired at a client whose listener does not exist yet is dropped, not queued,
+	so a fresh joiner could silently never get a console. By Start(), Init() has
+	registered the listener, so the reply cannot be lost.
+]]
+function DevConsoleController.Start()
+	Net.devRequestAccess.send()
 end
 
 return DevConsoleController
