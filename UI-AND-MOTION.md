@@ -154,3 +154,35 @@ exactly one writer and never two disagreeing about the current value.
 
 - **Names address screens, so they must be unique.** Two `Shop`s earns a warn and
   the newer wins.
+
+---
+
+## React (added 2026-07-17, moved to TypeScript 2026-07-17)
+
+React UI is written in **TypeScript** (roblox-ts), not Luau. `@rbxts/react` and
+`@rbxts/react-roblox` come from npm (`package.json`), not Wally -- the Wally
+copies (`jsdotlua/react`, `jsdotlua/react-roblox`) and `UILabs` from Wally were
+removed the same day, so there's exactly one React in the DataModel.
+
+Source lives under `ts/client/UI` (`Components/`, `Stories/`), compiled by
+roblox-ts. Run `npm run watch` alongside `rojo serve`; `npm run build` does a
+one-shot compile. Output lands in `out/` and is mounted at
+`StarterPlayer.StarterPlayerScripts.TS` (optional path -- an empty `out/client`
+doesn't break the Rojo build). `out/shared` and `out/server` mount the same way
+under `ReplicatedStorage.TS` / `ServerStorage.TS` for when shared or
+server-side TS shows up. `ReplicatedStorage.rbxts_include` carries the rbxts
+runtime plus `node_modules/@rbxts` -- required by every compiled TS module,
+don't delete it.
+
+UI Labs advanced-React stories are `*.story.tsx` in `ts/client/UI/Stories`,
+pairing with components in `ts/client/UI/Components` -- see
+`ExampleButton.tsx` / `ExampleButton.story.tsx` for the shape.
+
+The rest of the game stays Luau. TS is opt-in per script -- nothing forces a
+module to move, and plain Luau modules keep working exactly as before.
+
+Nothing above changes: a React root mounted into a `ScreenGui` under
+`StarterGui.Screens` (or cloned into `PlayerGui`) is still just a screen,
+addressed by name through `UIController` like any other. React owns what's
+inside the root; the swap system doesn't know or care how a screen was built,
+Luau or TypeScript.

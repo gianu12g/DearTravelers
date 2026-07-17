@@ -1,0 +1,19 @@
+{
+  "name": "dear-travelers",
+  "private": true,
+  "scripts": {
+    "build": "rbxtsc",
+    "watch": "rbxtsc -w"
+  },
+  "devDependencies": {
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.939",
+    "roblox-ts": "^3.0.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@rbxts/react": "^17.3.7-ts.2",
+    "@rbxts/react-roblox": "^17.3.7-ts.2",
+    "@rbxts/ui-labs": "^2.4.2"
+  }
+}

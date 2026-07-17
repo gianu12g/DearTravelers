@@ -16,6 +16,12 @@ ByteNet = "ffrostflame/bytenet@0.4.6"
 # so a LocalScript can require it), so it belongs here rather than in server-dependencies.
 TopbarPlus = "1foreverhd/topbarplus@3.4.0"
 
+# NOTE: React/ReactRoblox/UILabs were briefly vendored here via Wally (2026-07-17)
+# and removed the same day (2026-07-17): UI moved to TypeScript (roblox-ts), and
+# React now comes from npm (`@rbxts/react`, `@rbxts/react-roblox`, `@rbxts/ui-labs`)
+# instead — see package.json / tsconfig.json. Two React copies (Wally + npm) in one
+# DataModel is a footgun, so only the npm stack is kept.
+
 # NOTE: no motion library. Ripple (littensy/ripple) was evaluated and dropped —
 # 0.10.2 resolves its internals with `require("@self/config")` (Luau string-requires),
 # which is not reliably enabled in live Roblox servers. UI transitions use TweenService

@@ -13,3 +13,9 @@ sourcemap.json
 /ServerPackages
 /DevPackages
 wally.lock
+
+# npm / roblox-ts (restored via `npm install`; out+include are rbxtsc build output)
+/node_modules
+/out
+/include
+*.tsbuildinfo

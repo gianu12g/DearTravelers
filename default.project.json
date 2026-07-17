@@ -16,6 +16,22 @@
       },
       "ReplicaClient": {
         "$path": "src/vendor/Replica/ReplicaClient.luau"
+      },
+
+      "rbxts_include": {
+        "$path": "include",
+        "node_modules": {
+          "$className": "Folder",
+          "@rbxts": {
+            "$path": "node_modules/@rbxts"
+          },
+          "@rbxts-js": {
+            "$path": "node_modules/@rbxts-js"
+          }
+        }
+      },
+      "TS": {
+        "$path": { "optional": "out/shared" }
       }
     },
 
@@ -38,6 +54,10 @@
 
       "ReplicaServer": {
         "$path": "src/vendor/Replica/ReplicaServer.luau"
+      },
+
+      "TS": {
+        "$path": { "optional": "out/server" }
       }
     },
 
@@ -51,6 +71,10 @@
         },
         "UI": {
           "$path": "src/client/UI"
+        },
+
+        "TS": {
+          "$path": { "optional": "out/client" }
         }
       }
     }
