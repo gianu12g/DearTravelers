@@ -104,10 +104,17 @@ end)
 	ContentProvider:PreloadAsync accepts bare "rbxassetid://" strings
 	alongside Instances.
 ]]
-local DailyRewardsConfig = require(ReplicatedStorage.Shared.UISystem.Config.DailyRewards)
-local PlaytimeRewardsConfig = require(ReplicatedStorage.Shared.UISystem.Config.PlaytimeRewards)
-local PromotionConfig = require(ReplicatedStorage.Shared.UISystem.Config.Promotion)
-local WheelSpinConfig = require(ReplicatedStorage.Shared.UISystem.Config.WheelSpin)
+-- ReplicatedFirst runs before ReplicatedStorage's descendants are guaranteed
+-- to exist on the client. These modules are plain config tables and are safe
+-- to require here, but their folder chain still has to finish replicating.
+local shared = ReplicatedStorage:WaitForChild("Shared")
+local uiSystem = shared:WaitForChild("UISystem")
+local config = uiSystem:WaitForChild("Config")
+
+local DailyRewardsConfig = require(config:WaitForChild("DailyRewards") :: ModuleScript)
+local PlaytimeRewardsConfig = require(config:WaitForChild("PlaytimeRewards") :: ModuleScript)
+local PromotionConfig = require(config:WaitForChild("Promotion") :: ModuleScript)
+local WheelSpinConfig = require(config:WaitForChild("WheelSpin") :: ModuleScript)
 
 local targets: { Instance | string } = {}
 
