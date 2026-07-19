@@ -50,6 +50,33 @@ local TEMPLATE = {
 	Settings = {
 		MusicEnabled = true,
 	},
+
+	--[[
+		Ported UISystem feature set (PORT-SPEC.md §2). Namespaced under one
+		key so it never collides with existing fields. No `Cash` field here:
+		the source's Cash maps onto the EXISTING top-level `Coins` above --
+		CoinsService already owns currency, so UI reads Coins directly and
+		formats it with Shared.UISystem.Format.FormatNumber. The source
+		template also had three dead `Unlocked` fields (PlaytimeRewards,
+		DailyRewards, FriendsReward) that nothing ever read; dropped.
+	]]
+	UISystem = {
+		GiftedPasses = {},
+		Packs = {},
+		PlaytimeRewards = { StartTimestamp = 0, StartPlaytime = 0, ClaimedRewards = {} },
+		DailyRewards = { StartTimestamp = 0, ClaimedRewards = {} },
+		FriendsReward = { JoinedFriends = {}, Claimed = false },
+		GroupReward = false,
+		-- Config.WheelSpin.StartingSpins, hardcoded rather than required in:
+		-- TEMPLATE is a static literal everywhere else in this file, and a
+		-- cross-require into UISystem config from the generic DataService
+		-- would be the only one here.
+		Spins = 1,
+		RedeemedCodes = {},
+		LastSessionTime = 0,
+		Playtime = 0,
+		Settings = { Music = 0.9, SFX = 0.9 },
+	},
 }
 
 export type PlayerData = typeof(TEMPLATE)
@@ -118,6 +145,7 @@ local function onPlayerAdded(player: Player)
 	profile.OnSessionEnd:Connect(function()
 		profiles[player] = nil
 		if replicas[player] ~= nil then
+			-- No LastSessionTime write here: this branch fires only on a stolen session, so this server no longer owns the profile to persist it -- onPlayerRemoving writes it; the stealing server writes its own.
 			replicas[player]:Destroy()
 			replicas[player] = nil
 		end
@@ -177,6 +205,10 @@ end
 local function onPlayerRemoving(player: Player)
 	local replica = replicas[player]
 	if replica ~= nil then
+		-- Session-end timestamp (PORT-SPEC.md §2). Same call DataService.set
+		-- makes internally -- done here directly, before Destroy(), since
+		-- there is nothing left to write through afterwards.
+		replica:Set({ "UISystem", "LastSessionTime" }, os.time())
 		replica:Destroy()
 		replicas[player] = nil
 	end

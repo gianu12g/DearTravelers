@@ -13,3 +13,6 @@ sourcemap.json
 /ServerPackages
 /DevPackages
 wally.lock
+
+# npm dependencies (this is a Wally project; guards against a wrong-directory `npm install`)
+node_modules/
