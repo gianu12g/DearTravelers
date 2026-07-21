@@ -33,7 +33,7 @@ local LETTER_STROKE_NAME = "LetterStroke"
 
 local SOUND_NAME = "ClickSound"
 local SOUND_ID = "rbxassetid://84953529887338"
-local SOUND_VOLUME = 0.5
+local SOUND_VOLUME = 0.75
 local SOUND_LOAD_TIMEOUT = 3
 local PLAYBACK_SPEED_MIN = 1
 local PLAYBACK_SPEED_MAX = 1.2
