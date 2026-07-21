@@ -3,7 +3,7 @@
 	Binds the merge-gameplay carry mechanic to the Studio-authored controls in
 	PlayerGui.DropLaunchUI.CarryActions. Studio owns the GUI and its Ui-* motion
 	and sound attributes; this controller only owns carry-state visibility and
-	the Drop button's network request.
+	the A.Drop button's network request.
 
 	DropLaunchUI resets with PlayerGui on respawn, so references are resolved
 	lazily and cached only while their ScreenGui clone is still parented. A new
@@ -58,7 +58,7 @@ local function resolveUi(): (Frame, TextButton)
 	local playerGui = player:WaitForChild("PlayerGui")
 	local ui = playerGui:WaitForChild("DropLaunchUI") :: ScreenGui
 	local actions = ui:WaitForChild("CarryActions") :: Frame
-	local button = actions:WaitForChild("Drop") :: TextButton
+	local button = actions:WaitForChild("A.Drop") :: TextButton
 
 	dropLaunchUi = ui
 	carryActions = actions

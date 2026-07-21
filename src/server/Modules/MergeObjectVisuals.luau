@@ -35,6 +35,16 @@ local CARRY_ROTATION_Y_ATTRIBUTE = "CarryRotationY"
 local CARRY_ROTATION_Z_ATTRIBUTE = "CarryRotationZ"
 local MUSH_SOUND_ID_ATTRIBUTE = "MushSoundId"
 local MUSH_SOUND_VOLUME_ATTRIBUTE = "MushSoundVolume"
+local MUSH_DIRECTION_ATTRIBUTE = "MushDirection"
+
+local MUSH_DIRECTIONS: { [string]: string } = {
+	top = "Top",
+	bottom = "Bottom",
+	left = "Left",
+	right = "Right",
+	front = "Front",
+	back = "Back",
+}
 
 local warned: { [string]: boolean } = {}
 
@@ -279,6 +289,29 @@ function MergeObjectVisuals.getMushSound(tier: number): (string, number)
 		else 0.5
 
 	return soundId, volume
+end
+
+function MergeObjectVisuals.getMushDirection(tier: number): string
+	local template = templateForTier(tier)
+	if template == nil then
+		return "Top"
+	end
+
+	local rawDirection = template:GetAttribute(MUSH_DIRECTION_ATTRIBUTE)
+	if type(rawDirection) == "string" then
+		local direction = MUSH_DIRECTIONS[string.lower(rawDirection)]
+		if direction ~= nil then
+			return direction
+		end
+	end
+
+	if rawDirection ~= nil then
+		warnOnce(
+			template.Name .. ":" .. MUSH_DIRECTION_ATTRIBUTE,
+			`{template:GetFullName()}.{MUSH_DIRECTION_ATTRIBUTE} must be Top, Bottom, Left, Right, Front, or Back -- using Top`
+		)
+	end
+	return "Top"
 end
 
 return MergeObjectVisuals

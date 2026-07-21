@@ -32,6 +32,9 @@ that template while keeping its `TierN` name.
 - Set `MushSoundId` to that tier's numeric Roblox audio asset ID (stored as a
   string) and `MushSoundVolume` to its playback volume. An empty ID keeps the
   Mush animation and speed reward but makes that tier's interaction silent.
+- Set the string `MushDirection` to `Top`, `Bottom`, `Left`, `Right`, `Front`,
+  or `Back`. It controls which local side presses into the model; `Front` is
+  local -Z. Missing or invalid values safely use `Top`.
 - Visual parts are made massless and non-collidable, then welded to the hidden
   gameplay root. The root remains the only pickup and merge hitbox.
 - Scripts inside templates are removed when cloned. Attachments, particles,

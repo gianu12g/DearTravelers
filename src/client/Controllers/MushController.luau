@@ -1,20 +1,23 @@
 --!strict
 --[[
-	Binds DropLaunchUI.CarryActions.Mush. The server approves the interaction
-	and owns the temporary WalkSpeed reward; this controller only plays the
-	tier-configured ASMR sound and squashes the carried visual locally.
+	Mush is a contextual carry action: any click or completed touch tap while an
+	object is picked up asks the server to activate it. B.Mush is display-only
+	and shows the server-owned five-second cooldown.
 
-	Only the visual model's Weld C0 and BasePart sizes are animated. The hidden
-	MergeObject gameplay root never changes size, so pickup/merge detection is
-	stable throughout the effect.
+	The server approves the interaction and owns the temporary WalkSpeed reward;
+	this controller plays the tier-configured ASMR sound and squashes the carried
+	visual locally. Only VisualWeld C0 values and visual BasePart sizes animate.
+	The hidden MergeObject gameplay root never changes size, so pickup/merge
+	detection remains stable throughout the effect.
 ]]
 
-local CollectionService = game:GetService("CollectionService")
 local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Log = require(ReplicatedStorage.Shared.Log)
@@ -24,12 +27,20 @@ local log = Log.new("MushController")
 
 local player = Players.LocalPlayer
 
-local SQUASH_SCALE = Vector3.new(1.12, 0.55, 1.12)
+local COMPRESS_SCALE = 0.55
+local SPREAD_SCALE = 1.12
 local SQUASH_IN = TweenInfo.new(0.16, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 local SQUASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 local SQUASH_HOLD = 0.08
 local REQUEST_TIMEOUT = 1
 local SOUND_LIFETIME = 10
+local COOLDOWN_FALLBACK = 5
+local READY_TEXT = "CD: 0"
+local PENDING_TEXT = "CD: 5"
+local COOLDOWN_GRADIENT = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 95, 95)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 25, 25)),
+})
 
 type VisualState = {
 	part: BasePart,
@@ -42,9 +53,12 @@ type VisualState = {
 
 local MushController = {}
 
-local mushButton: TextButton? = nil
-local connectedButton: TextButton? = nil
-local activatedConnection: RBXScriptConnection? = nil
+local cooldownDisplay: TextLabel? = nil
+local cooldownGradient: UIGradient? = nil
+local readyGradientColor: ColorSequence? = nil
+local gradientIsCooldown: boolean? = nil
+local displayLabels: { TextLabel } = {}
+local lastDisplayText: string? = nil
 local requestPending = false
 local activeSquishes: { [BasePart]: boolean } = {}
 
@@ -96,15 +110,32 @@ local function playMushSound(root: BasePart, soundId: string, volume: number)
 	sound:Play()
 end
 
-local function collectVisualStates(root: BasePart): { VisualState }
+local function squashGeometry(root: BasePart, direction: string): (Vector3, Vector3)
+	if direction == "Bottom" then
+		return Vector3.new(SPREAD_SCALE, COMPRESS_SCALE, SPREAD_SCALE), Vector3.new(0, root.Size.Y / 2, 0)
+	elseif direction == "Left" then
+		return Vector3.new(COMPRESS_SCALE, SPREAD_SCALE, SPREAD_SCALE), Vector3.new(root.Size.X / 2, 0, 0)
+	elseif direction == "Right" then
+		return Vector3.new(COMPRESS_SCALE, SPREAD_SCALE, SPREAD_SCALE), Vector3.new(-root.Size.X / 2, 0, 0)
+	elseif direction == "Front" then
+		return Vector3.new(SPREAD_SCALE, SPREAD_SCALE, COMPRESS_SCALE), Vector3.new(0, 0, root.Size.Z / 2)
+	elseif direction == "Back" then
+		return Vector3.new(SPREAD_SCALE, SPREAD_SCALE, COMPRESS_SCALE), Vector3.new(0, 0, -root.Size.Z / 2)
+	end
+
+	-- Top is both the default and the invalid-value fallback.
+	return Vector3.new(SPREAD_SCALE, COMPRESS_SCALE, SPREAD_SCALE), Vector3.new(0, -root.Size.Y / 2, 0)
+end
+
+local function collectVisualStates(root: BasePart, direction: string): { VisualState }
 	local visual = root:FindFirstChild("Visual")
 	if visual == nil then
 		return {}
 	end
 
+	local scale, anchor = squashGeometry(root, direction)
 	local states: { VisualState } = {}
 	local candidates = if visual:IsA("BasePart") then { visual } else visual:GetDescendants()
-	local bottom = -root.Size.Y / 2
 
 	for _, candidate in candidates do
 		if not candidate:IsA("BasePart") then
@@ -116,18 +147,13 @@ local function collectVisualStates(root: BasePart): { VisualState }
 		end
 
 		local c0 = weld.C0
-		local position = c0.Position
-		local targetPosition = Vector3.new(
-			position.X * SQUASH_SCALE.X,
-			bottom + (position.Y - bottom) * SQUASH_SCALE.Y,
-			position.Z * SQUASH_SCALE.Z
-		)
+		local targetPosition = anchor + (c0.Position - anchor) * scale
 		table.insert(states, {
 			part = candidate,
 			weld = weld,
 			size = candidate.Size,
 			c0 = c0,
-			targetSize = candidate.Size * SQUASH_SCALE,
+			targetSize = candidate.Size * scale,
 			targetC0 = CFrame.new(targetPosition) * c0.Rotation,
 		})
 	end
@@ -135,12 +161,12 @@ local function collectVisualStates(root: BasePart): { VisualState }
 	return states
 end
 
-local function squashVisual(root: BasePart)
+local function squashVisual(root: BasePart, direction: string)
 	if activeSquishes[root] then
 		return
 	end
 
-	local states = collectVisualStates(root)
+	local states = collectVisualStates(root, direction)
 	if #states == 0 then
 		return
 	end
@@ -178,95 +204,156 @@ local function squashVisual(root: BasePart)
 	end)
 end
 
-local function updateButtonState()
-	local button = mushButton
-	if button == nil or button.Parent == nil then
+local function setDisplayText(text: string)
+	if text == lastDisplayText then
 		return
 	end
-	local enabled = player:GetAttribute("MushBoostActive") ~= true and not requestPending
-	button.Active = enabled
-	button.Selectable = enabled
-end
+	lastDisplayText = text
 
-local function bindButton(button: TextButton)
-	if not CollectionService:HasTag(button, "UIButton") then
-		CollectionService:AddTag(button, "UIButton")
-	end
-
-	mushButton = button
-	if connectedButton == button then
-		updateButtonState()
-		return
-	end
-	if activatedConnection ~= nil then
-		activatedConnection:Disconnect()
-	end
-
-	connectedButton = button
-	activatedConnection = button.Activated:Connect(function()
-		if requestPending or player:GetAttribute("MushBoostActive") == true then
-			return
+	for _, label in displayLabels do
+		if label.Parent ~= nil then
+			label.Text = text
 		end
-		requestPending = true
-		updateButtonState()
-		Net.mergeMushRequest.send()
-
-		task.delay(REQUEST_TIMEOUT, function()
-			if player:GetAttribute("MushBoostActive") ~= true then
-				requestPending = false
-				updateButtonState()
-			end
-		end)
-	end)
-	updateButtonState()
+	end
 end
 
-local function resolveAndBindButton()
+local function setCooldownGradient(onCooldown: boolean)
+	local gradient = cooldownGradient
+	local readyColor = readyGradientColor
+	if gradient == nil or gradient.Parent == nil or readyColor == nil or gradientIsCooldown == onCooldown then
+		return
+	end
+
+	gradientIsCooldown = onCooldown
+	gradient.Color = if onCooldown then COOLDOWN_GRADIENT else readyColor
+end
+
+local function updateCooldownDisplay()
+	local display = cooldownDisplay
+	if display == nil or display.Parent == nil then
+		return
+	end
+
+	local boostActive = player:GetAttribute("MushBoostActive") == true
+	setCooldownGradient(boostActive or requestPending)
+
+	if boostActive then
+		local rawEndsAt = player:GetAttribute("MushBoostEndsAt")
+		local remaining = if type(rawEndsAt) == "number"
+			then math.max(0, rawEndsAt - Workspace:GetServerTimeNow())
+			else COOLDOWN_FALLBACK
+		setDisplayText(`CD: {math.max(1, math.ceil(remaining))}`)
+	elseif requestPending then
+		setDisplayText(PENDING_TEXT)
+	else
+		setDisplayText(READY_TEXT)
+	end
+end
+
+local function resolveDisplay()
 	local playerGui = player:WaitForChild("PlayerGui")
 	local ui = playerGui:WaitForChild("DropLaunchUI")
 	local actions = ui:WaitForChild("CarryActions")
-	local button = actions:WaitForChild("Mush")
-	if not button:IsA("TextButton") then
-		log.error(`{button:GetFullName()} must be a TextButton`)
+	local display = actions:WaitForChild("B.Mush")
+	if not display:IsA("TextLabel") then
+		log.error(`{display:GetFullName()} must be a TextLabel`)
 		return
 	end
-	bindButton(button)
+
+	local cooldown = display:WaitForChild("TextLabel")
+	if not cooldown:IsA("TextLabel") then
+		log.error(`{cooldown:GetFullName()} must be a TextLabel`)
+		return
+	end
+	local gradient = display:WaitForChild("UIGradient")
+	if not gradient:IsA("UIGradient") then
+		log.error(`{gradient:GetFullName()} must be a UIGradient`)
+		return
+	end
+
+	-- B.Mush.Instruc is authored helper copy, not stateful UI. Cooldown state
+	-- only changes the dedicated TextLabel and the container's direct gradient.
+	cooldownDisplay = cooldown
+	cooldownGradient = gradient
+	readyGradientColor = gradient.Color
+	gradientIsCooldown = nil
+	displayLabels = { cooldown }
+	lastDisplayText = nil
+	updateCooldownDisplay()
+end
+
+local function requestMush()
+	local root = findCarriedRoot()
+	if
+		requestPending
+		or player:GetAttribute("MushBoostActive") == true
+		or player:GetAttribute("CarryingTier") == nil
+		or root == nil
+	then
+		return
+	end
+
+	requestPending = true
+	updateCooldownDisplay()
+	Net.mergeMushRequest.send()
+
+	task.delay(REQUEST_TIMEOUT, function()
+		if player:GetAttribute("MushBoostActive") ~= true then
+			requestPending = false
+			updateCooldownDisplay()
+		end
+	end)
 end
 
 function MushController.Init()
 	Net.mergeMushActivated.listen(function(data)
 		requestPending = false
-		updateButtonState()
+		updateCooldownDisplay()
 
 		local root = findCarriedRoot()
 		if root == nil or root:GetAttribute("Tier") ~= data.tier then
 			return
 		end
 		playMushSound(root, data.soundId, data.soundVolume)
-		squashVisual(root)
+		squashVisual(root, data.direction)
 	end)
 
 	local boostChanged = player:GetAttributeChangedSignal("MushBoostActive")
 	boostChanged:Connect(function()
-		if player:GetAttribute("MushBoostActive") ~= true then
-			requestPending = false
-		end
-		updateButtonState()
+		requestPending = false
+		updateCooldownDisplay()
 	end)
 
-	task.spawn(resolveAndBindButton)
+	local boostEndsAtChanged = player:GetAttributeChangedSignal("MushBoostEndsAt")
+	boostEndsAtChanged:Connect(updateCooldownDisplay)
+
+	UserInputService.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			requestMush()
+		end
+	end)
+
+	-- TouchTap excludes thumbstick/camera drags, so mobile movement does not
+	-- consume Mush; only a completed tap behaves like a mouse click.
+	UserInputService.TouchTap:Connect(function()
+		requestMush()
+	end)
+
+	RunService.Heartbeat:Connect(updateCooldownDisplay)
+
+	task.spawn(resolveDisplay)
 	task.spawn(function()
 		local playerGui = player:WaitForChild("PlayerGui")
 		playerGui.ChildAdded:Connect(function(child)
 			if child.Name == "DropLaunchUI" and child:IsA("ScreenGui") then
-				task.spawn(resolveAndBindButton)
+				task.spawn(resolveDisplay)
 			end
 		end)
 	end)
 end
 
 function MushController.Start()
-	log.info("ready (DropLaunchUI.Mush)")
+	log.info("ready (any click/tap while carrying; DropLaunchUI.B.Mush cooldown)")
 end
 
 return MushController

@@ -1036,6 +1036,7 @@ local function clearMushBoost(player: Player)
 
 	mushBoosts[player] = nil
 	player:SetAttribute("MushBoostActive", nil)
+	player:SetAttribute("MushBoostEndsAt", nil)
 	if state.humanoid.Parent ~= nil then
 		state.humanoid.WalkSpeed = state.originalWalkSpeed
 	end
@@ -1058,12 +1059,17 @@ local function activateMush(player: Player)
 		originalWalkSpeed = humanoid.WalkSpeed,
 	}
 	mushBoosts[player] = state
+	player:SetAttribute("MushBoostEndsAt", Workspace:GetServerTimeNow() + MUSH_BOOST_DURATION)
 	player:SetAttribute("MushBoostActive", true)
 	humanoid.WalkSpeed = state.originalWalkSpeed + MUSH_BOOST_AMOUNT
 
 	local tier = sanitizeTier(carry.entry.Tier)
 	local soundId, soundVolume = MergeObjectVisuals.getMushSound(tier)
-	Net.mergeMushActivated.sendTo({ tier = tier, soundId = soundId, soundVolume = soundVolume }, player)
+	local direction = MergeObjectVisuals.getMushDirection(tier)
+	Net.mergeMushActivated.sendTo(
+		{ tier = tier, soundId = soundId, soundVolume = soundVolume, direction = direction },
+		player
+	)
 
 	task.delay(MUSH_BOOST_DURATION, function()
 		if mushBoosts[player] == state then

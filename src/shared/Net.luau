@@ -152,6 +152,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 				tier = ByteNet.uint8,
 				soundId = ByteNet.string,
 				soundVolume = ByteNet.float64,
+				direction = ByteNet.string,
 			}),
 		}),
 	}
