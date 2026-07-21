@@ -40,6 +40,35 @@ MergeConfig.MIN_GAP = 1
 -- rather than spinning or forcing an overlapping placement.
 MergeConfig.MAX_PLACEMENT_ATTEMPTS = 20
 
+-- Phase 2: carry + ram-to-merge tuning.
+-- Gap between a carried object's near surface and the character's torso, so
+-- a large tier's cube doesn't clip into the character model.
+MergeConfig.CARRY_GAP = 1.5
+-- Extra slack beyond the sum of both objects' half-sizes before a ram counts
+-- as a merge -- exact-contact-only would feel unresponsive given the carried
+-- part only updates position once per Heartbeat.
+MergeConfig.MERGE_EPSILON = 0.75
+-- How far (horizontal, matching this module's 2D pad model) the owning
+-- player's character must move away from a just-dropped/just-merged/
+-- just-cancelled part before it re-arms for pickup. Without this a part
+-- placed at or right beside the player's own feet gets instantly re-grabbed,
+-- and the player can never actually put anything down. Deliberately a
+-- distance, not a timer: walking away and back gets it re-armed exactly
+-- when that feels earned, not on an arbitrary clock.
+MergeConfig.REARM_CLEARANCE = 3
+-- How long the owner must stay CONTINUOUSLY outside REARM_CLEARANCE before a
+-- part re-arms. A pure instant-outside check fires too early for a merge
+-- result specifically: at the moment commitMerge runs, the ramming player's
+-- root is already past halfSize + CARRY_GAP (the carry offset) plus
+-- 2*halfSize + MERGE_EPSILON (the merge threshold) from the result's
+-- position -- comfortably outside REARM_CLEARANCE on the very first
+-- Heartbeat -- and their own ramming momentum then carries them forward
+-- back over the part it just re-armed. At walkspeed 16 a player crosses the
+-- ~0.75-stud MERGE_EPSILON gap into the radius within a couple of frames, so
+-- any momentum overrun resets the accumulator before it matters; a player
+-- genuinely walking away clears this window imperceptibly.
+MergeConfig.REARM_OUTSIDE_SECONDS = 0.5
+
 --[[
 	10 tiers, gray -> near-white. Size grows per tier; tier 10 stays at 9
 	studs so it never exceeds the pad inset (35 - PAD_MARGIN on a 70-stud

@@ -121,5 +121,21 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		devRequestAccess = ByteNet.definePacket({
 			value = ByteNet.nothing,
 		}),
+
+		--[[
+			client -> server. "Drop whatever I'm carrying." No payload -- the
+			packet carries no position on purpose. MergeService computes the
+			drop spot itself from the character's CURRENT position at the
+			moment this arrives; trusting a client-sent coordinate would let
+			someone drop (and therefore relocate) an object anywhere, on
+			anyone's pad, from anywhere on the map.
+
+			A no-op if the sender isn't carrying anything -- MergeService just
+			returns, same as every other "not in the state this implies"
+			packet in this file.
+		]]
+		mergeDropRequest = ByteNet.definePacket({
+			value = ByteNet.nothing,
+		}),
 	}
 end)
