@@ -96,7 +96,7 @@ local TEMPLATE = {
 		RedeemedCodes = {},
 		LastSessionTime = 0,
 		Playtime = 0,
-		Settings = { Music = 0.1, SFX = 0.9 },
+		Settings = { Music = 0.1, SFX = 0.9, Keyboard = 1 },
 	},
 }
 

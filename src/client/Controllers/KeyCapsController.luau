@@ -17,6 +17,7 @@ local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
 local Log = require(ReplicatedStorage.Shared.Log)
@@ -34,6 +35,7 @@ local LETTER_STROKE_NAME = "LetterStroke"
 local SOUND_NAME = "ClickSound"
 local SOUND_ID = "rbxassetid://84953529887338"
 local SOUND_VOLUME = 0.75
+local SOUND_GROUP_NAME = "Keyboard"
 local SOUND_LOAD_TIMEOUT = 3
 local PLAYBACK_SPEED_MIN = 1
 local PLAYBACK_SPEED_MAX = 1.2
@@ -128,6 +130,23 @@ local previousLetter = ""
 
 local LightUpKeysController = {}
 
+local function getKeyboardSoundGroup(): SoundGroup
+	local existing = SoundService:FindFirstChild(SOUND_GROUP_NAME)
+	if existing ~= nil then
+		if not existing:IsA("SoundGroup") then
+			error(`SoundService.{SOUND_GROUP_NAME} must be a SoundGroup, got {existing.ClassName}`, 0)
+		end
+		return existing
+	end
+
+	local group = Instance.new("SoundGroup")
+	group.Name = SOUND_GROUP_NAME
+	group.Parent = SoundService
+	return group
+end
+
+local keyboardSoundGroup = getKeyboardSoundGroup()
+
 local function createLetterGui(key: MeshPart): SurfaceGui?
 	if key:FindFirstChild(KEY_GUI_NAME) ~= nil then
 		return nil
@@ -197,6 +216,7 @@ local function playKeySound(key: MeshPart)
 	sound.Name = SOUND_NAME
 	sound.SoundId = SOUND_ID
 	sound.Volume = SOUND_VOLUME
+	sound.SoundGroup = keyboardSoundGroup
 	sound.PlaybackSpeed = math.random(PLAYBACK_SPEED_MIN * 100, PLAYBACK_SPEED_MAX * 100) / 100
 	sound.Parent = key
 

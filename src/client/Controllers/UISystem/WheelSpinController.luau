@@ -23,6 +23,7 @@ local Players = game:GetService("Players")
 local PolicyService = game:GetService("PolicyService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
 local DataController = require(script.Parent.Parent.DataController)
@@ -136,6 +137,9 @@ function WheelSpinController.Start()
 	local pointer = frame:WaitForChild("Pointer") :: GuiObject
 	local tickSound = frame:WaitForChild("Tick") :: Sound
 	local rewardSound = frame:WaitForChild("Reward") :: Sound
+	local sfxGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+	tickSound.SoundGroup = sfxGroup
+	rewardSound.SoundGroup = sfxGroup
 
 	Net.spinResult.listen(function(data)
 		requestPending = false

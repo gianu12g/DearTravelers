@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Music/SFX volume settings (PORT-SPEC.md §1, source
+	Music/SFX/keyboard volume settings (PORT-SPEC.md §1, source
 	ServerScriptService.Services.SettingsService, renamed UISettingsService --
 	"Settings" is generic enough to want the UISystem domain spelled out).
 
@@ -55,8 +55,8 @@ function UISettingsService.Init()
 		end
 
 		--[[
-			Settings = { Music = 0.9, SFX = 0.9 } in TEMPLATE -- a sealed
-			2-field record, not an indexed map, so a runtime string key needs
+			Settings = { Music = 0.1, SFX = 0.9, Keyboard = 1 } in TEMPLATE -- a
+			sealed 3-field record, not an indexed map, so a runtime string key needs
 			this cast to read through it. Verified against the template
 			shape directly, not guessed (ARCHITECTURE.md's Data section).
 		]]

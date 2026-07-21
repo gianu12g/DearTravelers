@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Music/SFX volume sliders. Ported from the source's
+	Music/SFX/keyboard volume sliders. Ported from the source's
 	Controllers/SettingsController.luau (renamed: this repo has no existing
 	SettingsController to collide with, but UISystem/ keeps every ported
 	controller namespaced together per PORT-SPEC.md §1).
@@ -23,31 +23,54 @@ local Net = require(ReplicatedStorage.Shared.UISystem.Net)
 
 local log = Log.new("UISettingsController")
 
-type SettingKey = "Music" | "SFX"
+type SettingKey = "Music" | "SFX" | "Keyboard"
 
 type SettingsData = {
 	Music: number,
 	SFX: number,
+	Keyboard: number,
 }
 
-local settings: SettingsData = { Music = 0.1, SFX = 0.9 }
+local settings: SettingsData = { Music = 0.1, SFX = 0.9, Keyboard = 1 }
 
 local UISettingsController = {}
 
 local function roundVolume(value: number): number
-	local rounded = math.round(value * 10) / 10
-	if rounded < 0.05 then
-		return 0
-	end
-	return rounded
+	return math.clamp(math.round(value * 10) / 10, 0, 1)
 end
 
 local function setDragPosition(dragger: GuiObject, value: number)
-	dragger.Position = UDim2.fromScale(roundVolume(value), dragger.Position.Y.Scale)
+	local bar = dragger.Parent
+	if bar == nil or not bar:IsA("GuiObject") or bar.AbsoluteSize.X <= 0 then
+		dragger.Position = UDim2.new(roundVolume(value), 0, dragger.Position.Y.Scale, dragger.Position.Y.Offset)
+		return
+	end
+
+	-- UIDragDetector keeps the entire thumb inside the bar, so the thumb's
+	-- Position.X.Scale cannot physically reach 0 or 1. Map the logical 0..1
+	-- volume range onto the thumb's actual left-to-right travel instead.
+	local thumbWidth = math.min(dragger.AbsoluteSize.X, bar.AbsoluteSize.X)
+	local travelWidth = bar.AbsoluteSize.X - thumbWidth
+	local left = roundVolume(value) * travelWidth
+	local anchorPosition = left + thumbWidth * dragger.AnchorPoint.X
+	local xScale = anchorPosition / bar.AbsoluteSize.X
+	dragger.Position = UDim2.new(xScale, 0, dragger.Position.Y.Scale, dragger.Position.Y.Offset)
 end
 
 local function getDragValue(dragger: GuiObject): number
-	return roundVolume(dragger.Position.X.Scale)
+	local bar = dragger.Parent
+	if bar == nil or not bar:IsA("GuiObject") then
+		return roundVolume(dragger.Position.X.Scale)
+	end
+
+	local travelWidth = bar.AbsoluteSize.X - dragger.AbsoluteSize.X
+	if travelWidth <= 0 then
+		return 0
+	end
+
+	local anchorPosition = dragger.Position.X.Scale * bar.AbsoluteSize.X + dragger.Position.X.Offset
+	local traveled = anchorPosition - dragger.AbsoluteSize.X * dragger.AnchorPoint.X
+	return roundVolume(traveled / travelWidth)
 end
 
 function UISettingsController.Start()
@@ -65,8 +88,14 @@ function UISettingsController.Start()
 	local sfxDrag = sfxBar:WaitForChild("Dragger") :: GuiObject
 	local sfxDetector = sfxDrag:WaitForChild("UIDragDetector") :: UIDragDetector
 
+	local keyboardHolder = holder:WaitForChild("Keyboard")
+	local keyboardBar = keyboardHolder:WaitForChild("Bar")
+	local keyboardDrag = keyboardBar:WaitForChild("Dragger") :: GuiObject
+	local keyboardDetector = keyboardDrag:WaitForChild("UIDragDetector") :: UIDragDetector
+
 	local musicGroup = SoundService:FindFirstChild("Music") :: SoundGroup?
 	local sfxGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+	local keyboardGroup = SoundService:FindFirstChild("Keyboard") :: SoundGroup?
 
 	local function applyVolumes()
 		if musicGroup ~= nil then
@@ -75,13 +104,18 @@ function UISettingsController.Start()
 		if sfxGroup ~= nil then
 			sfxGroup.Volume = settings.SFX
 		end
+		if keyboardGroup ~= nil then
+			keyboardGroup.Volume = settings.Keyboard
+		end
 	end
 
 	local function updateSetting(key: SettingKey, value: number)
 		if key == "Music" then
 			settings.Music = value
-		else
+		elseif key == "SFX" then
 			settings.SFX = value
+		else
+			settings.Keyboard = value
 		end
 		applyVolumes()
 	end
@@ -98,6 +132,7 @@ function UISettingsController.Start()
 
 	setDragPosition(musicDrag, settings.Music)
 	setDragPosition(sfxDrag, settings.SFX)
+	setDragPosition(keyboardDrag, settings.Keyboard)
 	applyVolumes()
 
 	DataController.observe({ "UISystem", "Settings" }, function(value: any)
@@ -107,11 +142,13 @@ function UISettingsController.Start()
 		settings = value
 		setDragPosition(musicDrag, settings.Music or 0)
 		setDragPosition(sfxDrag, settings.SFX or 0)
+		setDragPosition(keyboardDrag, settings.Keyboard or 0)
 		applyVolumes()
 	end)
 
 	bindSlider(musicDrag, musicDetector, "Music")
 	bindSlider(sfxDrag, sfxDetector, "SFX")
+	bindSlider(keyboardDrag, keyboardDetector, "Keyboard")
 
 	log.info("ready")
 end

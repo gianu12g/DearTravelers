@@ -149,7 +149,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		}),
 
 		-- client -> server. Update a settings volume slider. value is
-		-- ALWAYS a number (Music/SFX volume) -- unlike the source's
+		-- ALWAYS a number (Music/SFX/keyboard volume) -- unlike the source's
 		-- Packet.Any, the wire type itself rules out any other payload
 		-- shape reaching the server.
 		settingUpdate = ByteNet.definePacket({
