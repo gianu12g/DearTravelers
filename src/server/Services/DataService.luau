@@ -75,7 +75,7 @@ local TEMPLATE = {
 		RedeemedCodes = {},
 		LastSessionTime = 0,
 		Playtime = 0,
-		Settings = { Music = 0.9, SFX = 0.9 },
+		Settings = { Music = 0.1, SFX = 0.9 },
 	},
 }
 
@@ -84,7 +84,7 @@ export type PlayerData = typeof(TEMPLATE)
 -- Index N migrates version N -> N+1. Never delete or renumber one.
 local MIGRATIONS: { (data: any) -> () } = {}
 
-local PROFILE_STORE_NAME = "PlayerData_v1"
+local PROFILE_STORE_NAME = "PlayerData_v1.1"
 
 local DataService = {
 	-- Loads before anything that reads player data.

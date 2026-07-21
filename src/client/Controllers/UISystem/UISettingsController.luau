@@ -30,7 +30,7 @@ type SettingsData = {
 	SFX: number,
 }
 
-local settings: SettingsData = { Music = 0.9, SFX = 0.9 }
+local settings: SettingsData = { Music = 0.1, SFX = 0.9 }
 
 local UISettingsController = {}
 
