@@ -1,22 +1,18 @@
 --!strict
 --[[
-	The DROP button for the merge-gameplay loop's carry mechanic (Phase 2).
-	MergeService is server-authoritative for everything that matters --
-	pickup, carry, ram-to-merge, and drop-spot placement -- this controller
-	only shows a button and asks.
+	Binds the merge-gameplay carry mechanic to the Studio-authored controls in
+	PlayerGui.DropLaunchUI.CarryActions. Studio owns the GUI and its Ui-* motion
+	and sound attributes; this controller only owns carry-state visibility and
+	the Drop button's network request.
 
-	Deliberately breaks UI-AND-MOTION.md's "Studio owns the GUIs" rule, for
-	the same reason DevConsoleController does: this button's entire existence
-	is driven by a live per-player Attribute (CarryingTier), not by static
-	content anyone would author in Studio, and it must float over whatever
-	screen the player already has open rather than becoming one of
-	UIController's exclusive screens -- dropping has to work mid-menu the
-	same as any other HUD element.
+	DropLaunchUI resets with PlayerGui on respawn, so references are resolved
+	lazily and cached only while their ScreenGui clone is still parented. A new
+	clone is rebound and receives the current carry-state visibility.
 
 	CarryingTier is intentionally an Attribute, not Replica state (see
-	MergeService's PHASE 2 header note): it's public -- anyone standing
-	nearby can already see what a player is carrying -- so reading it here is
-	not a trust boundary, only a "should this client draw a button" signal.
+	MergeService's PHASE 2 header note): it's public -- anyone standing nearby
+	can already see what a player is carrying -- so reading it here is not a
+	trust boundary, only a "should this client draw the controls" signal.
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -28,87 +24,116 @@ local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("CarryController")
 
--- >=44px in both dimensions, the usual mobile-safe touch target size.
-local BUTTON_SIZE = UDim2.fromOffset(200, 56)
-local BUTTON_BOTTOM_OFFSET = 32
-local BACKGROUND_COLOR = Color3.fromRGB(230, 90, 70)
-local TEXT_COLOR = Color3.new(1, 1, 1)
-
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
 
 local CarryController = {}
 
+local dropLaunchUi: ScreenGui? = nil
+local carryActions: Frame? = nil
+local dropButton: TextButton? = nil
+
+local connectedButton: TextButton? = nil
+local activatedConnection: RBXScriptConnection? = nil
+local visibilityUpdate = 0
+
 --[[
-	Built once. `ResetOnSpawn = false` is what keeps it alive across
-	respawns: PlayerGui gets wiped and re-cloned from StarterGui on every
-	spawn (UI-AND-MOTION.md's gotcha), but this ScreenGui was never cloned
-	FROM StarterGui in the first place, so without this it would silently
-	vanish the first time the player dies.
+	Yields only on a cold cache or after PlayerGui is wiped on respawn. Keep
+	this behind task.spawn/event handlers so Init can connect CarryingTier first.
 ]]
-local function buildGui(): ScreenGui
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "CarryHud"
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.Enabled = false
+local function resolveUi(): (Frame, TextButton)
+	local cachedUi = dropLaunchUi
+	local cachedActions = carryActions
+	local cachedButton = dropButton
+	if
+		cachedUi ~= nil
+		and cachedUi.Parent ~= nil
+		and cachedActions ~= nil
+		and cachedActions.Parent ~= nil
+		and cachedButton ~= nil
+		and cachedButton.Parent ~= nil
+	then
+		return cachedActions, cachedButton
+	end
 
-	local button = Instance.new("TextButton")
-	button.Name = "DropButton"
-	button.AnchorPoint = Vector2.new(0.5, 1)
-	button.Position = UDim2.new(0.5, 0, 1, -BUTTON_BOTTOM_OFFSET)
-	button.Size = BUTTON_SIZE
-	button.BackgroundColor3 = BACKGROUND_COLOR
-	button.TextColor3 = TEXT_COLOR
-	button.Font = Enum.Font.GothamBold
-	button.TextSize = 22
-	button.Text = "DROP"
-	button.Parent = gui
+	local playerGui = player:WaitForChild("PlayerGui")
+	local ui = playerGui:WaitForChild("DropLaunchUI") :: ScreenGui
+	local actions = ui:WaitForChild("CarryActions") :: Frame
+	local button = actions:WaitForChild("Drop") :: TextButton
 
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 12)
-	corner.Parent = button
+	dropLaunchUi = ui
+	carryActions = actions
+	dropButton = button
 
-	-- Opt into Buttons.luau's hover/press motion (UI-AND-MOTION.md) rather
-	-- than hand-rolling it here.
-	CollectionService:AddTag(button, "UIButton")
-
-	button.Activated:Connect(function()
-		Net.mergeDropRequest.send()
-	end)
-
-	gui.Parent = playerGui
-	return gui
+	return actions, button
 end
 
-local screenGui: ScreenGui? = nil
+local function bindDropButton(button: TextButton)
+	-- The authored button has the UIKitController Ui-* tween/sound attributes.
+	-- It was not tagged in Studio, so retain the repo-wide UIButton opt-in too.
+	if not CollectionService:HasTag(button, "UIButton") then
+		CollectionService:AddTag(button, "UIButton")
+	end
 
-local function setCarrying(tier: unknown)
-	local gui = screenGui
-	if gui == nil then
+	if connectedButton == button then
 		return
 	end
-	gui.Enabled = tier ~= nil
+
+	if activatedConnection ~= nil then
+		activatedConnection:Disconnect()
+	end
+
+	connectedButton = button
+	activatedConnection = button.Activated:Connect(function()
+		Net.mergeDropRequest.send()
+	end)
+end
+
+local function queueCarryingVisibility(tier: unknown)
+	visibilityUpdate += 1
+	local thisUpdate = visibilityUpdate
+
+	task.spawn(function()
+		local actions, button = resolveUi()
+		if thisUpdate ~= visibilityUpdate then
+			return
+		end
+
+		bindDropButton(button)
+		actions.Visible = tier ~= nil
+	end)
+end
+
+local function watchPlayerGui()
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	playerGui.ChildAdded:Connect(function(child)
+		if child.Name ~= "DropLaunchUI" or not child:IsA("ScreenGui") then
+			return
+		end
+
+		queueCarryingVisibility(player:GetAttribute("CarryingTier"))
+	end)
 end
 
 function CarryController.Init()
-	screenGui = buildGui()
-
 	-- Split to a local before :Connect (quality-gate.md Gate 2) -- calling
 	-- :GetAttributeChangedSignal directly on the chained expression is the
 	-- same method-chain-off-a-call-result trap the checklist calls out.
 	local carryingTierChanged = player:GetAttributeChangedSignal("CarryingTier")
 	carryingTierChanged:Connect(function()
-		setCarrying(player:GetAttribute("CarryingTier"))
+		queueCarryingVisibility(player:GetAttribute("CarryingTier"))
 	end)
 
-	-- Read the current value once, right after connecting -- MergeService
-	-- could in principle set it before this Init() runs (same defensive
-	-- read every attribute-observer in this codebase does; see
-	-- MergeService.onPlayerAdded / BaseService's AssignedBase watcher).
-	setCarrying(player:GetAttribute("CarryingTier"))
+	-- PlayerGui resolution can yield, so start the respawn watcher only after
+	-- the attribute listener is connected.
+	task.spawn(watchPlayerGui)
 
-	log.info("ready")
+	-- Read the current value once, right after connecting -- MergeService
+	-- could set it before this Init() runs. queueCarryingVisibility defers the
+	-- yielding UI resolution without losing this defensive initial read.
+	queueCarryingVisibility(player:GetAttribute("CarryingTier"))
+
+	log.info("ready (DropLaunchUI)")
 end
 
 return CarryController

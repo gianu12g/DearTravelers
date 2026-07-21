@@ -569,8 +569,8 @@ local function initCashDisplay()
 
 	local tickSound = Instance.new("Sound")
 	tickSound.Name = "CashTick"
-	tickSound.SoundId = "rbxassetid://607665037"
-	tickSound.Volume = 1
+	tickSound.SoundId = "rbxassetid://92934806799441"
+	tickSound.Volume = 0.15
 	tickSound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 	tickSound.Parent = SoundService
 
@@ -589,16 +589,10 @@ local function initCashDisplay()
 		end
 
 		local startTime = os.clock()
-		local lastTick = 0
 		local connection: RBXScriptConnection
 		connection = RunService.RenderStepped:Connect(function()
 			local alpha = math.clamp((os.clock() - startTime) / duration, 0, 1)
 			setCashLabel(math.floor(from + (to - from) * alpha))
-
-			if to > from and os.clock() - lastTick >= 0.05 then
-				lastTick = os.clock()
-				tickSound:Play()
-			end
 
 			if alpha >= 1 then
 				setCashLabel(to)
@@ -660,6 +654,9 @@ local function initCashDisplay()
 			return
 		end
 
+		if diff > 0 then
+			tickSound:Play()
+		end
 		task.spawn(showTransactionBadge, diff)
 		tweenCashValue(old, coins, 0.5)
 	end)

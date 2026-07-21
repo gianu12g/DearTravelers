@@ -69,6 +69,13 @@ MergeConfig.REARM_CLEARANCE = 3
 -- genuinely walking away clears this window imperceptibly.
 MergeConfig.REARM_OUTSIDE_SECONDS = 0.5
 
+-- Phase 3: passive income. Every owned object earns BASE_INCOME * 2^(tier-1)
+-- per pulse -- $1 at tier 1, doubling each tier up to $512 at MAX_TIER (10).
+-- The doubling is deliberate (spec): a merge visibly doubles that object's
+-- earning rate, which is the whole point of merging rather than just hoarding.
+MergeConfig.INCOME_INTERVAL = 1 -- seconds between income pulses
+MergeConfig.BASE_INCOME = 1 -- $ per pulse at tier 1
+
 --[[
 	10 tiers, gray -> near-white. Size grows per tier; tier 10 stays at 9
 	studs so it never exceeds the pad inset (35 - PAD_MARGIN on a 70-stud
@@ -88,5 +95,27 @@ MergeConfig.Tiers = {
 	{ Name = "Aurora Crystal", Color = Color3.fromRGB(0, 229, 255), Size = 8.2 },
 	{ Name = "Radiant Prism", Color = Color3.fromRGB(245, 245, 255), Size = 9.0 },
 } :: { TierDef }
+
+--[[
+	The one place tier -> income is computed, so the server billboard (Phase
+	3's income tick) and the client's floating popups can never disagree on
+	what a given tier is worth -- both call this instead of each doing its
+	own math.
+
+	Guards its input the same way MergeService.sanitizeTier does (NaN
+	included -- every comparison against NaN is false, so it must be caught
+	before the clamp): callers on the client read this straight off a Part's
+	Tier attribute, which is `any` from Luau's perspective and not something
+	this module can assume was validated upstream.
+]]
+function MergeConfig.incomeForTier(tier: number): number
+	local safeTier = tier
+	if type(safeTier) ~= "number" or safeTier ~= safeTier then
+		safeTier = 1
+	end
+	safeTier = math.clamp(math.floor(safeTier), 1, MergeConfig.MAX_TIER)
+
+	return MergeConfig.BASE_INCOME * (2 ^ (safeTier - 1))
+end
 
 return MergeConfig

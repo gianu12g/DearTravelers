@@ -118,6 +118,15 @@
 	complaint. Every path that destroys a possibly-disarmed part (currently
 	just commitMerge, consuming the target) clears its `live.disarmed` entry
 	too, so no key ever outlives the Part it points at.
+
+	PHASE 3 -- PASSIVE INCOME: see runIncomeTick's own header note for the
+	full reasoning. In one line: one aggregated CoinsService.add() per player
+	per second, summed over data.Merge.Objects (not live.parts, not a remote,
+	not a per-object write), riding the same Heartbeat connection as Phase 2
+	rather than spawning a loop per player. The client's floating "+$X"
+	popups (IncomePopupController) are a pure visual guess in sync with this
+	tick only because both sides compute income the same way
+	(MergeConfig.incomeForTier) -- they do not talk to each other.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -127,7 +136,9 @@ local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
+local CoinsService = require(script.Parent.CoinsService)
 local DataService = require(script.Parent.DataService)
+local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -204,6 +215,11 @@ local carries: { [Player]: CarryState } = {}
 -- a Player).
 local characterRemovingConnections: { [Player]: RBXScriptConnection } = {}
 
+-- Phase 3. Accumulated Heartbeat dt, driving one aggregated income tick per
+-- INCOME_INTERVAL -- see runIncomeTick's own header note for why this rides
+-- the existing Heartbeat connection instead of a loop per player.
+local incomeAccumulator = 0
+
 local MergeService = {}
 
 --[[
@@ -252,22 +268,28 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	part.CFrame = spawnArea.CFrame * CFrame.new(entry.X, yOffset, entry.Z)
 
 	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "TierLabel"
+	billboard.Name = "IncomeLabel"
 	billboard.Size = UDim2.fromOffset(80, 24)
 	billboard.StudsOffset = Vector3.new(0, tierDef.Size / 2 + 0.5, 0)
 	billboard.AlwaysOnTop = true
 	billboard.Parent = part
 
-	local tierText = Instance.new("TextLabel")
-	tierText.Name = "TierText"
-	tierText.Size = UDim2.fromScale(1, 1)
-	tierText.BackgroundTransparency = 1
-	tierText.Font = Enum.Font.GothamBold
-	tierText.TextScaled = true
-	tierText.TextColor3 = Color3.new(1, 1, 1)
-	tierText.TextStrokeTransparency = 0.5
-	tierText.Text = `Lv.{entry.Tier}`
-	tierText.Parent = billboard
+	-- Phase 3: the label shows what the object EARNS, not its tier number --
+	-- tier stays readable through the cube's own size/color ramp
+	-- (MergeConfig.Tiers) instead. incomeForTier is the one place tier ->
+	-- income is computed, so this can never disagree with the client's
+	-- floating "+$X" popups (IncomePopupController), which read the same
+	-- function off the same Tier attribute set below.
+	local incomeText = Instance.new("TextLabel")
+	incomeText.Name = "IncomeText"
+	incomeText.Size = UDim2.fromScale(1, 1)
+	incomeText.BackgroundTransparency = 1
+	incomeText.Font = Enum.Font.GothamBold
+	incomeText.TextScaled = true
+	incomeText.TextColor3 = Color3.new(1, 1, 1)
+	incomeText.TextStrokeTransparency = 0.5
+	incomeText.Text = "$" .. Format.FormatNumber(MergeConfig.incomeForTier(entry.Tier))
+	incomeText.Parent = billboard
 
 	return part
 end
@@ -770,6 +792,48 @@ local function checkAllCarriesForMerge()
 end
 
 --[[
+	Phase 3: passive income. One grant per player per INCOME_INTERVAL, summed
+	over every entry in THEIR data.Merge.Objects (not live.parts) -- data is
+	the source of truth, and reading it directly is what makes this include a
+	currently-carried object for free: carry.entry is the SAME table as its
+	entry in data.Merge.Objects the entire time it's carried (the header's
+	PHASE 2 note), so there is nothing special to do here for that case.
+
+	liveBases (not Players:GetPlayers()) is the population: a player with no
+	live pad -- not yet activated, data still loading, base released -- earns
+	nothing and errors nothing, because they were never iterated.
+
+	One CoinsService.add() call per player, not one per object: that is the
+	entire reason this is a sum-then-grant instead of a loop of individual
+	grants, per the perf budget (8 players * 25 objects must not mean 200
+	writes a second).
+
+	The sum is capped at MAX_OBJECTS entries, same rationale as activateBase's
+	restore loop (restoreCount, above): profile data is attacker-influenced
+	over a long enough time horizon (dev console, a future migration bug),
+	and a planted oversized array must not earn income for entries beyond
+	what could ever legitimately exist on one pad.
+]]
+local function runIncomeTick()
+	for player in liveBases do
+		local data = DataService.getData(player)
+		if data == nil then
+			continue -- not expected once a pad is live, but never error over it
+		end
+
+		local total = 0
+		local objectCount = math.min(#data.Merge.Objects, MergeConfig.MAX_OBJECTS)
+		for i = 1, objectCount do
+			total += MergeConfig.incomeForTier(data.Merge.Objects[i].Tier)
+		end
+
+		if total > 0 then
+			CoinsService.add(player, total)
+		end
+	end
+end
+
+--[[
 	Re-arms disarmed parts once the OWNING player's character has stood
 	CONTINUOUSLY outside REARM_CLEARANCE (horizontal, same 2D model as
 	everywhere else in this module) for REARM_OUTSIDE_SECONDS. See
@@ -1074,12 +1138,22 @@ function MergeService.Start()
 	Players.PlayerRemoving:Connect(onPlayerRemoving)
 	SafePlayerAdded(onPlayerAdded)
 
-	-- Phase 2 merge detection + re-arm sweep -- see the header's PHASE 2 note
-	-- for why merge detection is distance polling rather than Touched, and
-	-- LiveBase.disarmed for what the sweep is re-arming.
+	-- Phase 2 merge detection + re-arm sweep, and Phase 3's income tick, all
+	-- share this one Heartbeat connection rather than each getting its own
+	-- loop: liveBases/carries are already bounded and cheap to sweep every
+	-- frame (see reArmSweep's own note), and an accumulator is all a 1-second
+	-- cadence needs -- there is no reason for the income tick in particular
+	-- to be its own task.spawn loop (let alone one per player) when it is
+	-- exactly as bursty-free sitting here.
 	RunService.Heartbeat:Connect(function(dt: number)
 		checkAllCarriesForMerge()
 		reArmSweep(dt)
+
+		incomeAccumulator += dt
+		while incomeAccumulator >= MergeConfig.INCOME_INTERVAL do
+			incomeAccumulator -= MergeConfig.INCOME_INTERVAL
+			runIncomeTick()
+		end
 	end)
 
 	log.info(`ready ({baseCount} bases)`)
