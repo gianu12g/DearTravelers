@@ -52,6 +52,27 @@ local TEMPLATE = {
 	},
 
 	--[[
+		Merge-gameplay loop (Phase 1). Objects is a COMPACT array -- no gaps,
+		ever -- because Replica cannot replicate a sparse numeric table
+		(this file's own WARNING above); a future removal must table.remove
+		it, never write nil into the middle. X/Z are PAD-LOCAL coordinates
+		(object space of the owning base's SpawnArea part, not world space),
+		so they stay valid across server restarts and even a base being
+		physically moved in Studio -- the 8 bases each sit at a different
+		world rotation, and pad-local coordinates are the only representation
+		that doesn't have to know which one a given player owns.
+
+		The entry shape ({Tier, X, Z}) is written out here rather than
+		requiring Shared.MergeConfig for a type: DataService stays generic on
+		purpose (see the Spins field below, same reasoning) and this shape is
+		small enough not to need a shared type to stay in sync.
+	]]
+	Merge = {
+		Objects = {} :: { { Tier: number, X: number, Z: number } },
+		SpawnLevel = 1,
+	},
+
+	--[[
 		Ported UISystem feature set (PORT-SPEC.md §2). Namespaced under one
 		key so it never collides with existing fields. No `Cash` field here:
 		the source's Cash maps onto the EXISTING top-level `Coins` above --
