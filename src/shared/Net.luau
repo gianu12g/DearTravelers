@@ -137,5 +137,22 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		mergeDropRequest = ByteNet.definePacket({
 			value = ByteNet.nothing,
 		}),
+
+		-- client -> server. Request the carried object's Mush interaction.
+		-- MergeService verifies the sender is carrying and is not already
+		-- boosted; the client never chooses its tier, sound, or speed reward.
+		mergeMushRequest = ByteNet.definePacket({
+			value = ByteNet.nothing,
+		}),
+
+		-- server -> requesting client. Confirms an accepted Mush and provides
+		-- the server-read per-tier audio configuration for local ASMR playback.
+		mergeMushActivated = ByteNet.definePacket({
+			value = ByteNet.struct({
+				tier = ByteNet.uint8,
+				soundId = ByteNet.string,
+				soundVolume = ByteNet.float64,
+			}),
+		}),
 	}
 end)

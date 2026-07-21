@@ -141,6 +141,7 @@ local DataService = require(script.Parent.DataService)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
+local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
 local Net = require(ReplicatedStorage.Shared.Net)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 
@@ -200,6 +201,11 @@ type CarryState = {
 	weld: WeldConstraint,
 }
 
+type MushBoostState = {
+	humanoid: Humanoid,
+	originalWalkSpeed: number,
+}
+
 -- Populated once during Start(); read-only afterwards.
 local bases: { [string]: BaseRecord } = {}
 
@@ -210,6 +216,7 @@ local activationTokens: { [Player]: number } = {}
 
 -- Phase 2. At most one entry per player (capacity is exactly one).
 local carries: { [Player]: CarryState } = {}
+local mushBoosts: { [Player]: MushBoostState } = {}
 -- Drives cancelCarry on death/respawn/leaving -- reverse-indexed by Player
 -- for the same reason attributeConnections is (PlayerRemoving only hands us
 -- a Player).
@@ -219,6 +226,9 @@ local characterRemovingConnections: { [Player]: RBXScriptConnection } = {}
 -- INCOME_INTERVAL -- see runIncomeTick's own header note for why this rides
 -- the existing Heartbeat connection instead of a loop per player.
 local incomeAccumulator = 0
+
+local MUSH_BOOST_AMOUNT = 5
+local MUSH_BOOST_DURATION = 5
 
 local MergeService = {}
 
@@ -243,9 +253,11 @@ local function tierDefFor(tier: number): MergeConfig.TierDef
 end
 
 --[[
-	One MergeObject Part for `entry`, NOT yet parented. Factored out so
-	Phase 2 (drag/merge) can call it again when a merge result needs a fresh
-	Part instead of duplicating this instancing code.
+	One authoritative MergeObject root Part for `entry`, NOT yet parented.
+	Replaceable artwork is cloned under that root by MergeObjectVisuals, keeping
+	all gameplay code keyed to one stable BasePart regardless of model shape.
+	Factored out so Phase 2 (drag/merge) can call it again when a merge result
+	needs a fresh object instead of duplicating this instancing code.
 
 	Position is pad-local by construction: spawnArea.CFrame * CFrame.new(x,
 	yOffset, z) is correct regardless of which of the 8 differently-rotated
@@ -267,6 +279,11 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	local yOffset = spawnArea.Size.Y / 2 + tierDef.Size / 2
 	part.CFrame = spawnArea.CFrame * CFrame.new(entry.X, yOffset, entry.Z)
 
+	if MergeObjectVisuals.attach(part, sanitizeTier(entry.Tier)) then
+		part.Transparency = 1
+		part.CastShadow = false
+	end
+
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "IncomeLabel"
 	billboard.Size = UDim2.fromOffset(80, 24)
@@ -275,8 +292,8 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	billboard.Parent = part
 
 	-- Phase 3: the label shows what the object EARNS, not its tier number --
-	-- tier stays readable through the cube's own size/color ramp
-	-- (MergeConfig.Tiers) instead. incomeForTier is the one place tier ->
+	-- tier stays readable through its per-tier visual (or the fallback cube's
+	-- size/color ramp) instead. incomeForTier is the one place tier ->
 	-- income is computed, so this can never disagree with the client's
 	-- floating "+$X" popups (IncomePopupController), which read the same
 	-- function off the same Tier attribute set below.
@@ -364,8 +381,12 @@ local function reAnchorPart(live: LiveBase, part: BasePart, entry: MergeObjectEn
 
 	local tierDef = tierDefFor(entry.Tier)
 	local yOffset = live.spawnArea.Size.Y / 2 + tierDef.Size / 2
-	part.CFrame = live.spawnArea.CFrame * CFrame.new(entry.X, yOffset, entry.Z)
+	-- Split the object from its former carry assembly before restoring the
+	-- resting transform. Setting CFrame while it is still unanchored can move
+	-- it to the right position but let the physics assembly keep the player's
+	-- carried rotation for the rest of that frame.
 	part.Anchored = true
+	part.CFrame = live.spawnArea.CFrame * CFrame.new(entry.X, yOffset, entry.Z)
 	part.Massless = false
 	part.CanCollide = false
 end
@@ -454,7 +475,8 @@ local function pickUp(player: Player, part: BasePart)
 
 	local tierDef = tierDefFor(entry.Tier)
 	local offset = tierDef.Size / 2 + MergeConfig.CARRY_GAP
-	part.CFrame = attachPoint.CFrame * CFrame.new(0, 0, -offset)
+	local carryRotation = MergeObjectVisuals.getCarryRotation(sanitizeTier(entry.Tier))
+	part.CFrame = attachPoint.CFrame * CFrame.new(0, 0, -offset) * carryRotation
 	part.Anchored = false
 	part.CanCollide = false
 	part.Massless = true
@@ -1006,6 +1028,50 @@ local function dropCarried(player: Player)
 	markDisarmed(live, carry.part)
 end
 
+local function clearMushBoost(player: Player)
+	local state = mushBoosts[player]
+	if state == nil then
+		return
+	end
+
+	mushBoosts[player] = nil
+	player:SetAttribute("MushBoostActive", nil)
+	if state.humanoid.Parent ~= nil then
+		state.humanoid.WalkSpeed = state.originalWalkSpeed
+	end
+end
+
+local function activateMush(player: Player)
+	local carry = carries[player]
+	if carry == nil or mushBoosts[player] ~= nil then
+		return
+	end
+
+	local character = player.Character
+	local humanoid = if character ~= nil then character:FindFirstChildOfClass("Humanoid") else nil
+	if humanoid == nil or humanoid.Health <= 0 then
+		return
+	end
+
+	local state: MushBoostState = {
+		humanoid = humanoid,
+		originalWalkSpeed = humanoid.WalkSpeed,
+	}
+	mushBoosts[player] = state
+	player:SetAttribute("MushBoostActive", true)
+	humanoid.WalkSpeed = state.originalWalkSpeed + MUSH_BOOST_AMOUNT
+
+	local tier = sanitizeTier(carry.entry.Tier)
+	local soundId, soundVolume = MergeObjectVisuals.getMushSound(tier)
+	Net.mergeMushActivated.sendTo({ tier = tier, soundId = soundId, soundVolume = soundVolume }, player)
+
+	task.delay(MUSH_BOOST_DURATION, function()
+		if mushBoosts[player] == state then
+			clearMushBoost(player)
+		end
+	end)
+end
+
 local function onAssignedBaseChanged(player: Player)
 	local baseName = player:GetAttribute("AssignedBase")
 	if typeof(baseName) == "string" then
@@ -1039,6 +1105,7 @@ local function onPlayerAdded(player: Player)
 	local removingSignal = player.CharacterRemoving
 	characterRemovingConnections[player] = removingSignal:Connect(function()
 		cancelCarry(player)
+		clearMushBoost(player)
 	end)
 end
 
@@ -1056,6 +1123,7 @@ local function onPlayerRemoving(player: Player)
 	end
 
 	deactivateBase(player)
+	clearMushBoost(player)
 	activationTokens[player] = nil
 end
 
@@ -1091,6 +1159,12 @@ function MergeService.Init()
 	Net.mergeDropRequest.listen(function(_data, player)
 		if player ~= nil then
 			dropCarried(player)
+		end
+	end)
+
+	Net.mergeMushRequest.listen(function(_data, player)
+		if player ~= nil then
+			activateMush(player)
 		end
 	end)
 end
