@@ -433,11 +433,12 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "IncomeLabel"
-	-- Scale the stacked health/money readout with the squishy's visual size.
-	-- Both elements share this one BillboardGui, so the health bar remains
-	-- above the money value at every camera distance and screen resolution.
-	local statusScale = math.clamp(0.5 + tierDef.Size / 10, 0.7, 1.4)
-	billboard.Size = UDim2.fromOffset(math.round(116 * statusScale), math.round(52 * statusScale))
+	-- Scale in world-space studs, not fixed screen pixels. The entire readout
+	-- now follows the same camera perspective as its squishy instead of looking
+	-- proportionally huge at a distance and tiny up close.
+	local statusWidth = math.clamp(tierDef.Size * 1.25, 3, 8)
+	local statusHeight = statusWidth * (52 / 116)
+	billboard.Size = UDim2.fromScale(statusWidth, statusHeight)
 	billboard.StudsOffset = Vector3.new(0, tierDef.Size / 2 + 0.85, 0)
 	billboard.AlwaysOnTop = true
 	billboard.LightInfluence = 0
