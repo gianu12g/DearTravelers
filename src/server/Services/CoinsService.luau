@@ -22,6 +22,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
 local DataService = require(script.Parent.DataService)
+local EconomyConfig = require(ServerStorage.Modules.EconomyConfig)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Validate = require(ServerStorage.Modules.Validate)
 
@@ -36,9 +37,6 @@ local log = Log.new("CoinsService")
 	no error. Any game legitimately reaching 1e15 coins has a balance bug;
 	clamping here surfaces that instead of hiding it.
 ]]
-local MAX_COINS = 1e15
-local MAX_GRANT = 1e12
-
 local CoinsService = {}
 
 --[[
@@ -63,7 +61,7 @@ end
 	has no loaded data -- in both cases the balance is untouched.
 ]]
 function CoinsService.add(player: Player, amount: number): boolean
-	if not Validate.amount(amount, MAX_GRANT) then
+	if not Validate.amount(amount, EconomyConfig.MAX_GRANT) then
 		log.warn(`add() on {player.Name} with an invalid amount -- rejected`)
 		return false
 	end
@@ -74,7 +72,7 @@ function CoinsService.add(player: Player, amount: number): boolean
 		return false
 	end
 
-	local newCoins = math.min(data.Coins + amount, MAX_COINS)
+	local newCoins = math.min(data.Coins + amount, EconomyConfig.MAX_COINS)
 	if newCoins == data.Coins then
 		-- Already at the cap. Writing would cost a replication packet to
 		-- change nothing. A runaway grant loop should still be visible,
@@ -96,7 +94,7 @@ end
 	guarantee.
 ]]
 function CoinsService.trySpend(player: Player, cost: number): boolean
-	if not Validate.amount(cost, MAX_GRANT) then
+	if not Validate.amount(cost, EconomyConfig.MAX_GRANT) then
 		log.warn(`trySpend() on {player.Name} with an invalid cost -- rejected`)
 		return false
 	end

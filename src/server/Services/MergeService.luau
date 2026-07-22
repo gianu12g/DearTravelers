@@ -28,9 +28,9 @@
 	prefix, because unlike claimBase this genuinely has to yield.
 
 	IDENTITY, NOT INDEX: each live pad's `parts` map is BasePart -> the exact
-	entry table stored in that player's Merge.Objects array (the SAME table,
+	entry table stored in that player's Merge.Squishies array (the SAME table,
 	not a copy -- profile.Data flows through untouched, same as everywhere
-	else in this codebase). table.clone(Objects) when appending copies the
+	else in this codebase). table.clone(Squishies) when appending copies the
 	array wrapper but not the entry tables inside it, so this identity survives
 	every future write. Phase 2's drag/merge/remove must key off these table
 	identities (e.g. table.find(currentObjects, entry)) and never off a
@@ -53,9 +53,9 @@
 	effectively kinematic relative to each other (see that note for why).
 
 	Carry state (`carries`) is deliberately NOT part of LiveBase or persisted
-	data: the entry stays in Merge.Objects at its ORIGINAL X/Z the entire time
+	data: the entry stays in Merge.Squishies at its ORIGINAL X/Z the entire time
 	it is carried (see the IDENTITY note above -- `carries[player].entry` is
-	the same table as the one inside data.Merge.Objects), so a crash or a
+	the same table as the one inside data.Merge.Squishies), so a crash or a
 	pad reassignment mid-carry needs no special-case restore -- the object is
 	already exactly where the next activateBase will put it. Only a
 	successful drop or merge ever writes a new X/Z.
@@ -121,7 +121,7 @@
 
 	PHASE 3 -- PASSIVE INCOME: see runIncomeTick's own header note for the
 	full reasoning. In one line: one aggregated CoinsService.add() per player
-	per second, summed over data.Merge.Objects (not live.parts, not a remote,
+	per second, summed over data.Merge.Squishies (not live.parts, not a remote,
 	not a per-object write), riding the same Heartbeat connection as Phase 2
 	rather than spawning a loop per player. The client's floating "+$X"
 	popups (IncomePopupController) are a pure visual guess in sync with this
@@ -144,6 +144,7 @@ local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
 local Net = require(ReplicatedStorage.Shared.Net)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
+local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 
 local log = Log.new("MergeService")
 
@@ -154,7 +155,7 @@ local WAIT_TIMEOUT = 10
 
 local random = Random.new()
 
--- Mirrors the shape written into DataService's TEMPLATE.Merge.Objects
+-- Mirrors the shape written into DataService's TEMPLATE.Merge.Squishies
 -- exactly (DataService.luau, Merge field) -- kept local rather than shared
 -- for the same "DataService stays generic" reason documented there.
 type MergeObjectEntry = {
@@ -191,7 +192,7 @@ type LiveBase = {
 	disarmed: { [BasePart]: number },
 }
 
--- Phase 2. `entry` is the SAME table referenced from data.Merge.Objects and
+-- Phase 2. `entry` is the SAME table referenced from data.Merge.Squishies and
 -- from `live.parts[part]` (see the header's IDENTITY note) -- it is never
 -- replaced while carried, only while dropped or consumed by a merge.
 type CarryState = {
@@ -226,6 +227,7 @@ local characterRemovingConnections: { [Player]: RBXScriptConnection } = {}
 -- INCOME_INTERVAL -- see runIncomeTick's own header note for why this rides
 -- the existing Heartbeat connection instead of a loop per player.
 local incomeAccumulator = 0
+local activityCheckpointAccumulator = 0
 
 local MUSH_BOOST_AMOUNT = 5
 local MUSH_BOOST_DURATION = 5
@@ -261,7 +263,7 @@ end
 
 	Position is pad-local by construction: spawnArea.CFrame * CFrame.new(x,
 	yOffset, z) is correct regardless of which of the 8 differently-rotated
-	bases `spawnArea` belongs to -- the whole reason Objects is stored in
+	bases `spawnArea` belongs to -- the whole reason Squishies is stored in
 	pad-local coordinates in the first place (DataService.luau's Merge
 	comment).
 ]]
@@ -551,7 +553,7 @@ local function trySpawnObject(player: Player, live: LiveBase)
 		return
 	end
 
-	if #data.Merge.Objects >= MergeConfig.MAX_OBJECTS then
+	if #data.Merge.Squishies >= MergeConfig.MAX_OBJECTS then
 		return -- pad full; auto-spawn just waits
 	end
 
@@ -577,9 +579,9 @@ local function trySpawnObject(player: Player, live: LiveBase)
 		therefore every key already in live.parts) keep their identity, which
 		is what the header's IDENTITY note depends on.
 	]]
-	local updated = table.clone(data.Merge.Objects)
+	local updated = table.clone(data.Merge.Squishies)
 	table.insert(updated, entry)
-	DataService.set(player, { "Merge", "Objects" }, updated)
+	DataService.set(player, { "Merge", "Squishies" }, updated)
 
 	spawnRestingPart(player, live, entry)
 end
@@ -694,9 +696,9 @@ local function activateBase(player: Player, baseName: string)
 		-- it: profile data is attacker-influenced over a long enough time
 		-- horizon (dev console, a future migration bug), and a planted
 		-- oversized array must not materialize hundreds of Parts.
-		local restoreCount = math.min(#data.Merge.Objects, MergeConfig.MAX_OBJECTS)
+		local restoreCount = math.min(#data.Merge.Squishies, MergeConfig.MAX_OBJECTS)
 		for i = 1, restoreCount do
-			spawnRestingPart(player, live, data.Merge.Objects[i])
+			spawnRestingPart(player, live, data.Merge.Squishies[i])
 		end
 
 		runAutoSpawnLoop(player, live)
@@ -706,7 +708,7 @@ end
 --[[
 	Commits a ram-to-merge: `carry` (tier t, still attached to the player)
 	touched `targetPart`/`targetEntry` (also tier t, resting on the same
-	pad). Rebuilds Objects removing BOTH entries and appending one {t+1,
+	pad). Rebuilds Squishies removing BOTH entries and appending one {t+1,
 	targetEntry.X, targetEntry.Z} in a single DataService.set -- no yields
 	between the read and the write (quality-gate.md trap #5), so this cannot
 	race a second commit for the same player (there is only ever one
@@ -725,14 +727,14 @@ local function commitMerge(player: Player, carry: CarryState, targetPart: BasePa
 
 	local newEntry: MergeObjectEntry = { Tier = carry.entry.Tier + 1, X = targetEntry.X, Z = targetEntry.Z }
 
-	local updated = table.create(#data.Merge.Objects)
-	for _, existingEntry in data.Merge.Objects do
+	local updated = table.create(#data.Merge.Squishies)
+	for _, existingEntry in data.Merge.Squishies do
 		if existingEntry ~= carry.entry and existingEntry ~= targetEntry then
 			table.insert(updated, existingEntry)
 		end
 	end
 	table.insert(updated, newEntry)
-	DataService.set(player, { "Merge", "Objects" }, updated)
+	DataService.set(player, { "Merge", "Squishies" }, updated)
 
 	-- Captured before Destroy: the VFX plays at the mergee's position, and
 	-- reading .Position after Destroy is not something to rely on.
@@ -815,10 +817,10 @@ end
 
 --[[
 	Phase 3: passive income. One grant per player per INCOME_INTERVAL, summed
-	over every entry in THEIR data.Merge.Objects (not live.parts) -- data is
+	over every entry in THEIR data.Merge.Squishies (not live.parts) -- data is
 	the source of truth, and reading it directly is what makes this include a
 	currently-carried object for free: carry.entry is the SAME table as its
-	entry in data.Merge.Objects the entire time it's carried (the header's
+	entry in data.Merge.Squishies the entire time it's carried (the header's
 	PHASE 2 note), so there is nothing special to do here for that case.
 
 	liveBases (not Players:GetPlayers()) is the population: a player with no
@@ -843,14 +845,22 @@ local function runIncomeTick()
 			continue -- not expected once a pad is live, but never error over it
 		end
 
-		local total = 0
-		local objectCount = math.min(#data.Merge.Objects, MergeConfig.MAX_OBJECTS)
-		for i = 1, objectCount do
-			total += MergeConfig.incomeForTier(data.Merge.Objects[i].Tier)
-		end
+		local total = SquishyProgress.incomePerPulse(data.Merge.Squishies)
 
 		if total > 0 then
 			CoinsService.add(player, total)
+		end
+	end
+end
+
+-- Periodically moves the trusted activity timestamp forward for every loaded
+-- player. Clean leaves write an exact timestamp in DataService; this cheaper
+-- checkpoint bounds duplicate earnings if a session ends uncleanly.
+local function checkpointLastActive()
+	local now = os.time()
+	for _, player in Players:GetPlayers() do
+		if DataService.getData(player) ~= nil then
+			DataService.set(player, { "Merge", "LastActiveAt" }, now)
 		end
 	end
 end
@@ -1011,11 +1021,11 @@ local function dropCarried(player: Player)
 	-- profile.Data directly" rule applies even though carry.entry IS a
 	-- profile.Data table (see the header's IDENTITY note); only a
 	-- DataService.set call may change what a client sees.
-	local updated = table.create(#data.Merge.Objects)
-	for _, existingEntry in data.Merge.Objects do
+	local updated = table.create(#data.Merge.Squishies)
+	for _, existingEntry in data.Merge.Squishies do
 		table.insert(updated, if existingEntry == carry.entry then newEntry else existingEntry)
 	end
-	DataService.set(player, { "Merge", "Objects" }, updated)
+	DataService.set(player, { "Merge", "Squishies" }, updated)
 
 	carries[player] = nil
 	player:SetAttribute("CarryingTier", nil)
@@ -1140,14 +1150,14 @@ end
 	live entry tables directly would let external code mutate saved data
 	without going through DataService.set, silently desyncing the replica.
 ]]
-function MergeService.getObjects(player: Player): { MergeObjectEntry }?
+function MergeService.getSquishies(player: Player): { MergeObjectEntry }?
 	local data = DataService.getData(player)
 	if data == nil then
 		return nil
 	end
 
 	local copy: { MergeObjectEntry } = {}
-	for _, entry in data.Merge.Objects do
+	for _, entry in data.Merge.Squishies do
 		table.insert(copy, { Tier = entry.Tier, X = entry.X, Z = entry.Z })
 	end
 	return copy
@@ -1233,6 +1243,12 @@ function MergeService.Start()
 		while incomeAccumulator >= MergeConfig.INCOME_INTERVAL do
 			incomeAccumulator -= MergeConfig.INCOME_INTERVAL
 			runIncomeTick()
+		end
+
+		activityCheckpointAccumulator += dt
+		if activityCheckpointAccumulator >= MergeConfig.ACTIVITY_CHECKPOINT_INTERVAL then
+			activityCheckpointAccumulator %= MergeConfig.ACTIVITY_CHECKPOINT_INTERVAL
+			checkpointLastActive()
 		end
 	end)
 

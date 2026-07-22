@@ -75,6 +75,14 @@ MergeConfig.REARM_OUTSIDE_SECONDS = 0.5
 -- earning rate, which is the whole point of merging rather than just hoarding.
 MergeConfig.INCOME_INTERVAL = 1 -- seconds between income pulses
 MergeConfig.BASE_INCOME = 1 -- $ per pulse at tier 1
+-- Offline income uses the exact same per-tier pulse as live income, capped so
+-- a long absence cannot destabilize the economy. Change this one value to
+-- tune the maximum banked duration.
+MergeConfig.MAX_OFFLINE_SECONDS = 8 * 60 * 60
+-- Persist a recent server timestamp while the player is online. This bounds
+-- duplicate income after an unclean session handoff without adding a write
+-- to every one-second income pulse.
+MergeConfig.ACTIVITY_CHECKPOINT_INTERVAL = 60
 
 --[[
 	10 tiers, gray -> near-white. Size grows per tier; tier 10 stays at 9

@@ -41,7 +41,7 @@
 	a purely observational signal that already exists for a different reason,
 	so no new attribute or remote is needed to know "is this specific Part,
 	anyone's, being carried right now". Income still accrues server-side
-	either way (MergeService sums data.Merge.Objects regardless of carry
+	either way (MergeService sums data.Merge.Squishies regardless of carry
 	state); this is a visual choice only, made because a popup tweening
 	upward from a part that is itself moving with the carrying character
 	would fight its own motion.
