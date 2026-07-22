@@ -33,6 +33,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeService = require(script.Parent.MergeService)
 local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("DevService")
@@ -69,6 +70,7 @@ local MAX_KEY_LENGTH = 64
 local MAX_STRING_VALUE_LENGTH = 256
 local MIN_COMMAND_INTERVAL = 0.1
 local WARN_THROTTLE = 5
+local SQUISHY_TEST_DAMAGE_FRACTION = 0.25
 
 type SnapshotEntry = {
 	path: { string },
@@ -372,6 +374,33 @@ local function onSet(data: { targetUserId: number, path: { string }, kind: strin
 	sendSnapshot(target, player)
 end
 
+local function onDamageSquishies(data: { targetUserId: number }, player: Player)
+	if not checkAccess(player) then
+		return
+	end
+
+	local target = resolveTarget(data.targetUserId, player)
+	if target == nil then
+		return
+	end
+
+	local damagedCount, killedCount = MergeService.damageSquishies(target, SQUISHY_TEST_DAMAGE_FRACTION)
+	if damagedCount == nil then
+		Net.devResult.sendTo({ ok = false, message = "target has no loaded data" }, player)
+		return
+	end
+
+	log.info(
+		`{player.Name} damaged {damagedCount} of {target.Name}'s squishies by 25% max health; {killedCount} popped`
+	)
+	local message = if damagedCount == 0 and killedCount == 0
+		then "No squishies could take more damage"
+		elseif killedCount > 0 then `Damaged {damagedCount} squishies; {killedCount} popped`
+		else `Damaged {damagedCount} squishies by 25% max health`
+	Net.devResult.sendTo({ ok = true, message = message }, player)
+	sendSnapshot(target, player)
+end
+
 local DevService = {}
 
 function DevService.Init()
@@ -384,6 +413,12 @@ function DevService.Init()
 	Net.devSet.listen(function(data, player)
 		if player ~= nil then
 			onSet(data, player)
+		end
+	end)
+
+	Net.devDamageSquishies.listen(function(data, player)
+		if player ~= nil then
+			onDamageSquishies(data, player)
 		end
 	end)
 

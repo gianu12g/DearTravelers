@@ -82,6 +82,13 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			}),
 		}),
 
+		-- client -> server. Developer-only test action; DevService re-checks
+		-- access and resolves the selected in-server player before damage is
+		-- applied. The amount is intentionally server-owned, not client input.
+		devDamageSquishies = ByteNet.definePacket({
+			value = ByteNet.struct({ targetUserId = ByteNet.float64 }),
+		}),
+
 		-- server -> client
 		devResult = ByteNet.definePacket({
 			value = ByteNet.struct({ ok = ByteNet.bool, message = ByteNet.string }),

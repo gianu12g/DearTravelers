@@ -126,4 +126,11 @@ function MergeConfig.incomeForTier(tier: number): number
 	return MergeConfig.BASE_INCOME * (2 ^ (safeTier - 1))
 end
 
+-- Health deliberately mirrors the earning multiplier: a tier-1 squishy has
+-- 1 max health, tier 2 has 2, and so on through 512 at tier 10. Route this
+-- through incomeForTier so the two progression curves cannot drift apart.
+function MergeConfig.healthForTier(tier: number): number
+	return MergeConfig.incomeForTier(tier)
+end
+
 return MergeConfig

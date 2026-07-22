@@ -329,6 +329,10 @@ local function onCreateClicked()
 	})
 end
 
+local function onDamageSquishiesClicked()
+	Net.devDamageSquishies.send({ targetUserId = currentTargetUserId })
+end
+
 local function cleanup()
 	stopRefreshLoop()
 	local topbarIcon = icon
@@ -435,6 +439,20 @@ local function buildUI()
 	targetBtn.Parent = targetRow
 	targetButton = targetBtn
 
+	-- Purpose-built test actions sit above the generic data editor so they are
+	-- discoverable and cannot require a developer to hand-edit every array row.
+	local actionRow = Instance.new("Frame")
+	actionRow.Name = "ActionRow"
+	actionRow.BackgroundTransparency = 1
+	actionRow.Position = UDim2.fromOffset(12, 82)
+	actionRow.Size = UDim2.new(1, -24, 0, 28)
+	actionRow.Parent = root
+
+	local damageButton = newButton("Damage Squishies  -25% HP", UDim2.fromScale(1, 1))
+	damageButton.Name = "DamageSquishiesButton"
+	damageButton.BackgroundColor3 = Color3.fromRGB(177, 70, 111)
+	damageButton.Parent = actionRow
+
 	-- Target picker overlay -- hidden until the target row is clicked.
 	local targetList = Instance.new("ScrollingFrame")
 	targetList.Name = "TargetList"
@@ -458,8 +476,8 @@ local function buildUI()
 	-- Body: one row per snapshot entry.
 	local body = Instance.new("ScrollingFrame")
 	body.Name = "Body"
-	body.Position = UDim2.fromOffset(12, 82)
-	body.Size = UDim2.new(1, -24, 1, -164)
+	body.Position = UDim2.fromOffset(12, 118)
+	body.Size = UDim2.new(1, -24, 1, -200)
 	body.BackgroundColor3 = FIELD_COLOR
 	body.BorderSizePixel = 0
 	body.ScrollBarThickness = 6
@@ -521,6 +539,7 @@ local function buildUI()
 	end)
 
 	setBtn.Activated:Connect(onCreateClicked)
+	damageButton.Activated:Connect(onDamageSquishiesClicked)
 
 	gui.Destroying:Connect(cleanup)
 

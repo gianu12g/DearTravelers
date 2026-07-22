@@ -162,6 +162,7 @@ type MergeObjectEntry = {
 	Tier: number,
 	X: number,
 	Z: number,
+	Health: number,
 }
 
 type BaseRecord = {
@@ -193,8 +194,9 @@ type LiveBase = {
 }
 
 -- Phase 2. `entry` is the SAME table referenced from data.Merge.Squishies and
--- from `live.parts[part]` (see the header's IDENTITY note) -- it is never
--- replaced while carried, only while dropped or consumed by a merge.
+-- from `live.parts[part]` (see the header's IDENTITY note). Drop and damage
+-- replace that entry transactionally and update both references together;
+-- merge consumes it.
 type CarryState = {
 	live: LiveBase,
 	part: BasePart,
@@ -251,8 +253,150 @@ local function sanitizeTier(tier: number): number
 	return math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER)
 end
 
+local function sanitizeHealth(health: number, tier: number): number
+	local maxHealth = MergeConfig.healthForTier(tier)
+	if type(health) ~= "number" or health ~= health or health == math.huge or health == -math.huge then
+		return maxHealth
+	end
+	return math.clamp(health, 0, maxHealth)
+end
+
 local function tierDefFor(tier: number): MergeConfig.TierDef
 	return MergeConfig.Tiers[sanitizeTier(tier)]
+end
+
+-- Keeps the public attributes and the replicated in-world bar in lockstep.
+-- The attributes make health available to future effects without requiring
+-- them to understand this Gui hierarchy; the Gui itself stays disabled at
+-- full health so healthy pads remain visually quiet.
+local function updateHealthVisual(part: BasePart, tier: number, health: number)
+	local maxHealth = MergeConfig.healthForTier(tier)
+	local safeHealth = sanitizeHealth(health, tier)
+	part:SetAttribute("Health", safeHealth)
+	part:SetAttribute("MaxHealth", maxHealth)
+
+	local statusBillboard = part:FindFirstChild("IncomeLabel")
+	local healthBar = if statusBillboard ~= nil then statusBillboard:FindFirstChild("HealthBar", true) else nil
+	if healthBar == nil or not healthBar:IsA("GuiObject") then
+		return
+	end
+	healthBar.Visible = safeHealth < maxHealth
+
+	local fill = healthBar:FindFirstChild("Fill", true)
+	if fill ~= nil and fill:IsA("Frame") then
+		fill.Size = UDim2.fromScale(safeHealth / maxHealth, 1)
+	end
+
+	local healthText = healthBar:FindFirstChild("HealthText", true)
+	if healthText ~= nil and healthText:IsA("TextLabel") then
+		local percentage = math.round((safeHealth / maxHealth) * 100)
+		healthText.Text = `♥ {percentage}%`
+	end
+end
+
+local function createHealthBar(part: BasePart, statusBillboard: BillboardGui, tier: number, health: number)
+	local healthBar = Instance.new("Frame")
+	healthBar.Name = "HealthBar"
+	healthBar.Size = UDim2.fromScale(1, 22 / 52)
+	healthBar.BackgroundTransparency = 1
+	healthBar.Visible = false
+	healthBar.Parent = statusBillboard
+
+	local shadow = Instance.new("Frame")
+	shadow.Name = "Shadow"
+	shadow.Position = UDim2.fromOffset(0, 3)
+	shadow.Size = UDim2.fromScale(1, 1)
+	shadow.BackgroundColor3 = Color3.fromRGB(117, 55, 83)
+	shadow.BackgroundTransparency = 0.45
+	shadow.BorderSizePixel = 0
+	shadow.ZIndex = 1
+	shadow.Parent = healthBar
+
+	local shadowCorner = Instance.new("UICorner")
+	shadowCorner.CornerRadius = UDim.new(1, 0)
+	shadowCorner.Parent = shadow
+
+	local bubble = Instance.new("Frame")
+	bubble.Name = "Bubble"
+	bubble.Size = UDim2.fromScale(1, 1)
+	bubble.BackgroundColor3 = Color3.fromRGB(255, 244, 249)
+	bubble.BorderSizePixel = 0
+	bubble.ZIndex = 2
+	bubble.Parent = healthBar
+
+	local bubbleCorner = Instance.new("UICorner")
+	bubbleCorner.CornerRadius = UDim.new(1, 0)
+	bubbleCorner.Parent = bubble
+
+	local bubbleStroke = Instance.new("UIStroke")
+	bubbleStroke.Color = Color3.fromRGB(255, 139, 180)
+	bubbleStroke.Thickness = 2
+	bubbleStroke.Parent = bubble
+
+	local track = Instance.new("Frame")
+	track.Name = "Track"
+	-- Keep a slim cream inset so the red HP fill reads more prominently while
+	-- retaining the soft inner outline that makes the bar feel bubbly.
+	track.Position = UDim2.fromOffset(2, 2)
+	track.Size = UDim2.new(1, -4, 1, -4)
+	track.BackgroundColor3 = Color3.fromRGB(255, 214, 228)
+	track.BorderSizePixel = 0
+	track.ClipsDescendants = true
+	track.ZIndex = 3
+	track.Parent = bubble
+
+	local trackCorner = Instance.new("UICorner")
+	trackCorner.CornerRadius = UDim.new(1, 0)
+	trackCorner.Parent = track
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.Size = UDim2.fromScale(1, 1)
+	fill.BackgroundColor3 = Color3.fromRGB(255, 106, 154)
+	fill.BorderSizePixel = 0
+	fill.ZIndex = 3
+	fill.Parent = track
+
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(1, 0)
+	fillCorner.Parent = fill
+
+	local fillGradient = Instance.new("UIGradient")
+	fillGradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 126, 170)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 86, 126)),
+	})
+	fillGradient.Parent = fill
+
+	-- A tiny glossy bubble gives the pill-shaped bar a toy-like finish without
+	-- adding an image asset that would need separate loading/failure handling.
+	local shine = Instance.new("Frame")
+	shine.Name = "Shine"
+	shine.Position = UDim2.fromOffset(8, 2)
+	shine.Size = UDim2.fromOffset(6, 4)
+	shine.BackgroundColor3 = Color3.new(1, 1, 1)
+	shine.BackgroundTransparency = 0.35
+	shine.BorderSizePixel = 0
+	shine.ZIndex = 4
+	shine.Parent = fill
+
+	local shineCorner = Instance.new("UICorner")
+	shineCorner.CornerRadius = UDim.new(1, 0)
+	shineCorner.Parent = shine
+
+	local healthText = Instance.new("TextLabel")
+	healthText.Name = "HealthText"
+	healthText.Size = UDim2.fromScale(1, 1)
+	healthText.BackgroundTransparency = 1
+	healthText.Font = Enum.Font.FredokaOne
+	healthText.TextColor3 = Color3.fromRGB(255, 255, 255)
+	healthText.TextStrokeColor3 = Color3.fromRGB(126, 48, 76)
+	healthText.TextStrokeTransparency = 0.35
+	healthText.TextScaled = true
+	healthText.ZIndex = 5
+	healthText.Parent = bubble
+
+	updateHealthVisual(part, tier, health)
 end
 
 --[[
@@ -289,9 +433,14 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "IncomeLabel"
-	billboard.Size = UDim2.fromOffset(80, 24)
-	billboard.StudsOffset = Vector3.new(0, tierDef.Size / 2 + 0.5, 0)
+	-- Scale the stacked health/money readout with the squishy's visual size.
+	-- Both elements share this one BillboardGui, so the health bar remains
+	-- above the money value at every camera distance and screen resolution.
+	local statusScale = math.clamp(0.5 + tierDef.Size / 10, 0.7, 1.4)
+	billboard.Size = UDim2.fromOffset(math.round(116 * statusScale), math.round(52 * statusScale))
+	billboard.StudsOffset = Vector3.new(0, tierDef.Size / 2 + 0.85, 0)
 	billboard.AlwaysOnTop = true
+	billboard.LightInfluence = 0
 	billboard.Parent = part
 
 	-- The permanent label is a clean progression value (1, 2, 4, 8...) rather
@@ -299,7 +448,9 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	-- doubling curve and for the separate floating "+$X" income popups.
 	local incomeText = Instance.new("TextLabel")
 	incomeText.Name = "IncomeText"
-	incomeText.Size = UDim2.fromScale(1, 1)
+	incomeText.AnchorPoint = Vector2.new(0.5, 1)
+	incomeText.Position = UDim2.fromScale(0.5, 1)
+	incomeText.Size = UDim2.fromScale(80 / 116, 24 / 52)
 	incomeText.BackgroundTransparency = 1
 	incomeText.Font = Enum.Font.FredokaOne
 	incomeText.TextScaled = true
@@ -308,6 +459,8 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	incomeText.TextStrokeTransparency = 0.15
 	incomeText.Text = Format.FormatNumber(MergeConfig.incomeForTier(entry.Tier))
 	incomeText.Parent = billboard
+
+	createHealthBar(part, billboard, entry.Tier, entry.Health)
 
 	return part
 end
@@ -404,6 +557,8 @@ end
 
 local EXPLOSION_LIFETIME = 1.5
 local EXPLOSION_PARTICLE_COUNT = 40
+local SQUISHY_POP_LIFETIME = 1
+local SQUISHY_POP_PARTICLE_COUNT = 18
 
 --[[
 	Placeholder-quality mini explosion at a merge's target (mergee) position --
@@ -435,6 +590,50 @@ local function spawnMergeVfx(objectsFolder: Folder, position: Vector3)
 	emitter:Emit(EXPLOSION_PARTICLE_COUNT)
 
 	Debris:AddItem(anchor, EXPLOSION_LIFETIME)
+end
+
+-- A light, bubbly death burst that survives after the authoritative squishy
+-- Part is destroyed. It is purely visual: the invisible anchor cannot touch,
+-- query, collide, or apply force, and Debris guarantees cleanup.
+local function spawnSquishyPopVfx(objectsFolder: Folder, position: Vector3, color: Color3, squishySize: number)
+	local anchor = Instance.new("Part")
+	anchor.Name = "SquishyPopVfx"
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanTouch = false
+	anchor.CanQuery = false
+	anchor.Transparency = 1
+	anchor.Size = Vector3.one * 0.2
+	anchor.CFrame = CFrame.new(position)
+	anchor.Parent = objectsFolder
+
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Name = "Bubbles"
+	emitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	emitter.Rate = 0
+	emitter.Color = ColorSequence.new(color, color:Lerp(Color3.new(1, 1, 1), 0.65))
+	emitter.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.05),
+		NumberSequenceKeypoint.new(0.7, 0.2),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	emitter.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, math.clamp(squishySize * 0.16, 0.35, 1.1)),
+		NumberSequenceKeypoint.new(0.55, math.clamp(squishySize * 0.24, 0.5, 1.6)),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	emitter.Lifetime = NumberRange.new(0.35, 0.6)
+	emitter.Speed = NumberRange.new(4 + squishySize * 0.35, 7 + squishySize * 0.55)
+	emitter.Drag = 4
+	emitter.Acceleration = Vector3.new(0, 5, 0)
+	emitter.SpreadAngle = Vector2.new(180, 180)
+	emitter.Rotation = NumberRange.new(0, 360)
+	emitter.RotSpeed = NumberRange.new(-100, 100)
+	emitter.LightEmission = 0.65
+	emitter.Parent = anchor
+	emitter:Emit(SQUISHY_POP_PARTICLE_COUNT)
+
+	Debris:AddItem(anchor, SQUISHY_POP_LIFETIME)
 end
 
 --[[
@@ -568,7 +767,12 @@ local function trySpawnObject(player: Player, live: LiveBase)
 	local roundedX = math.round(x * 100) / 100
 	local roundedZ = math.round(z * 100) / 100
 
-	local entry: MergeObjectEntry = { Tier = tier, X = roundedX, Z = roundedZ }
+	local entry: MergeObjectEntry = {
+		Tier = tier,
+		X = roundedX,
+		Z = roundedZ,
+		Health = MergeConfig.healthForTier(tier),
+	}
 
 	-- Append incrementally: auto-spawn runs every few seconds, so replacing the
 	-- entire growing array here would turn one small entry into O(n) replicated
@@ -719,7 +923,12 @@ local function commitMerge(player: Player, carry: CarryState, targetPart: BasePa
 		return
 	end
 
-	local newEntry: MergeObjectEntry = { Tier = carry.entry.Tier + 1, X = targetEntry.X, Z = targetEntry.Z }
+	local newEntry: MergeObjectEntry = {
+		Tier = carry.entry.Tier + 1,
+		X = targetEntry.X,
+		Z = targetEntry.Z,
+		Health = MergeConfig.healthForTier(carry.entry.Tier + 1),
+	}
 
 	local updated = table.create(#data.Merge.Squishies)
 	for _, existingEntry in data.Merge.Squishies do
@@ -1008,7 +1217,12 @@ local function dropCarried(player: Player)
 	local x, z = computeDropSpot(live, carry, player.Character)
 	local roundedX = math.round(x * 100) / 100
 	local roundedZ = math.round(z * 100) / 100
-	local newEntry: MergeObjectEntry = { Tier = carry.entry.Tier, X = roundedX, Z = roundedZ }
+	local newEntry: MergeObjectEntry = {
+		Tier = carry.entry.Tier,
+		X = roundedX,
+		Z = roundedZ,
+		Health = carry.entry.Health,
+	}
 
 	-- Splice the fresh entry in place of the old one rather than mutating
 	-- carry.entry's fields directly -- ARCHITECTURE.md's "never touch
@@ -1154,9 +1368,115 @@ function MergeService.getSquishies(player: Player): { MergeObjectEntry }?
 
 	local copy: { MergeObjectEntry } = {}
 	for _, entry in data.Merge.Squishies do
-		table.insert(copy, { Tier = entry.Tier, X = entry.X, Z = entry.Z })
+		table.insert(copy, { Tier = entry.Tier, X = entry.X, Z = entry.Z, Health = entry.Health })
 	end
 	return copy
+end
+
+-- Server-side damage entry point. Authentication belongs to the caller (the
+-- developer console does its own ConfigService-backed check before calling
+-- this). Health changes and deaths commit as one replacement of the compact
+-- persisted array; live part/carry references are then moved to those exact new
+-- entries before dead parts pop and disappear.
+function MergeService.damageSquishies(player: Player, maxHealthFraction: number): (number?, number)
+	if
+		type(maxHealthFraction) ~= "number"
+		or maxHealthFraction ~= maxHealthFraction
+		or maxHealthFraction <= 0
+		or maxHealthFraction == math.huge
+	then
+		return 0, 0
+	end
+
+	local data = DataService.getData(player)
+	if data == nil then
+		return nil, 0
+	end
+
+	local updated: { MergeObjectEntry } = table.create(#data.Merge.Squishies)
+	local replacements: { [any]: MergeObjectEntry } = {}
+	local deadEntries: { [any]: true } = {}
+	local damagedCount = 0
+	local killedCount = 0
+	local damageFraction = math.min(maxHealthFraction, 1)
+
+	for _, entry in data.Merge.Squishies do
+		local maxHealth = MergeConfig.healthForTier(entry.Tier)
+		local damage = maxHealth * damageFraction
+		local oldHealth = sanitizeHealth(entry.Health, entry.Tier)
+		local newHealth = math.max(0, oldHealth - damage)
+
+		if oldHealth <= 0 or newHealth <= 0 then
+			deadEntries[entry] = true
+			killedCount += 1
+			if oldHealth > 0 then
+				damagedCount += 1
+			end
+			continue
+		end
+
+		local newEntry: MergeObjectEntry = {
+			Tier = entry.Tier,
+			X = entry.X,
+			Z = entry.Z,
+			Health = newHealth,
+		}
+		table.insert(updated, newEntry)
+		replacements[entry] = newEntry
+		if newHealth ~= oldHealth then
+			damagedCount += 1
+		end
+	end
+
+	if damagedCount == 0 and killedCount == 0 then
+		return 0, 0
+	end
+
+	-- One transaction removes every dead entry and updates every survivor,
+	-- keeping Replica's numeric array compact at every point clients can see.
+	DataService.set(player, { "Merge", "Squishies" }, updated)
+
+	local carry = carries[player]
+	if carry ~= nil then
+		local replacement = replacements[carry.entry]
+		if replacement ~= nil then
+			carry.entry = replacement
+		elseif deadEntries[carry.entry] then
+			carries[player] = nil
+			player:SetAttribute("CarryingTier", nil)
+			carry.weld:Destroy()
+		end
+	end
+
+	local live = liveBases[player]
+	if live ~= nil then
+		local deadParts: { BasePart } = {}
+		for part, oldEntry in live.parts do
+			local replacement = replacements[oldEntry]
+			if replacement ~= nil then
+				live.parts[part] = replacement
+				updateHealthVisual(part, replacement.Tier, replacement.Health)
+			elseif deadEntries[oldEntry] then
+				table.insert(deadParts, part)
+			end
+		end
+
+		-- Remove table keys after traversal; mutating keys during a `for...in`
+		-- walk is undefined in Luau. Each VFX anchor outlives its destroyed Part.
+		for _, part in deadParts do
+			local deadEntry = live.parts[part]
+			live.parts[part] = nil
+			live.disarmed[part] = nil
+
+			if part.Parent ~= nil and deadEntry ~= nil then
+				local tierDef = tierDefFor(deadEntry.Tier)
+				spawnSquishyPopVfx(live.objectsFolder, part.Position, tierDef.Color, tierDef.Size)
+				part:Destroy()
+			end
+		end
+	end
+
+	return damagedCount, killedCount
 end
 
 --[[

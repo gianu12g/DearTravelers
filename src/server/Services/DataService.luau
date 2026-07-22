@@ -42,7 +42,7 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 3
+local DATA_VERSION = 4
 local MAX_PROCESSED_PURCHASE_IDS = 200
 
 local TEMPLATE = {
@@ -67,13 +67,13 @@ local TEMPLATE = {
 		world rotation, and pad-local coordinates are the only representation
 		that doesn't have to know which one a given player owns.
 
-		The entry shape ({Tier, X, Z}) is written out here rather than
+		The entry shape ({Tier, X, Z, Health}) is written out here rather than
 		requiring Shared.MergeConfig for a type: DataService stays generic on
 		purpose (see the Spins field below, same reasoning) and this shape is
 		small enough not to need a shared type to stay in sync.
 	]]
 	Merge = {
-		Squishies = {} :: { { Tier: number, X: number, Z: number } },
+		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number } },
 		SpawnLevel = 1,
 		-- Trusted server time used to calculate the next offline-income grant.
 		LastActiveAt = 0,
@@ -173,6 +173,20 @@ local MIGRATIONS: { (data: any) -> () } = {
 		uiSystem.ProcessedPurchaseIds = uiSystem.ProcessedPurchaseIds or {}
 		uiSystem.PendingGift = uiSystem.PendingGift or { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 }
 		data.UISystem = uiSystem
+	end,
+	[3] = function(data)
+		-- Reconcile cannot add keys inside entries of a numeric array. Existing
+		-- squishies therefore need their initial full-health value written by an
+		-- explicit migration; repairProfileData below clamps malformed values.
+		local merge = if type(data.Merge) == "table" then data.Merge else {}
+		local squishies = if type(merge.Squishies) == "table" then merge.Squishies else {}
+		for _, entry in squishies do
+			if type(entry) == "table" and entry.Health == nil then
+				entry.Health = MergeConfig.healthForTier(entry.Tier)
+			end
+		end
+		merge.Squishies = squishies
+		data.Merge = merge
 	end,
 }
 
@@ -315,6 +329,13 @@ local function finiteInteger(value: any, minimum: number, maximum: number, fallb
 	return math.clamp(math.floor(value), minimum, maximum)
 end
 
+local function finiteNumber(value: any, minimum: number, maximum: number, fallback: number): number
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		return fallback
+	end
+	return math.clamp(value, minimum, maximum)
+end
+
 local function repairProfileData(data: any)
 	repairTypes(data, TEMPLATE)
 
@@ -403,7 +424,7 @@ local function repairProfileData(data: any)
 		if type(entry) ~= "table" then
 			continue
 		end
-		local tier, x, z = entry.Tier, entry.X, entry.Z
+		local tier, x, z, health = entry.Tier, entry.X, entry.Z, entry.Health
 		if
 			type(tier) ~= "number"
 			or tier ~= tier
@@ -416,10 +437,22 @@ local function repairProfileData(data: any)
 		then
 			continue
 		end
+		local safeTier = math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER)
+		local maxHealth = MergeConfig.healthForTier(safeTier)
+		local safeHealth = finiteNumber(health, 0, maxHealth, maxHealth)
+		-- A zero-health squishy was already dead when its prior server closed.
+		-- Do not resurrect it on join; live deaths provide their pop effect in
+		-- MergeService before being removed from this same persisted array.
+		if safeHealth <= 0 then
+			continue
+		end
 		table.insert(compactSquishies, {
-			Tier = math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER),
+			Tier = safeTier,
 			X = math.clamp(x, -1000, 1000),
 			Z = math.clamp(z, -1000, 1000),
+			-- Fractional health is intentional: 25% of a 2-HP squishy is 0.5,
+			-- and flooring that would make the test action deal 50% instead.
+			Health = safeHealth,
 		})
 	end
 	data.Merge.Squishies = compactSquishies
