@@ -21,6 +21,7 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Log = require(ReplicatedStorage.Shared.Log)
+local Motion = require(script.Parent.Parent.UI.Motion)
 local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("MushController")
@@ -35,8 +36,12 @@ local SQUASH_HOLD = 0.08
 local REQUEST_TIMEOUT = 1
 local SOUND_LIFETIME = 10
 local COOLDOWN_FALLBACK = 5
-local READY_TEXT = "CD: 0"
-local PENDING_TEXT = "CD: 5"
+local HIDDEN_COOLDOWN_TEXT = ""
+local INSTRUCTION_FADE_DELAY = 1
+local INSTRUCTION_FADE_INFO = TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
+local INSTRUCTION_PULSE_SCALE = 1.08
+local INSTRUCTION_PULSE_UP_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local INSTRUCTION_PULSE_DOWN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local COOLDOWN_GRADIENT = ColorSequence.new({
 	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 95, 95)),
 	ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 25, 25)),
@@ -59,6 +64,13 @@ local readyGradientColor: ColorSequence? = nil
 local gradientIsCooldown: boolean? = nil
 local displayLabels: { TextLabel } = {}
 local lastDisplayText: string? = nil
+local instructionLabel: TextLabel? = nil
+local instructionStroke: UIStroke? = nil
+local instructionScale: UIScale? = nil
+local instructionFadeMotion: Motion.Handle? = nil
+local instructionPulseMotion: Motion.Handle? = nil
+local instructionVisibilityConnection: RBXScriptConnection? = nil
+local instructionFadeRevision = 0
 local requestPending = false
 local activeSquishes: { [BasePart]: boolean } = {}
 
@@ -242,18 +254,111 @@ local function updateCooldownDisplay()
 		local remaining = if type(rawEndsAt) == "number"
 			then math.max(0, rawEndsAt - Workspace:GetServerTimeNow())
 			else COOLDOWN_FALLBACK
-		setDisplayText(`CD: {math.max(1, math.ceil(remaining))}`)
-	elseif requestPending then
-		setDisplayText(PENDING_TEXT)
+		setDisplayText(`{math.max(1, math.ceil(remaining))}`)
 	else
-		setDisplayText(READY_TEXT)
+		setDisplayText(HIDDEN_COOLDOWN_TEXT)
 	end
+end
+
+local function cancelInstructionMotions()
+	local fadeMotion = instructionFadeMotion
+	if fadeMotion ~= nil then
+		fadeMotion.cancel()
+		instructionFadeMotion = nil
+	end
+
+	local pulseMotion = instructionPulseMotion
+	if pulseMotion ~= nil then
+		pulseMotion.cancel()
+		instructionPulseMotion = nil
+	end
+end
+
+local function scheduleInstructionFade(
+	actions: Frame,
+	label: TextLabel,
+	stroke: UIStroke,
+	uiScale: UIScale,
+	revision: number
+)
+	task.delay(INSTRUCTION_FADE_DELAY, function()
+		if
+			revision ~= instructionFadeRevision
+			or not actions.Visible
+			or label ~= instructionLabel
+			or stroke ~= instructionStroke
+			or uiScale ~= instructionScale
+		then
+			return
+		end
+
+		instructionFadeMotion = Motion.value(0, 1, INSTRUCTION_FADE_INFO, function(alpha)
+			label.TextTransparency = alpha
+			stroke.Transparency = alpha
+		end)
+	end)
+end
+
+local function updateInstructionMotion(actions: Frame, label: TextLabel, stroke: UIStroke, uiScale: UIScale)
+	instructionFadeRevision += 1
+	local thisRevision = instructionFadeRevision
+
+	cancelInstructionMotions()
+	label.TextTransparency = 0
+	stroke.Transparency = 0
+	uiScale.Scale = 1
+
+	if not actions.Visible then
+		return
+	end
+
+	instructionPulseMotion = Motion.tween(
+		uiScale,
+		{ Scale = INSTRUCTION_PULSE_SCALE },
+		INSTRUCTION_PULSE_UP_INFO,
+		function()
+			if thisRevision ~= instructionFadeRevision or uiScale ~= instructionScale or not actions.Visible then
+				return
+			end
+
+			instructionPulseMotion = Motion.tween(uiScale, { Scale = 1 }, INSTRUCTION_PULSE_DOWN_INFO, function()
+				if thisRevision ~= instructionFadeRevision or uiScale ~= instructionScale or not actions.Visible then
+					return
+				end
+
+				instructionPulseMotion = nil
+				scheduleInstructionFade(actions, label, stroke, uiScale, thisRevision)
+			end)
+		end
+	)
+end
+
+local function bindInstructionMotion(actions: Frame, label: TextLabel, stroke: UIStroke)
+	if instructionVisibilityConnection ~= nil then
+		instructionVisibilityConnection:Disconnect()
+	end
+
+	local uiScale = label:FindFirstChildOfClass("UIScale") or Instance.new("UIScale")
+	uiScale.Parent = label
+
+	instructionLabel = label
+	instructionStroke = stroke
+	instructionScale = uiScale
+	local visibleChanged = actions:GetPropertyChangedSignal("Visible")
+	instructionVisibilityConnection = visibleChanged:Connect(function()
+		updateInstructionMotion(actions, label, stroke, uiScale)
+	end)
+	updateInstructionMotion(actions, label, stroke, uiScale)
 end
 
 local function resolveDisplay()
 	local playerGui = player:WaitForChild("PlayerGui")
 	local ui = playerGui:WaitForChild("DropLaunchUI")
 	local actions = ui:WaitForChild("CarryActions")
+	if not actions:IsA("Frame") then
+		log.error(`{actions:GetFullName()} must be a Frame`)
+		return
+	end
 	local display = actions:WaitForChild("B.Mush")
 	if not display:IsA("TextLabel") then
 		log.error(`{display:GetFullName()} must be a TextLabel`)
@@ -270,6 +375,16 @@ local function resolveDisplay()
 		log.error(`{gradient:GetFullName()} must be a UIGradient`)
 		return
 	end
+	local instruction = display:WaitForChild("Instruc")
+	if not instruction:IsA("TextLabel") then
+		log.error(`{instruction:GetFullName()} must be a TextLabel`)
+		return
+	end
+	local stroke = instruction:FindFirstChildOfClass("UIStroke")
+	if stroke == nil then
+		log.error(`{instruction:GetFullName()} must contain a UIStroke`)
+		return
+	end
 
 	-- B.Mush.Instruc is authored helper copy, not stateful UI. Cooldown state
 	-- only changes the dedicated TextLabel and the container's direct gradient.
@@ -280,6 +395,7 @@ local function resolveDisplay()
 	displayLabels = { cooldown }
 	lastDisplayText = nil
 	updateCooldownDisplay()
+	bindInstructionMotion(actions, instruction, stroke)
 end
 
 local function requestMush()

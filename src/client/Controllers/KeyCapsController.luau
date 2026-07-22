@@ -2,10 +2,10 @@
 --[[
 	Client-side keyboard interaction for every MeshPart tagged `Key`.
 
-	Each key receives a random letter and a color from the palette named by its
-	`Theme` attribute. A missing Theme uses Chocolate; invalid values are left
-	unchanged and reported so an authored typo does not silently become another
-	theme. Theme is intentionally read only when the key is connected.
+	Each key receives a random letter plus the color and material configured by
+	the theme named in its `Theme` attribute. A missing or invalid Theme is
+	normalized to ChocolateBar. Attribute changes are observed so themes can be
+	swapped while the game is running.
 
 	Press detection follows the local player's HumanoidRootPart every frame. All
 	motion, UI, color selection, and audio are local-only. Sounds are created per
@@ -26,7 +26,7 @@ local log = Log.new("LightUpKeysController")
 
 local KEY_TAG = "Key"
 local THEME_ATTRIBUTE = "Theme"
-local DEFAULT_THEME = "Chocolate"
+local DEFAULT_THEME = "ChocolateBar"
 
 local KEY_GUI_NAME = "KeyGui"
 local LETTER_LABEL_NAME = "LetterLabel"
@@ -44,738 +44,1614 @@ local DROP_DISTANCE = 1.4
 local HORIZONTAL_MARGIN = 1
 local HEIGHT_ABOVE_KEY = 6
 local HEIGHT_BELOW_KEY = 2
+local KEY_QUERY_SIZE = Vector3.new(HORIZONTAL_MARGIN * 2, HEIGHT_ABOVE_KEY + HEIGHT_BELOW_KEY, HORIZONTAL_MARGIN * 2)
+local KEY_QUERY_OFFSET = Vector3.new(0, (HEIGHT_BELOW_KEY - HEIGHT_ABOVE_KEY) / 2, 0)
 
 local PRESS_INFO = TweenInfo.new(0.12, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 local RELEASE_INFO = TweenInfo.new(0.18, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 
-local THEMES: { [string]: { Color3 } } = {
-	Ocean = {
-		Color3.fromRGB(24, 54, 62),
-		Color3.fromRGB(95, 151, 170),
-		Color3.fromRGB(45, 95, 110),
-		Color3.fromRGB(62, 136, 165),
-		Color3.fromRGB(147, 196, 209),
-	},
-
-	Candy = {
-		Color3.fromRGB(255, 182, 193),
-		Color3.fromRGB(255, 105, 180),
-		Color3.fromRGB(173, 216, 230),
-		Color3.fromRGB(152, 251, 152),
-		Color3.fromRGB(221, 160, 221),
-		Color3.fromRGB(255, 253, 208),
-		Color3.fromRGB(255, 218, 185),
-	},
-
-	Chocolate = {
-		Color3.fromRGB(62, 39, 35),
-		Color3.fromRGB(136, 92, 62),
-		Color3.fromRGB(93, 48, 11),
-		Color3.fromRGB(77, 39, 0),
-		Color3.fromRGB(156, 104, 78),
-	},
-
-	Blue = {
-		Color3.fromRGB(60, 120, 255),
-		Color3.fromRGB(90, 150, 255),
-		Color3.fromRGB(120, 180, 255),
-		Color3.fromRGB(40, 90, 220),
-	},
-
-	Sunset = {
-		Color3.fromRGB(242, 196, 71),
-		Color3.fromRGB(247, 98, 24),
-		Color3.fromRGB(255, 29, 104),
-		Color3.fromRGB(177, 0, 101),
-		Color3.fromRGB(116, 5, 128),
-	},
-
-	Forest = {
-		Color3.fromRGB(25, 59, 43),
-		Color3.fromRGB(52, 105, 74),
-		Color3.fromRGB(87, 145, 91),
-		Color3.fromRGB(135, 169, 107),
-		Color3.fromRGB(194, 204, 145),
-	},
-
-	Jungle = {
-		Color3.fromRGB(16, 66, 49),
-		Color3.fromRGB(35, 112, 75),
-		Color3.fromRGB(73, 160, 105),
-		Color3.fromRGB(144, 190, 109),
-		Color3.fromRGB(218, 210, 91),
-	},
-
-	Autumn = {
-		Color3.fromRGB(91, 46, 29),
-		Color3.fromRGB(150, 73, 38),
-		Color3.fromRGB(202, 103, 49),
-		Color3.fromRGB(230, 155, 61),
-		Color3.fromRGB(247, 205, 96),
-	},
-
-	Winter = {
-		Color3.fromRGB(38, 61, 89),
-		Color3.fromRGB(73, 104, 140),
-		Color3.fromRGB(126, 167, 196),
-		Color3.fromRGB(184, 216, 226),
-		Color3.fromRGB(231, 244, 246),
-	},
-
-	Spring = {
-		Color3.fromRGB(255, 186, 214),
-		Color3.fromRGB(255, 222, 137),
-		Color3.fromRGB(177, 226, 158),
-		Color3.fromRGB(151, 214, 231),
-		Color3.fromRGB(202, 177, 230),
-	},
-
-	Lavender = {
-		Color3.fromRGB(67, 52, 94),
-		Color3.fromRGB(112, 86, 145),
-		Color3.fromRGB(157, 124, 189),
-		Color3.fromRGB(196, 168, 219),
-		Color3.fromRGB(231, 215, 242),
-	},
-
-	Rose = {
-		Color3.fromRGB(91, 31, 50),
-		Color3.fromRGB(145, 54, 79),
-		Color3.fromRGB(194, 79, 105),
-		Color3.fromRGB(232, 132, 153),
-		Color3.fromRGB(250, 190, 203),
-	},
-
-	CherryBlossom = {
-		Color3.fromRGB(107, 58, 76),
-		Color3.fromRGB(173, 95, 123),
-		Color3.fromRGB(224, 143, 166),
-		Color3.fromRGB(249, 190, 205),
-		Color3.fromRGB(255, 226, 233),
-	},
-
-	Mint = {
-		Color3.fromRGB(35, 91, 79),
-		Color3.fromRGB(67, 143, 122),
-		Color3.fromRGB(111, 190, 157),
-		Color3.fromRGB(166, 225, 194),
-		Color3.fromRGB(220, 248, 230),
-	},
-
-	Lemon = {
-		Color3.fromRGB(103, 92, 22),
-		Color3.fromRGB(166, 146, 32),
-		Color3.fromRGB(224, 198, 50),
-		Color3.fromRGB(255, 229, 92),
-		Color3.fromRGB(255, 247, 173),
-	},
-
-	Peach = {
-		Color3.fromRGB(139, 70, 56),
-		Color3.fromRGB(194, 101, 77),
-		Color3.fromRGB(235, 139, 108),
-		Color3.fromRGB(255, 183, 148),
-		Color3.fromRGB(255, 221, 194),
-	},
-
-	Watermelon = {
-		Color3.fromRGB(43, 94, 64),
-		Color3.fromRGB(74, 145, 91),
-		Color3.fromRGB(142, 191, 95),
-		Color3.fromRGB(244, 94, 105),
-		Color3.fromRGB(255, 155, 151),
-	},
-
-	Strawberry = {
-		Color3.fromRGB(117, 25, 45),
-		Color3.fromRGB(180, 39, 64),
-		Color3.fromRGB(232, 70, 91),
-		Color3.fromRGB(255, 132, 145),
-		Color3.fromRGB(255, 199, 205),
-	},
-
-	Blueberry = {
-		Color3.fromRGB(38, 36, 88),
-		Color3.fromRGB(60, 57, 132),
-		Color3.fromRGB(89, 85, 177),
-		Color3.fromRGB(130, 126, 211),
-		Color3.fromRGB(183, 181, 235),
-	},
-
-	Grape = {
-		Color3.fromRGB(57, 30, 79),
-		Color3.fromRGB(91, 46, 122),
-		Color3.fromRGB(134, 66, 165),
-		Color3.fromRGB(179, 108, 201),
-		Color3.fromRGB(219, 165, 229),
-	},
-
-	Vanilla = {
-		Color3.fromRGB(126, 108, 72),
-		Color3.fromRGB(175, 152, 104),
-		Color3.fromRGB(215, 194, 145),
-		Color3.fromRGB(241, 225, 181),
-		Color3.fromRGB(255, 246, 218),
-	},
-
-	CookiesAndCream = {
-		Color3.fromRGB(35, 33, 32),
-		Color3.fromRGB(73, 69, 66),
-		Color3.fromRGB(127, 121, 116),
-		Color3.fromRGB(204, 197, 187),
-		Color3.fromRGB(244, 239, 226),
-	},
-
-	Cyberpunk = {
-		Color3.fromRGB(22, 12, 51),
-		Color3.fromRGB(79, 20, 158),
-		Color3.fromRGB(192, 17, 242),
-		Color3.fromRGB(0, 229, 255),
-		Color3.fromRGB(255, 46, 151),
-	},
-
-	Synthwave = {
-		Color3.fromRGB(31, 18, 74),
-		Color3.fromRGB(92, 33, 143),
-		Color3.fromRGB(201, 45, 184),
-		Color3.fromRGB(255, 81, 149),
-		Color3.fromRGB(54, 214, 231),
-	},
-
-	Arcade = {
-		Color3.fromRGB(27, 27, 77),
-		Color3.fromRGB(45, 93, 197),
-		Color3.fromRGB(0, 210, 255),
-		Color3.fromRGB(255, 58, 152),
-		Color3.fromRGB(255, 213, 56),
-	},
-
-	Matrix = {
-		Color3.fromRGB(4, 31, 14),
-		Color3.fromRGB(8, 66, 28),
-		Color3.fromRGB(14, 111, 46),
-		Color3.fromRGB(22, 176, 73),
-		Color3.fromRGB(70, 255, 118),
-	},
-
-	Fire = {
-		Color3.fromRGB(78, 13, 8),
-		Color3.fromRGB(145, 25, 9),
-		Color3.fromRGB(215, 53, 13),
-		Color3.fromRGB(250, 112, 20),
-		Color3.fromRGB(255, 196, 46),
-	},
-
-	Lava = {
-		Color3.fromRGB(35, 20, 20),
-		Color3.fromRGB(92, 24, 18),
-		Color3.fromRGB(164, 35, 15),
-		Color3.fromRGB(231, 67, 14),
-		Color3.fromRGB(255, 155, 31),
-	},
-
-	Ice = {
-		Color3.fromRGB(31, 67, 91),
-		Color3.fromRGB(61, 122, 153),
-		Color3.fromRGB(107, 177, 203),
-		Color3.fromRGB(165, 222, 233),
-		Color3.fromRGB(221, 249, 252),
-	},
-
-	Storm = {
-		Color3.fromRGB(32, 38, 50),
-		Color3.fromRGB(57, 67, 83),
-		Color3.fromRGB(91, 104, 124),
-		Color3.fromRGB(133, 148, 169),
-		Color3.fromRGB(188, 201, 215),
-	},
-
-	Thunder = {
-		Color3.fromRGB(30, 28, 52),
-		Color3.fromRGB(61, 57, 94),
-		Color3.fromRGB(100, 92, 138),
-		Color3.fromRGB(153, 141, 186),
-		Color3.fromRGB(255, 224, 84),
-	},
-
-	Galaxy = {
-		Color3.fromRGB(21, 16, 52),
-		Color3.fromRGB(57, 30, 106),
-		Color3.fromRGB(104, 48, 151),
-		Color3.fromRGB(176, 69, 177),
-		Color3.fromRGB(69, 167, 214),
-	},
-
-	Aurora = {
-		Color3.fromRGB(18, 44, 59),
-		Color3.fromRGB(23, 99, 101),
-		Color3.fromRGB(39, 170, 137),
-		Color3.fromRGB(106, 222, 161),
-		Color3.fromRGB(129, 126, 207),
-	},
-
-	Moonlight = {
-		Color3.fromRGB(30, 37, 59),
-		Color3.fromRGB(53, 66, 96),
-		Color3.fromRGB(89, 106, 140),
-		Color3.fromRGB(146, 161, 190),
-		Color3.fromRGB(216, 224, 238),
-	},
-
-	Solar = {
-		Color3.fromRGB(105, 47, 14),
-		Color3.fromRGB(171, 79, 16),
-		Color3.fromRGB(229, 126, 22),
-		Color3.fromRGB(255, 185, 48),
-		Color3.fromRGB(255, 230, 117),
-	},
-
-	Desert = {
-		Color3.fromRGB(92, 65, 42),
-		Color3.fromRGB(143, 100, 60),
-		Color3.fromRGB(190, 139, 83),
-		Color3.fromRGB(224, 181, 119),
-		Color3.fromRGB(244, 220, 169),
-	},
-
-	Oasis = {
-		Color3.fromRGB(28, 88, 83),
-		Color3.fromRGB(46, 138, 123),
-		Color3.fromRGB(80, 181, 150),
-		Color3.fromRGB(214, 180, 101),
-		Color3.fromRGB(244, 220, 154),
-	},
-
-	Beach = {
-		Color3.fromRGB(36, 111, 130),
-		Color3.fromRGB(63, 164, 180),
-		Color3.fromRGB(116, 211, 210),
-		Color3.fromRGB(239, 205, 136),
-		Color3.fromRGB(255, 236, 187),
-	},
-
-	CoralReef = {
-		Color3.fromRGB(27, 88, 112),
-		Color3.fromRGB(45, 155, 170),
-		Color3.fromRGB(94, 209, 192),
-		Color3.fromRGB(255, 120, 113),
-		Color3.fromRGB(255, 184, 145),
-	},
-
-	Tropical = {
-		Color3.fromRGB(18, 110, 98),
-		Color3.fromRGB(49, 178, 137),
-		Color3.fromRGB(150, 215, 84),
-		Color3.fromRGB(255, 194, 61),
-		Color3.fromRGB(246, 89, 91),
-	},
-
-	DeepSea = {
-		Color3.fromRGB(5, 25, 45),
-		Color3.fromRGB(8, 52, 78),
-		Color3.fromRGB(12, 88, 115),
-		Color3.fromRGB(18, 130, 151),
-		Color3.fromRGB(56, 181, 190),
-	},
-
-	Pirate = {
-		Color3.fromRGB(36, 29, 24),
-		Color3.fromRGB(78, 52, 32),
-		Color3.fromRGB(129, 84, 42),
-		Color3.fromRGB(181, 131, 64),
-		Color3.fromRGB(170, 38, 36),
-	},
-
-	Royal = {
-		Color3.fromRGB(35, 20, 71),
-		Color3.fromRGB(66, 38, 117),
-		Color3.fromRGB(105, 64, 163),
-		Color3.fromRGB(173, 118, 206),
-		Color3.fromRGB(232, 191, 75),
-	},
-
-	Luxury = {
-		Color3.fromRGB(18, 18, 20),
-		Color3.fromRGB(48, 45, 43),
-		Color3.fromRGB(92, 82, 66),
-		Color3.fromRGB(175, 142, 71),
-		Color3.fromRGB(231, 200, 121),
-	},
-
-	Gold = {
-		Color3.fromRGB(95, 66, 17),
-		Color3.fromRGB(148, 104, 25),
-		Color3.fromRGB(201, 151, 38),
-		Color3.fromRGB(238, 194, 73),
-		Color3.fromRGB(255, 229, 143),
-	},
-
-	Silver = {
-		Color3.fromRGB(57, 63, 68),
-		Color3.fromRGB(91, 99, 105),
-		Color3.fromRGB(133, 143, 149),
-		Color3.fromRGB(180, 188, 192),
-		Color3.fromRGB(226, 231, 233),
-	},
-
-	Obsidian = {
-		Color3.fromRGB(13, 13, 17),
-		Color3.fromRGB(27, 25, 34),
-		Color3.fromRGB(43, 38, 54),
-		Color3.fromRGB(66, 55, 79),
-		Color3.fromRGB(99, 76, 112),
-	},
-
-	Marble = {
-		Color3.fromRGB(75, 78, 82),
-		Color3.fromRGB(121, 125, 130),
-		Color3.fromRGB(169, 173, 177),
-		Color3.fromRGB(213, 215, 217),
-		Color3.fromRGB(245, 245, 243),
-	},
-
-	Monochrome = {
-		Color3.fromRGB(24, 24, 24),
-		Color3.fromRGB(65, 65, 65),
-		Color3.fromRGB(112, 112, 112),
-		Color3.fromRGB(174, 174, 174),
-		Color3.fromRGB(232, 232, 232),
-	},
-
-	BlackAndWhite = {
-		Color3.fromRGB(15, 15, 15),
-		Color3.fromRGB(55, 55, 55),
-		Color3.fromRGB(105, 105, 105),
-		Color3.fromRGB(190, 190, 190),
-		Color3.fromRGB(245, 245, 245),
-	},
-
-	Slate = {
-		Color3.fromRGB(37, 43, 50),
-		Color3.fromRGB(62, 72, 82),
-		Color3.fromRGB(91, 105, 117),
-		Color3.fromRGB(132, 147, 158),
-		Color3.fromRGB(184, 195, 202),
-	},
-
-	CottonCandy = {
-		Color3.fromRGB(255, 166, 204),
-		Color3.fromRGB(247, 193, 230),
-		Color3.fromRGB(188, 190, 255),
-		Color3.fromRGB(159, 219, 255),
-		Color3.fromRGB(208, 248, 255),
-	},
-
-	Bubblegum = {
-		Color3.fromRGB(255, 82, 157),
-		Color3.fromRGB(255, 128, 190),
-		Color3.fromRGB(244, 174, 220),
-		Color3.fromRGB(184, 160, 232),
-		Color3.fromRGB(128, 203, 237),
-	},
-
-	Toybox = {
-		Color3.fromRGB(230, 57, 70),
-		Color3.fromRGB(255, 183, 3),
-		Color3.fromRGB(76, 201, 240),
-		Color3.fromRGB(67, 170, 139),
-		Color3.fromRGB(131, 56, 236),
-	},
-
-	Rainbow = {
-		Color3.fromRGB(239, 71, 111),
-		Color3.fromRGB(255, 209, 102),
-		Color3.fromRGB(6, 214, 160),
-		Color3.fromRGB(17, 138, 178),
-		Color3.fromRGB(131, 56, 236),
-	},
-
-	Retro = {
-		Color3.fromRGB(53, 62, 72),
-		Color3.fromRGB(216, 91, 67),
-		Color3.fromRGB(239, 160, 74),
-		Color3.fromRGB(240, 208, 121),
-		Color3.fromRGB(74, 156, 147),
-	},
-
-	RetroComputer = {
-		Color3.fromRGB(34, 39, 35),
-		Color3.fromRGB(57, 74, 58),
-		Color3.fromRGB(89, 112, 78),
-		Color3.fromRGB(141, 157, 101),
-		Color3.fromRGB(196, 201, 139),
-	},
-
-	Toxic = {
-		Color3.fromRGB(22, 35, 15),
-		Color3.fromRGB(48, 77, 23),
-		Color3.fromRGB(89, 135, 28),
-		Color3.fromRGB(154, 205, 50),
-		Color3.fromRGB(211, 255, 73),
-	},
-
-	Radioactive = {
-		Color3.fromRGB(29, 35, 21),
-		Color3.fromRGB(61, 76, 30),
-		Color3.fromRGB(106, 132, 38),
-		Color3.fromRGB(169, 209, 47),
-		Color3.fromRGB(225, 255, 68),
-	},
-
-	Alien = {
-		Color3.fromRGB(25, 21, 43),
-		Color3.fromRGB(57, 42, 91),
-		Color3.fromRGB(94, 71, 136),
-		Color3.fromRGB(75, 191, 125),
-		Color3.fromRGB(143, 255, 170),
-	},
-
-	Dragon = {
-		Color3.fromRGB(45, 25, 24),
-		Color3.fromRGB(89, 39, 30),
-		Color3.fromRGB(148, 58, 37),
-		Color3.fromRGB(207, 96, 45),
-		Color3.fromRGB(230, 178, 64),
-	},
-
-	Vampire = {
-		Color3.fromRGB(18, 15, 22),
-		Color3.fromRGB(46, 21, 36),
-		Color3.fromRGB(91, 24, 46),
-		Color3.fromRGB(150, 31, 54),
-		Color3.fromRGB(212, 61, 78),
-	},
-
-	Gothic = {
-		Color3.fromRGB(18, 17, 21),
-		Color3.fromRGB(45, 39, 51),
-		Color3.fromRGB(75, 61, 83),
-		Color3.fromRGB(108, 78, 108),
-		Color3.fromRGB(151, 112, 135),
-	},
-
-	Halloween = {
-		Color3.fromRGB(30, 24, 35),
-		Color3.fromRGB(82, 42, 98),
-		Color3.fromRGB(151, 57, 118),
-		Color3.fromRGB(239, 103, 34),
-		Color3.fromRGB(255, 175, 40),
-	},
-
-	Christmas = {
-		Color3.fromRGB(27, 79, 56),
-		Color3.fromRGB(43, 126, 77),
-		Color3.fromRGB(171, 34, 46),
-		Color3.fromRGB(222, 64, 67),
-		Color3.fromRGB(239, 210, 123),
-	},
-
-	Valentine = {
-		Color3.fromRGB(105, 27, 54),
-		Color3.fromRGB(173, 45, 79),
-		Color3.fromRGB(230, 76, 111),
-		Color3.fromRGB(255, 139, 162),
-		Color3.fromRGB(255, 207, 216),
-	},
-
-	Pumpkin = {
-		Color3.fromRGB(77, 43, 26),
-		Color3.fromRGB(132, 65, 24),
-		Color3.fromRGB(195, 93, 25),
-		Color3.fromRGB(239, 139, 39),
-		Color3.fromRGB(255, 193, 83),
-	},
-
-	SakuraNight = {
-		Color3.fromRGB(27, 24, 54),
-		Color3.fromRGB(55, 44, 91),
-		Color3.fromRGB(109, 66, 126),
-		Color3.fromRGB(190, 96, 151),
-		Color3.fromRGB(245, 162, 191),
-	},
-
-	Japan = {
-		Color3.fromRGB(37, 35, 38),
-		Color3.fromRGB(94, 38, 46),
-		Color3.fromRGB(173, 55, 62),
-		Color3.fromRGB(235, 112, 115),
-		Color3.fromRGB(245, 230, 213),
-	},
-
-	Bamboo = {
-		Color3.fromRGB(49, 72, 41),
-		Color3.fromRGB(85, 112, 61),
-		Color3.fromRGB(128, 154, 82),
-		Color3.fromRGB(177, 193, 112),
-		Color3.fromRGB(218, 220, 157),
-	},
-
-	Earth = {
-		Color3.fromRGB(65, 49, 37),
-		Color3.fromRGB(104, 76, 52),
-		Color3.fromRGB(146, 108, 72),
-		Color3.fromRGB(176, 145, 94),
-		Color3.fromRGB(93, 120, 79),
-	},
-
-	Clay = {
-		Color3.fromRGB(92, 52, 42),
-		Color3.fromRGB(137, 76, 58),
-		Color3.fromRGB(181, 105, 78),
-		Color3.fromRGB(215, 146, 112),
-		Color3.fromRGB(235, 189, 157),
-	},
-
-	Industrial = {
-		Color3.fromRGB(40, 43, 45),
-		Color3.fromRGB(73, 78, 81),
-		Color3.fromRGB(111, 117, 119),
-		Color3.fromRGB(161, 151, 126),
-		Color3.fromRGB(202, 139, 51),
-	},
-
-	Construction = {
-		Color3.fromRGB(42, 43, 42),
-		Color3.fromRGB(79, 81, 79),
-		Color3.fromRGB(125, 127, 120),
-		Color3.fromRGB(239, 174, 31),
-		Color3.fromRGB(255, 210, 70),
-	},
-
-	Military = {
-		Color3.fromRGB(40, 45, 34),
-		Color3.fromRGB(68, 76, 49),
-		Color3.fromRGB(102, 110, 69),
-		Color3.fromRGB(137, 132, 85),
-		Color3.fromRGB(178, 165, 112),
-	},
-
-	Steampunk = {
-		Color3.fromRGB(52, 40, 31),
-		Color3.fromRGB(91, 62, 42),
-		Color3.fromRGB(139, 91, 53),
-		Color3.fromRGB(188, 134, 72),
-		Color3.fromRGB(217, 181, 119),
-	},
-
-	Circuit = {
-		Color3.fromRGB(18, 28, 31),
-		Color3.fromRGB(30, 58, 60),
-		Color3.fromRGB(44, 101, 93),
-		Color3.fromRGB(54, 170, 141),
-		Color3.fromRGB(107, 239, 184),
-	},
-
-	Hacker = {
-		Color3.fromRGB(10, 18, 13),
-		Color3.fromRGB(16, 43, 24),
-		Color3.fromRGB(22, 82, 39),
-		Color3.fromRGB(31, 146, 60),
-		Color3.fromRGB(80, 255, 112),
-	},
-
-	Ruby = {
-		Color3.fromRGB(70, 15, 27),
-		Color3.fromRGB(113, 22, 40),
-		Color3.fromRGB(161, 31, 55),
-		Color3.fromRGB(210, 52, 76),
-		Color3.fromRGB(244, 105, 120),
-	},
-
-	Emerald = {
-		Color3.fromRGB(15, 64, 49),
-		Color3.fromRGB(22, 104, 75),
-		Color3.fromRGB(34, 151, 103),
-		Color3.fromRGB(60, 199, 137),
-		Color3.fromRGB(127, 232, 178),
-	},
-
-	Sapphire = {
-		Color3.fromRGB(23, 43, 91),
-		Color3.fromRGB(33, 67, 142),
-		Color3.fromRGB(49, 98, 194),
-		Color3.fromRGB(80, 137, 230),
-		Color3.fromRGB(143, 184, 246),
-	},
-
-	Amethyst = {
-		Color3.fromRGB(50, 29, 75),
-		Color3.fromRGB(82, 45, 117),
-		Color3.fromRGB(120, 67, 159),
-		Color3.fromRGB(164, 101, 197),
-		Color3.fromRGB(208, 159, 226),
-	},
-
-	Pearl = {
-		Color3.fromRGB(129, 119, 128),
-		Color3.fromRGB(171, 157, 171),
-		Color3.fromRGB(211, 195, 207),
-		Color3.fromRGB(238, 224, 231),
-		Color3.fromRGB(255, 246, 242),
-	},
-
-	Red = {
-		Color3.fromRGB(105, 20, 25),
-		Color3.fromRGB(155, 31, 38),
-		Color3.fromRGB(205, 47, 54),
-		Color3.fromRGB(239, 83, 88),
-		Color3.fromRGB(255, 143, 143),
-	},
-
-	Green = {
-		Color3.fromRGB(25, 85, 48),
-		Color3.fromRGB(39, 128, 67),
-		Color3.fromRGB(59, 174, 91),
-		Color3.fromRGB(101, 211, 127),
-		Color3.fromRGB(170, 235, 183),
-	},
-
-	Purple = {
-		Color3.fromRGB(61, 31, 102),
-		Color3.fromRGB(93, 47, 148),
-		Color3.fromRGB(130, 67, 191),
-		Color3.fromRGB(173, 104, 222),
-		Color3.fromRGB(216, 165, 240),
-	},
-
-	Orange = {
-		Color3.fromRGB(132, 57, 16),
-		Color3.fromRGB(185, 82, 19),
-		Color3.fromRGB(229, 116, 25),
-		Color3.fromRGB(249, 159, 54),
-		Color3.fromRGB(255, 207, 119),
-	},
-
-	Yellow = {
-		Color3.fromRGB(115, 94, 16),
-		Color3.fromRGB(174, 142, 21),
-		Color3.fromRGB(222, 184, 33),
-		Color3.fromRGB(250, 219, 74),
-		Color3.fromRGB(255, 241, 153),
-	},
-
-	Pink = {
-		Color3.fromRGB(128, 40, 82),
-		Color3.fromRGB(184, 59, 113),
-		Color3.fromRGB(228, 89, 146),
-		Color3.fromRGB(250, 137, 181),
-		Color3.fromRGB(255, 198, 221),
-	},
-
-	Teal = {
-		Color3.fromRGB(20, 76, 79),
-		Color3.fromRGB(31, 116, 116),
-		Color3.fromRGB(47, 160, 154),
-		Color3.fromRGB(83, 201, 188),
-		Color3.fromRGB(151, 231, 218),
-	},
-
-	Beige = {
-		Color3.fromRGB(103, 89, 70),
-		Color3.fromRGB(145, 127, 101),
-		Color3.fromRGB(185, 166, 135),
-		Color3.fromRGB(219, 203, 172),
-		Color3.fromRGB(245, 234, 208),
+type KeyTheme = {
+	Colors: { Color3 },
+	Material: Enum.Material,
+}
+
+local THEMES: { [string]: KeyTheme } = {
+
+	ChocolateBar = {
+		Colors = {
+			Color3.fromRGB(54, 31, 23),
+			Color3.fromRGB(84, 46, 30),
+			Color3.fromRGB(119, 67, 42),
+			Color3.fromRGB(159, 96, 60),
+			Color3.fromRGB(202, 139, 91),
+		},
+		Material = Enum.Material.Plastic,
+	},
+	--// SYNTHETIC / CLEAN
+
+	-- SmoothPlastic
+	SakuraLacquer = {
+		Colors = {
+			Color3.fromRGB(38, 25, 45),
+			Color3.fromRGB(93, 45, 72),
+			Color3.fromRGB(180, 84, 123),
+			Color3.fromRGB(244, 151, 181),
+			Color3.fromRGB(255, 226, 232),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	Bauhaus = {
+		Colors = {
+			Color3.fromRGB(24, 24, 23),
+			Color3.fromRGB(239, 234, 216),
+			Color3.fromRGB(209, 48, 47),
+			Color3.fromRGB(39, 93, 173),
+			Color3.fromRGB(240, 190, 45),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	NordicDusk = {
+		Colors = {
+			Color3.fromRGB(42, 52, 61),
+			Color3.fromRGB(83, 107, 124),
+			Color3.fromRGB(199, 116, 78),
+			Color3.fromRGB(216, 169, 75),
+			Color3.fromRGB(235, 226, 205),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	MatchaInk = {
+		Colors = {
+			Color3.fromRGB(16, 24, 20),
+			Color3.fromRGB(53, 94, 63),
+			Color3.fromRGB(127, 155, 91),
+			Color3.fromRGB(231, 226, 195),
+			Color3.fromRGB(91, 48, 68),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	MoonRabbit = {
+		Colors = {
+			Color3.fromRGB(22, 28, 57),
+			Color3.fromRGB(53, 68, 111),
+			Color3.fromRGB(166, 197, 224),
+			Color3.fromRGB(246, 241, 222),
+			Color3.fromRGB(229, 148, 166),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	SorbetSplit = {
+		Colors = {
+			Color3.fromRGB(250, 106, 104),
+			Color3.fromRGB(255, 170, 116),
+			Color3.fromRGB(248, 225, 159),
+			Color3.fromRGB(124, 210, 184),
+			Color3.fromRGB(183, 155, 226),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	BlackCherry = {
+		Colors = {
+			Color3.fromRGB(20, 16, 20),
+			Color3.fromRGB(61, 21, 34),
+			Color3.fromRGB(122, 30, 54),
+			Color3.fromRGB(203, 61, 91),
+			Color3.fromRGB(244, 175, 185),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	Solarized = {
+		Colors = {
+			Color3.fromRGB(15, 42, 51),
+			Color3.fromRGB(25, 80, 88),
+			Color3.fromRGB(42, 137, 137),
+			Color3.fromRGB(225, 178, 55),
+			Color3.fromRGB(231, 97, 47),
+		},
+		Material = Enum.Material.SmoothPlastic,
+	},
+
+	-- Plastic
+	ToyBlocks = {
+		Colors = {
+			Color3.fromRGB(222, 45, 55),
+			Color3.fromRGB(247, 169, 31),
+			Color3.fromRGB(248, 219, 63),
+			Color3.fromRGB(38, 154, 92),
+			Color3.fromRGB(36, 112, 200),
+			Color3.fromRGB(111, 56, 177),
+		},
+		Material = Enum.Material.Plastic,
+	},
+
+	RetroConsole = {
+		Colors = {
+			Color3.fromRGB(49, 47, 40),
+			Color3.fromRGB(99, 89, 67),
+			Color3.fromRGB(178, 151, 103),
+			Color3.fromRGB(216, 178, 111),
+			Color3.fromRGB(191, 84, 50),
+		},
+		Material = Enum.Material.Plastic,
+	},
+
+	CyberY2K = {
+		Colors = {
+			Color3.fromRGB(91, 101, 122),
+			Color3.fromRGB(145, 157, 184),
+			Color3.fromRGB(184, 170, 226),
+			Color3.fromRGB(108, 213, 226),
+			Color3.fromRGB(242, 157, 205),
+		},
+		Material = Enum.Material.Plastic,
+	},
+
+	CandyCircuit = {
+		Colors = {
+			Color3.fromRGB(37, 20, 48),
+			Color3.fromRGB(255, 70, 143),
+			Color3.fromRGB(255, 183, 91),
+			Color3.fromRGB(75, 220, 185),
+			Color3.fromRGB(142, 116, 225),
+			Color3.fromRGB(242, 228, 91),
+		},
+		Material = Enum.Material.Plastic,
+	},
+
+	BubbleTea = {
+		Colors = {
+			Color3.fromRGB(37, 30, 29),
+			Color3.fromRGB(141, 88, 56),
+			Color3.fromRGB(225, 180, 121),
+			Color3.fromRGB(179, 148, 196),
+			Color3.fromRGB(120, 155, 96),
+			Color3.fromRGB(245, 221, 183),
+		},
+		Material = Enum.Material.Plastic,
+	},
+
+	PopArt = {
+		Colors = {
+			Color3.fromRGB(22, 22, 24),
+			Color3.fromRGB(245, 242, 226),
+			Color3.fromRGB(235, 43, 126),
+			Color3.fromRGB(0, 166, 210),
+			Color3.fromRGB(249, 205, 41),
+		},
+		Material = Enum.Material.Plastic,
+	},
+
+	--// EMISSIVE / NEON
+
+	-- Neon
+	NeonGrid = {
+		Colors = {
+			Color3.fromRGB(20, 10, 46),
+			Color3.fromRGB(77, 17, 133),
+			Color3.fromRGB(207, 25, 215),
+			Color3.fromRGB(255, 43, 144),
+			Color3.fromRGB(0, 220, 245),
+		},
+		Material = Enum.Material.Neon,
+	},
+
+	AcidPulse = {
+		Colors = {
+			Color3.fromRGB(15, 18, 13),
+			Color3.fromRGB(45, 28, 65),
+			Color3.fromRGB(105, 39, 150),
+			Color3.fromRGB(158, 238, 34),
+			Color3.fromRGB(231, 255, 72),
+		},
+		Material = Enum.Material.Neon,
+	},
+
+	SolarFlare = {
+		Colors = {
+			Color3.fromRGB(89, 30, 3),
+			Color3.fromRGB(177, 65, 2),
+			Color3.fromRGB(242, 126, 9),
+			Color3.fromRGB(255, 190, 37),
+			Color3.fromRGB(255, 235, 112),
+			Color3.fromRGB(247, 255, 223),
+		},
+		Material = Enum.Material.Neon,
+	},
+
+	BlueReactor = {
+		Colors = {
+			Color3.fromRGB(6, 19, 48),
+			Color3.fromRGB(9, 55, 118),
+			Color3.fromRGB(13, 123, 205),
+			Color3.fromRGB(31, 211, 246),
+			Color3.fromRGB(188, 249, 255),
+		},
+		Material = Enum.Material.Neon,
+	},
+
+	Ultraviolet = {
+		Colors = {
+			Color3.fromRGB(12, 8, 20),
+			Color3.fromRGB(38, 15, 71),
+			Color3.fromRGB(76, 25, 137),
+			Color3.fromRGB(129, 42, 211),
+			Color3.fromRGB(208, 157, 255),
+		},
+		Material = Enum.Material.Neon,
+	},
+
+	--// WOOD / HANDCRAFTED
+
+	-- Wood
+	AutumnOrchard = {
+		Colors = {
+			Color3.fromRGB(45, 60, 34),
+			Color3.fromRGB(88, 115, 46),
+			Color3.fromRGB(177, 41, 45),
+			Color3.fromRGB(224, 97, 36),
+			Color3.fromRGB(240, 176, 54),
+			Color3.fromRGB(237, 219, 169),
+		},
+		Material = Enum.Material.Wood,
+	},
+
+	BambooInk = {
+		Colors = {
+			Color3.fromRGB(27, 31, 25),
+			Color3.fromRGB(54, 72, 42),
+			Color3.fromRGB(91, 113, 55),
+			Color3.fromRGB(151, 158, 87),
+			Color3.fromRGB(221, 211, 151),
+		},
+		Material = Enum.Material.Wood,
+	},
+
+	MahoganyStudy = {
+		Colors = {
+			Color3.fromRGB(46, 24, 21),
+			Color3.fromRGB(80, 34, 29),
+			Color3.fromRGB(119, 47, 39),
+			Color3.fromRGB(164, 91, 55),
+			Color3.fromRGB(197, 150, 83),
+			Color3.fromRGB(230, 205, 158),
+		},
+		Material = Enum.Material.Wood,
+	},
+
+	PaintedWorkshop = {
+		Colors = {
+			Color3.fromRGB(38, 34, 31),
+			Color3.fromRGB(36, 102, 105),
+			Color3.fromRGB(45, 82, 151),
+			Color3.fromRGB(207, 149, 49),
+			Color3.fromRGB(190, 70, 49),
+			Color3.fromRGB(235, 218, 178),
+		},
+		Material = Enum.Material.Wood,
+	},
+
+	-- WoodPlanks
+	NordicCabin = {
+		Colors = {
+			Color3.fromRGB(39, 52, 43),
+			Color3.fromRGB(77, 95, 65),
+			Color3.fromRGB(194, 54, 51),
+			Color3.fromRGB(228, 221, 198),
+			Color3.fromRGB(133, 174, 197),
+		},
+		Material = Enum.Material.WoodPlanks,
+	},
+
+	Boardwalk = {
+		Colors = {
+			Color3.fromRGB(75, 58, 46),
+			Color3.fromRGB(137, 99, 66),
+			Color3.fromRGB(42, 113, 144),
+			Color3.fromRGB(88, 181, 190),
+			Color3.fromRGB(237, 121, 91),
+			Color3.fromRGB(245, 196, 79),
+		},
+		Material = Enum.Material.WoodPlanks,
+	},
+
+	Driftwood = {
+		Colors = {
+			Color3.fromRGB(60, 62, 66),
+			Color3.fromRGB(95, 92, 90),
+			Color3.fromRGB(142, 128, 111),
+			Color3.fromRGB(93, 141, 151),
+			Color3.fromRGB(199, 128, 105),
+			Color3.fromRGB(226, 214, 185),
+		},
+		Material = Enum.Material.WoodPlanks,
+	},
+
+	PirateMap = {
+		Colors = {
+			Color3.fromRGB(33, 25, 21),
+			Color3.fromRGB(76, 47, 29),
+			Color3.fromRGB(151, 106, 58),
+			Color3.fromRGB(229, 201, 139),
+			Color3.fromRGB(140, 43, 39),
+			Color3.fromRGB(35, 66, 78),
+		},
+		Material = Enum.Material.WoodPlanks,
+	},
+
+	--// STONE / MINERAL
+
+	-- Marble
+	MarbleNoir = {
+		Colors = {
+			Color3.fromRGB(12, 14, 18),
+			Color3.fromRGB(38, 42, 49),
+			Color3.fromRGB(103, 112, 124),
+			Color3.fromRGB(221, 226, 226),
+			Color3.fromRGB(34, 84, 166),
+		},
+		Material = Enum.Material.Marble,
+	},
+
+	VerdeMarble = {
+		Colors = {
+			Color3.fromRGB(17, 43, 37),
+			Color3.fromRGB(28, 78, 61),
+			Color3.fromRGB(47, 125, 86),
+			Color3.fromRGB(225, 229, 211),
+			Color3.fromRGB(188, 148, 68),
+		},
+		Material = Enum.Material.Marble,
+	},
+
+	RoseMarble = {
+		Colors = {
+			Color3.fromRGB(43, 30, 35),
+			Color3.fromRGB(91, 43, 53),
+			Color3.fromRGB(151, 78, 88),
+			Color3.fromRGB(205, 145, 147),
+			Color3.fromRGB(229, 222, 211),
+			Color3.fromRGB(119, 119, 123),
+		},
+		Material = Enum.Material.Marble,
+	},
+
+	ImperialMarble = {
+		Colors = {
+			Color3.fromRGB(28, 20, 39),
+			Color3.fromRGB(70, 42, 94),
+			Color3.fromRGB(121, 70, 143),
+			Color3.fromRGB(222, 210, 225),
+			Color3.fromRGB(217, 177, 74),
+		},
+		Material = Enum.Material.Marble,
+	},
+
+	-- Basalt
+	BlackBeach = {
+		Colors = {
+			Color3.fromRGB(13, 16, 18),
+			Color3.fromRGB(32, 38, 40),
+			Color3.fromRGB(65, 72, 72),
+			Color3.fromRGB(73, 132, 126),
+			Color3.fromRGB(180, 92, 62),
+		},
+		Material = Enum.Material.Basalt,
+	},
+
+	ObsidianGold = {
+		Colors = {
+			Color3.fromRGB(10, 9, 13),
+			Color3.fromRGB(27, 21, 34),
+			Color3.fromRGB(54, 36, 61),
+			Color3.fromRGB(132, 88, 44),
+			Color3.fromRGB(220, 173, 65),
+		},
+		Material = Enum.Material.Basalt,
+	},
+
+	-- Slate
+	Stormfront = {
+		Colors = {
+			Color3.fromRGB(27, 31, 39),
+			Color3.fromRGB(50, 61, 75),
+			Color3.fromRGB(83, 101, 120),
+			Color3.fromRGB(152, 165, 175),
+			Color3.fromRGB(241, 203, 66),
+		},
+		Material = Enum.Material.Slate,
+	},
+
+	Monsoon = {
+		Colors = {
+			Color3.fromRGB(21, 39, 44),
+			Color3.fromRGB(35, 72, 78),
+			Color3.fromRGB(50, 108, 111),
+			Color3.fromRGB(86, 133, 115),
+			Color3.fromRGB(183, 194, 181),
+			Color3.fromRGB(204, 146, 65),
+		},
+		Material = Enum.Material.Slate,
+	},
+
+	Inkstone = {
+		Colors = {
+			Color3.fromRGB(15, 18, 23),
+			Color3.fromRGB(29, 40, 57),
+			Color3.fromRGB(62, 75, 91),
+			Color3.fromRGB(195, 194, 183),
+			Color3.fromRGB(188, 52, 46),
+		},
+		Material = Enum.Material.Slate,
+	},
+
+	-- CrackedLava
+	CrateredEmber = {
+		Colors = {
+			Color3.fromRGB(19, 14, 13),
+			Color3.fromRGB(58, 19, 14),
+			Color3.fromRGB(116, 26, 12),
+			Color3.fromRGB(205, 54, 11),
+			Color3.fromRGB(255, 137, 24),
+			Color3.fromRGB(255, 210, 79),
+		},
+		Material = Enum.Material.CrackedLava,
+	},
+
+	ArcaneMagma = {
+		Colors = {
+			Color3.fromRGB(21, 12, 27),
+			Color3.fromRGB(55, 21, 72),
+			Color3.fromRGB(116, 31, 129),
+			Color3.fromRGB(202, 47, 154),
+			Color3.fromRGB(248, 91, 78),
+			Color3.fromRGB(255, 173, 65),
+		},
+		Material = Enum.Material.CrackedLava,
+	},
+
+	ToxicCore = {
+		Colors = {
+			Color3.fromRGB(20, 24, 13),
+			Color3.fromRGB(46, 60, 17),
+			Color3.fromRGB(86, 111, 19),
+			Color3.fromRGB(151, 187, 29),
+			Color3.fromRGB(220, 244, 53),
+		},
+		Material = Enum.Material.CrackedLava,
+	},
+
+	-- Concrete
+	ConcreteMinimal = {
+		Colors = {
+			Color3.fromRGB(42, 43, 45),
+			Color3.fromRGB(82, 84, 85),
+			Color3.fromRGB(126, 127, 124),
+			Color3.fromRGB(185, 183, 175),
+			Color3.fromRGB(231, 226, 213),
+		},
+		Material = Enum.Material.Concrete,
+	},
+
+	BrutalistSignal = {
+		Colors = {
+			Color3.fromRGB(31, 33, 37),
+			Color3.fromRGB(78, 82, 86),
+			Color3.fromRGB(140, 144, 143),
+			Color3.fromRGB(224, 224, 214),
+			Color3.fromRGB(38, 73, 160),
+			Color3.fromRGB(226, 186, 39),
+		},
+		Material = Enum.Material.Concrete,
+	},
+
+	GraffitiWall = {
+		Colors = {
+			Color3.fromRGB(50, 52, 55),
+			Color3.fromRGB(101, 103, 104),
+			Color3.fromRGB(13, 181, 170),
+			Color3.fromRGB(229, 50, 138),
+			Color3.fromRGB(242, 185, 44),
+			Color3.fromRGB(24, 24, 27),
+		},
+		Material = Enum.Material.Concrete,
+	},
+
+	-- Limestone
+	Cathedral = {
+		Colors = {
+			Color3.fromRGB(63, 64, 62),
+			Color3.fromRGB(113, 110, 101),
+			Color3.fromRGB(224, 214, 185),
+			Color3.fromRGB(244, 235, 207),
+			Color3.fromRGB(72, 104, 139),
+			Color3.fromRGB(166, 39, 47),
+			Color3.fromRGB(196, 151, 58),
+		},
+		Material = Enum.Material.Limestone,
+	},
+
+	FossilBed = {
+		Colors = {
+			Color3.fromRGB(58, 49, 39),
+			Color3.fromRGB(101, 82, 58),
+			Color3.fromRGB(148, 117, 76),
+			Color3.fromRGB(196, 159, 103),
+			Color3.fromRGB(230, 205, 155),
+			Color3.fromRGB(93, 83, 68),
+		},
+		Material = Enum.Material.Limestone,
+	},
+
+	IvoryGarden = {
+		Colors = {
+			Color3.fromRGB(224, 216, 193),
+			Color3.fromRGB(185, 190, 151),
+			Color3.fromRGB(113, 139, 101),
+			Color3.fromRGB(193, 135, 128),
+			Color3.fromRGB(139, 145, 146),
+		},
+		Material = Enum.Material.Limestone,
+	},
+
+	-- Granite
+	LunarGranite = {
+		Colors = {
+			Color3.fromRGB(33, 34, 47),
+			Color3.fromRGB(64, 63, 82),
+			Color3.fromRGB(96, 91, 111),
+			Color3.fromRGB(123, 143, 169),
+			Color3.fromRGB(185, 195, 202),
+			Color3.fromRGB(211, 183, 117),
+		},
+		Material = Enum.Material.Granite,
+	},
+
+	GraniteRose = {
+		Colors = {
+			Color3.fromRGB(43, 42, 45),
+			Color3.fromRGB(95, 82, 86),
+			Color3.fromRGB(173, 104, 111),
+			Color3.fromRGB(146, 150, 126),
+			Color3.fromRGB(217, 196, 170),
+		},
+		Material = Enum.Material.Granite,
+	},
+
+	SpeckledTerrazzo = {
+		Colors = {
+			Color3.fromRGB(60, 59, 57),
+			Color3.fromRGB(112, 107, 98),
+			Color3.fromRGB(207, 101, 83),
+			Color3.fromRGB(61, 139, 137),
+			Color3.fromRGB(212, 164, 58),
+			Color3.fromRGB(228, 222, 205),
+		},
+		Material = Enum.Material.Granite,
+	},
+
+	--// URBAN / MASONRY
+
+	-- Pavement
+	MetroPlatform = {
+		Colors = {
+			Color3.fromRGB(42, 45, 47),
+			Color3.fromRGB(79, 84, 84),
+			Color3.fromRGB(128, 132, 127),
+			Color3.fromRGB(219, 216, 199),
+			Color3.fromRGB(48, 126, 93),
+			Color3.fromRGB(225, 124, 36),
+		},
+		Material = Enum.Material.Pavement,
+	},
+
+	RainyAlley = {
+		Colors = {
+			Color3.fromRGB(21, 25, 33),
+			Color3.fromRGB(39, 49, 65),
+			Color3.fromRGB(55, 80, 111),
+			Color3.fromRGB(78, 56, 111),
+			Color3.fromRGB(197, 47, 141),
+			Color3.fromRGB(35, 181, 204),
+		},
+		Material = Enum.Material.Pavement,
+	},
+
+	ChalkCourt = {
+		Colors = {
+			Color3.fromRGB(74, 78, 77),
+			Color3.fromRGB(128, 131, 125),
+			Color3.fromRGB(230, 228, 212),
+			Color3.fromRGB(82, 154, 193),
+			Color3.fromRGB(221, 101, 78),
+			Color3.fromRGB(217, 170, 54),
+		},
+		Material = Enum.Material.Pavement,
+	},
+
+	-- Brick
+	BrickGarden = {
+		Colors = {
+			Color3.fromRGB(73, 36, 31),
+			Color3.fromRGB(120, 50, 39),
+			Color3.fromRGB(171, 71, 49),
+			Color3.fromRGB(49, 84, 51),
+			Color3.fromRGB(104, 123, 68),
+			Color3.fromRGB(225, 204, 168),
+		},
+		Material = Enum.Material.Brick,
+	},
+
+	PaintedBrick = {
+		Colors = {
+			Color3.fromRGB(28, 50, 68),
+			Color3.fromRGB(55, 126, 133),
+			Color3.fromRGB(220, 105, 78),
+			Color3.fromRGB(238, 199, 91),
+			Color3.fromRGB(230, 226, 207),
+		},
+		Material = Enum.Material.Brick,
+	},
+
+	MidnightBrick = {
+		Colors = {
+			Color3.fromRGB(22, 20, 23),
+			Color3.fromRGB(55, 28, 37),
+			Color3.fromRGB(99, 34, 54),
+			Color3.fromRGB(88, 48, 93),
+			Color3.fromRGB(178, 100, 57),
+			Color3.fromRGB(126, 126, 131),
+		},
+		Material = Enum.Material.Brick,
+	},
+
+	-- Pebble
+	RiverStones = {
+		Colors = {
+			Color3.fromRGB(43, 52, 57),
+			Color3.fromRGB(72, 88, 94),
+			Color3.fromRGB(96, 119, 116),
+			Color3.fromRGB(111, 126, 92),
+			Color3.fromRGB(151, 141, 119),
+			Color3.fromRGB(211, 204, 181),
+		},
+		Material = Enum.Material.Pebble,
+	},
+
+	ZenPebble = {
+		Colors = {
+			Color3.fromRGB(16, 17, 16),
+			Color3.fromRGB(236, 232, 218),
+			Color3.fromRGB(177, 151, 105),
+			Color3.fromRGB(150, 38, 36),
+			Color3.fromRGB(70, 104, 62),
+		},
+		Material = Enum.Material.Pebble,
+	},
+
+	CandyPebbles = {
+		Colors = {
+			Color3.fromRGB(244, 173, 185),
+			Color3.fromRGB(251, 211, 142),
+			Color3.fromRGB(167, 217, 176),
+			Color3.fromRGB(151, 194, 231),
+			Color3.fromRGB(196, 173, 224),
+			Color3.fromRGB(236, 229, 211),
+		},
+		Material = Enum.Material.Pebble,
+	},
+
+	-- Cobblestone
+	OldHarbor = {
+		Colors = {
+			Color3.fromRGB(49, 53, 56),
+			Color3.fromRGB(82, 88, 89),
+			Color3.fromRGB(42, 66, 91),
+			Color3.fromRGB(61, 111, 105),
+			Color3.fromRGB(150, 76, 50),
+			Color3.fromRGB(180, 187, 181),
+		},
+		Material = Enum.Material.Cobblestone,
+	},
+
+	MossTemple = {
+		Colors = {
+			Color3.fromRGB(42, 47, 38),
+			Color3.fromRGB(66, 74, 51),
+			Color3.fromRGB(93, 107, 59),
+			Color3.fromRGB(135, 134, 75),
+			Color3.fromRGB(177, 153, 92),
+			Color3.fromRGB(209, 199, 162),
+		},
+		Material = Enum.Material.Cobblestone,
+	},
+
+	WinterSquare = {
+		Colors = {
+			Color3.fromRGB(55, 60, 65),
+			Color3.fromRGB(93, 104, 111),
+			Color3.fromRGB(158, 184, 198),
+			Color3.fromRGB(223, 230, 226),
+			Color3.fromRGB(119, 43, 55),
+			Color3.fromRGB(43, 75, 57),
+		},
+		Material = Enum.Material.Cobblestone,
+	},
+
+	-- Rock
+	CrystalCave = {
+		Colors = {
+			Color3.fromRGB(23, 24, 35),
+			Color3.fromRGB(48, 51, 73),
+			Color3.fromRGB(26, 157, 183),
+			Color3.fromRGB(91, 94, 203),
+			Color3.fromRGB(171, 65, 190),
+			Color3.fromRGB(222, 225, 247),
+		},
+		Material = Enum.Material.Rock,
+	},
+
+	CavernMoss = {
+		Colors = {
+			Color3.fromRGB(26, 28, 26),
+			Color3.fromRGB(52, 55, 45),
+			Color3.fromRGB(96, 80, 45),
+			Color3.fromRGB(169, 116, 48),
+			Color3.fromRGB(217, 164, 76),
+			Color3.fromRGB(182, 194, 141),
+		},
+		Material = Enum.Material.Rock,
+	},
+
+	DesertGeode = {
+		Colors = {
+			Color3.fromRGB(55, 41, 35),
+			Color3.fromRGB(98, 70, 50),
+			Color3.fromRGB(161, 106, 66),
+			Color3.fromRGB(53, 151, 154),
+			Color3.fromRGB(118, 74, 157),
+			Color3.fromRGB(226, 205, 170),
+		},
+		Material = Enum.Material.Rock,
+	},
+
+	-- Sandstone
+	RedMesa = {
+		Colors = {
+			Color3.fromRGB(91, 45, 33),
+			Color3.fromRGB(144, 63, 41),
+			Color3.fromRGB(194, 88, 52),
+			Color3.fromRGB(227, 136, 82),
+			Color3.fromRGB(54, 139, 145),
+			Color3.fromRGB(238, 211, 170),
+		},
+		Material = Enum.Material.Sandstone,
+	},
+
+	Sunstone = {
+		Colors = {
+			Color3.fromRGB(92, 57, 23),
+			Color3.fromRGB(144, 84, 25),
+			Color3.fromRGB(202, 125, 29),
+			Color3.fromRGB(236, 173, 47),
+			Color3.fromRGB(248, 220, 117),
+		},
+		Material = Enum.Material.Sandstone,
+	},
+
+	CanyonTwilight = {
+		Colors = {
+			Color3.fromRGB(59, 47, 63),
+			Color3.fromRGB(99, 66, 86),
+			Color3.fromRGB(156, 92, 100),
+			Color3.fromRGB(211, 132, 116),
+			Color3.fromRGB(238, 180, 143),
+			Color3.fromRGB(45, 50, 80),
+		},
+		Material = Enum.Material.Sandstone,
+	},
+
+	--// METAL / INDUSTRIAL
+
+	-- CorrodedMetal
+	RustBloom = {
+		Colors = {
+			Color3.fromRGB(44, 31, 29),
+			Color3.fromRGB(102, 45, 38),
+			Color3.fromRGB(172, 66, 52),
+			Color3.fromRGB(224, 111, 90),
+			Color3.fromRGB(196, 147, 157),
+			Color3.fromRGB(229, 204, 166),
+		},
+		Material = Enum.Material.CorrodedMetal,
+	},
+
+	Shipwreck = {
+		Colors = {
+			Color3.fromRGB(36, 31, 28),
+			Color3.fromRGB(68, 50, 38),
+			Color3.fromRGB(102, 82, 60),
+			Color3.fromRGB(38, 92, 89),
+			Color3.fromRGB(62, 132, 142),
+			Color3.fromRGB(160, 148, 111),
+		},
+		Material = Enum.Material.CorrodedMetal,
+	},
+
+	JunkyardNeon = {
+		Colors = {
+			Color3.fromRGB(31, 31, 32),
+			Color3.fromRGB(73, 61, 54),
+			Color3.fromRGB(133, 77, 48),
+			Color3.fromRGB(160, 218, 47),
+			Color3.fromRGB(226, 48, 142),
+			Color3.fromRGB(48, 127, 199),
+		},
+		Material = Enum.Material.CorrodedMetal,
+	},
+
+	-- DiamondPlate
+	IndustrialHazard = {
+		Colors = {
+			Color3.fromRGB(24, 25, 26),
+			Color3.fromRGB(65, 68, 69),
+			Color3.fromRGB(119, 124, 124),
+			Color3.fromRGB(230, 181, 40),
+			Color3.fromRGB(247, 215, 74),
+			Color3.fromRGB(232, 229, 211),
+		},
+		Material = Enum.Material.DiamondPlate,
+	},
+
+	MechaWhite = {
+		Colors = {
+			Color3.fromRGB(29, 31, 35),
+			Color3.fromRGB(90, 97, 105),
+			Color3.fromRGB(181, 188, 191),
+			Color3.fromRGB(238, 239, 232),
+			Color3.fromRGB(205, 48, 45),
+			Color3.fromRGB(45, 104, 190),
+		},
+		Material = Enum.Material.DiamondPlate,
+	},
+
+	DesertRig = {
+		Colors = {
+			Color3.fromRGB(31, 33, 30),
+			Color3.fromRGB(78, 75, 54),
+			Color3.fromRGB(130, 118, 75),
+			Color3.fromRGB(212, 190, 137),
+			Color3.fromRGB(42, 105, 117),
+			Color3.fromRGB(180, 55, 43),
+		},
+		Material = Enum.Material.DiamondPlate,
+	},
+
+	-- Foil
+	Mercury = {
+		Colors = {
+			Color3.fromRGB(27, 32, 39),
+			Color3.fromRGB(61, 76, 87),
+			Color3.fromRGB(96, 122, 132),
+			Color3.fromRGB(137, 166, 164),
+			Color3.fromRGB(97, 145, 163),
+			Color3.fromRGB(215, 226, 225),
+			Color3.fromRGB(160, 149, 188),
+		},
+		Material = Enum.Material.Foil,
+	},
+
+	RoseFoil = {
+		Colors = {
+			Color3.fromRGB(55, 32, 47),
+			Color3.fromRGB(104, 55, 69),
+			Color3.fromRGB(164, 91, 91),
+			Color3.fromRGB(216, 144, 120),
+			Color3.fromRGB(239, 197, 163),
+			Color3.fromRGB(222, 219, 213),
+		},
+		Material = Enum.Material.Foil,
+	},
+
+	OilSlick = {
+		Colors = {
+			Color3.fromRGB(15, 17, 23),
+			Color3.fromRGB(25, 55, 65),
+			Color3.fromRGB(35, 95, 91),
+			Color3.fromRGB(68, 68, 125),
+			Color3.fromRGB(119, 55, 132),
+			Color3.fromRGB(174, 133, 49),
+		},
+		Material = Enum.Material.Foil,
+	},
+
+	-- Metal
+	BrassObservatory = {
+		Colors = {
+			Color3.fromRGB(21, 28, 45),
+			Color3.fromRGB(44, 58, 79),
+			Color3.fromRGB(103, 82, 41),
+			Color3.fromRGB(169, 126, 47),
+			Color3.fromRGB(221, 184, 87),
+			Color3.fromRGB(226, 218, 190),
+		},
+		Material = Enum.Material.Metal,
+	},
+
+	CopperPatina = {
+		Colors = {
+			Color3.fromRGB(53, 31, 25),
+			Color3.fromRGB(107, 56, 37),
+			Color3.fromRGB(172, 91, 52),
+			Color3.fromRGB(36, 105, 98),
+			Color3.fromRGB(70, 153, 133),
+			Color3.fromRGB(221, 202, 159),
+		},
+		Material = Enum.Material.Metal,
+	},
+
+	GunmetalOrange = {
+		Colors = {
+			Color3.fromRGB(23, 25, 29),
+			Color3.fromRGB(56, 61, 68),
+			Color3.fromRGB(100, 107, 113),
+			Color3.fromRGB(221, 93, 27),
+			Color3.fromRGB(246, 156, 55),
+			Color3.fromRGB(226, 226, 218),
+		},
+		Material = Enum.Material.Metal,
+	},
+
+	ChromePop = {
+		Colors = {
+			Color3.fromRGB(27, 30, 35),
+			Color3.fromRGB(92, 103, 112),
+			Color3.fromRGB(201, 210, 213),
+			Color3.fromRGB(116, 224, 57),
+			Color3.fromRGB(84, 63, 201),
+			Color3.fromRGB(230, 56, 157),
+		},
+		Material = Enum.Material.Metal,
+	},
+
+	OrbitalLab = {
+		Colors = {
+			Color3.fromRGB(18, 24, 34),
+			Color3.fromRGB(50, 65, 83),
+			Color3.fromRGB(98, 118, 139),
+			Color3.fromRGB(204, 214, 220),
+			Color3.fromRGB(44, 181, 207),
+			Color3.fromRGB(116, 91, 190),
+		},
+		Material = Enum.Material.Metal,
+	},
+
+	--// NATURE / TERRAIN
+
+	-- Grass
+	AlpineMeadow = {
+		Colors = {
+			Color3.fromRGB(37, 93, 52),
+			Color3.fromRGB(64, 139, 67),
+			Color3.fromRGB(115, 178, 84),
+			Color3.fromRGB(105, 180, 218),
+			Color3.fromRGB(241, 202, 66),
+			Color3.fromRGB(219, 223, 212),
+		},
+		Material = Enum.Material.Grass,
+	},
+
+	MeadowPicnic = {
+		Colors = {
+			Color3.fromRGB(38, 84, 50),
+			Color3.fromRGB(183, 43, 48),
+			Color3.fromRGB(232, 220, 190),
+			Color3.fromRGB(37, 59, 89),
+			Color3.fromRGB(225, 172, 42),
+		},
+		Material = Enum.Material.Grass,
+	},
+
+	BiolumGrove = {
+		Colors = {
+			Color3.fromRGB(13, 39, 36),
+			Color3.fromRGB(18, 76, 60),
+			Color3.fromRGB(25, 119, 83),
+			Color3.fromRGB(33, 178, 145),
+			Color3.fromRGB(67, 194, 219),
+			Color3.fromRGB(126, 72, 173),
+		},
+		Material = Enum.Material.Grass,
+	},
+
+	-- LeafyGrass
+	RainforestFruit = {
+		Colors = {
+			Color3.fromRGB(18, 65, 43),
+			Color3.fromRGB(30, 109, 62),
+			Color3.fromRGB(62, 155, 80),
+			Color3.fromRGB(225, 54, 116),
+			Color3.fromRGB(244, 148, 48),
+			Color3.fromRGB(241, 201, 57),
+		},
+		Material = Enum.Material.LeafyGrass,
+	},
+
+	EnchantedFoliage = {
+		Colors = {
+			Color3.fromRGB(17, 44, 35),
+			Color3.fromRGB(32, 77, 52),
+			Color3.fromRGB(70, 119, 75),
+			Color3.fromRGB(93, 67, 139),
+			Color3.fromRGB(174, 176, 196),
+			Color3.fromRGB(214, 191, 111),
+		},
+		Material = Enum.Material.LeafyGrass,
+	},
+
+	AutumnCanopy = {
+		Colors = {
+			Color3.fromRGB(68, 69, 34),
+			Color3.fromRGB(111, 101, 42),
+			Color3.fromRGB(169, 127, 43),
+			Color3.fromRGB(208, 92, 38),
+			Color3.fromRGB(133, 45, 43),
+			Color3.fromRGB(212, 178, 112),
+		},
+		Material = Enum.Material.LeafyGrass,
+	},
+
+	-- Sand
+	DesertMirage = {
+		Colors = {
+			Color3.fromRGB(148, 104, 58),
+			Color3.fromRGB(200, 151, 83),
+			Color3.fromRGB(233, 199, 137),
+			Color3.fromRGB(52, 153, 157),
+			Color3.fromRGB(126, 81, 155),
+			Color3.fromRGB(226, 113, 91),
+		},
+		Material = Enum.Material.Sand,
+	},
+
+	MoonSand = {
+		Colors = {
+			Color3.fromRGB(45, 43, 58),
+			Color3.fromRGB(76, 69, 91),
+			Color3.fromRGB(112, 98, 133),
+			Color3.fromRGB(132, 151, 190),
+			Color3.fromRGB(179, 188, 211),
+			Color3.fromRGB(213, 208, 219),
+		},
+		Material = Enum.Material.Sand,
+	},
+
+	CoralDunes = {
+		Colors = {
+			Color3.fromRGB(112, 68, 50),
+			Color3.fromRGB(179, 103, 72),
+			Color3.fromRGB(230, 148, 107),
+			Color3.fromRGB(245, 193, 145),
+			Color3.fromRGB(44, 139, 151),
+			Color3.fromRGB(235, 228, 205),
+		},
+		Material = Enum.Material.Sand,
+	},
+
+	-- Fabric
+	RoyalVelvet = {
+		Colors = {
+			Color3.fromRGB(19, 14, 20),
+			Color3.fromRGB(55, 17, 35),
+			Color3.fromRGB(104, 25, 49),
+			Color3.fromRGB(161, 50, 78),
+			Color3.fromRGB(206, 164, 66),
+			Color3.fromRGB(232, 214, 181),
+		},
+		Material = Enum.Material.Fabric,
+	},
+
+	Tartan = {
+		Colors = {
+			Color3.fromRGB(27, 54, 42),
+			Color3.fromRGB(52, 82, 55),
+			Color3.fromRGB(115, 35, 41),
+			Color3.fromRGB(31, 46, 70),
+			Color3.fromRGB(188, 151, 78),
+			Color3.fromRGB(219, 205, 170),
+		},
+		Material = Enum.Material.Fabric,
+	},
+
+	SunflowerDenim = {
+		Colors = {
+			Color3.fromRGB(29, 54, 83),
+			Color3.fromRGB(49, 87, 126),
+			Color3.fromRGB(83, 133, 170),
+			Color3.fromRGB(221, 174, 37),
+			Color3.fromRGB(243, 213, 92),
+			Color3.fromRGB(232, 222, 195),
+		},
+		Material = Enum.Material.Fabric,
+	},
+
+	KimonoNight = {
+		Colors = {
+			Color3.fromRGB(21, 29, 63),
+			Color3.fromRGB(40, 55, 102),
+			Color3.fromRGB(228, 218, 192),
+			Color3.fromRGB(218, 133, 158),
+			Color3.fromRGB(50, 124, 119),
+			Color3.fromRGB(191, 150, 57),
+		},
+		Material = Enum.Material.Fabric,
+	},
+
+	-- Snow
+	PolarNight = {
+		Colors = {
+			Color3.fromRGB(16, 25, 49),
+			Color3.fromRGB(35, 54, 87),
+			Color3.fromRGB(219, 239, 242),
+			Color3.fromRGB(83, 199, 152),
+			Color3.fromRGB(121, 92, 191),
+			Color3.fromRGB(166, 205, 226),
+		},
+		Material = Enum.Material.Snow,
+	},
+
+	Snowberry = {
+		Colors = {
+			Color3.fromRGB(236, 247, 248),
+			Color3.fromRGB(191, 220, 231),
+			Color3.fromRGB(129, 166, 185),
+			Color3.fromRGB(178, 38, 54),
+			Color3.fromRGB(43, 91, 61),
+			Color3.fromRGB(235, 167, 178),
+		},
+		Material = Enum.Material.Snow,
+	},
+
+	AlpineSunrise = {
+		Colors = {
+			Color3.fromRGB(241, 248, 248),
+			Color3.fromRGB(190, 217, 231),
+			Color3.fromRGB(146, 157, 199),
+			Color3.fromRGB(226, 151, 148),
+			Color3.fromRGB(242, 189, 120),
+			Color3.fromRGB(246, 221, 166),
+		},
+		Material = Enum.Material.Snow,
+	},
+
+	-- Mud
+	MuddyBoots = {
+		Colors = {
+			Color3.fromRGB(48, 39, 31),
+			Color3.fromRGB(82, 61, 43),
+			Color3.fromRGB(123, 85, 52),
+			Color3.fromRGB(99, 101, 55),
+			Color3.fromRGB(185, 102, 49),
+			Color3.fromRGB(207, 164, 105),
+		},
+		Material = Enum.Material.Mud,
+	},
+
+	ClaySwamp = {
+		Colors = {
+			Color3.fromRGB(54, 54, 43),
+			Color3.fromRGB(85, 83, 59),
+			Color3.fromRGB(112, 107, 77),
+			Color3.fromRGB(114, 88, 91),
+			Color3.fromRGB(153, 139, 112),
+			Color3.fromRGB(202, 192, 158),
+		},
+		Material = Enum.Material.Mud,
+	},
+
+	-- Ground
+	Petrichor = {
+		Colors = {
+			Color3.fromRGB(45, 40, 34),
+			Color3.fromRGB(77, 67, 52),
+			Color3.fromRGB(83, 99, 68),
+			Color3.fromRGB(74, 96, 108),
+			Color3.fromRGB(130, 145, 145),
+			Color3.fromRGB(208, 199, 177),
+		},
+		Material = Enum.Material.Ground,
+	},
+
+	TundraGround = {
+		Colors = {
+			Color3.fromRGB(40, 41, 49),
+			Color3.fromRGB(70, 67, 80),
+			Color3.fromRGB(103, 113, 92),
+			Color3.fromRGB(111, 143, 174),
+			Color3.fromRGB(177, 197, 213),
+			Color3.fromRGB(229, 231, 225),
+		},
+		Material = Enum.Material.Ground,
+	},
+
+	--// WEATHER / COLD / TRANSLUCENT
+
+	-- Asphalt
+	CityCrosswalk = {
+		Colors = {
+			Color3.fromRGB(19, 21, 23),
+			Color3.fromRGB(51, 55, 58),
+			Color3.fromRGB(92, 96, 96),
+			Color3.fromRGB(231, 230, 218),
+			Color3.fromRGB(236, 187, 35),
+			Color3.fromRGB(191, 45, 45),
+		},
+		Material = Enum.Material.Asphalt,
+	},
+
+	SunsetBoulevard = {
+		Colors = {
+			Color3.fromRGB(25, 25, 32),
+			Color3.fromRGB(54, 45, 68),
+			Color3.fromRGB(107, 49, 101),
+			Color3.fromRGB(211, 61, 125),
+			Color3.fromRGB(238, 112, 54),
+			Color3.fromRGB(244, 190, 49),
+		},
+		Material = Enum.Material.Asphalt,
+	},
+
+	-- Salt
+	SaltFlats = {
+		Colors = {
+			Color3.fromRGB(118, 126, 133),
+			Color3.fromRGB(169, 179, 183),
+			Color3.fromRGB(205, 216, 218),
+			Color3.fromRGB(239, 241, 235),
+			Color3.fromRGB(215, 179, 181),
+			Color3.fromRGB(62, 66, 73),
+		},
+		Material = Enum.Material.Salt,
+	},
+
+	HimalayanSalt = {
+		Colors = {
+			Color3.fromRGB(125, 67, 71),
+			Color3.fromRGB(177, 96, 94),
+			Color3.fromRGB(218, 132, 118),
+			Color3.fromRGB(241, 177, 149),
+			Color3.fromRGB(251, 218, 191),
+		},
+		Material = Enum.Material.Salt,
+	},
+
+	-- Ice
+	Frostfire = {
+		Colors = {
+			Color3.fromRGB(22, 67, 94),
+			Color3.fromRGB(51, 123, 151),
+			Color3.fromRGB(104, 190, 208),
+			Color3.fromRGB(205, 237, 240),
+			Color3.fromRGB(239, 120, 48),
+			Color3.fromRGB(205, 48, 36),
+		},
+		Material = Enum.Material.Ice,
+	},
+
+	BlackIce = {
+		Colors = {
+			Color3.fromRGB(5, 10, 18),
+			Color3.fromRGB(15, 31, 56),
+			Color3.fromRGB(22, 65, 110),
+			Color3.fromRGB(21, 134, 177),
+			Color3.fromRGB(93, 221, 239),
+			Color3.fromRGB(234, 252, 255),
+		},
+		Material = Enum.Material.Ice,
+	},
+
+	-- Glacier
+	GlacierVein = {
+		Colors = {
+			Color3.fromRGB(48, 83, 102),
+			Color3.fromRGB(80, 129, 151),
+			Color3.fromRGB(128, 180, 198),
+			Color3.fromRGB(187, 220, 228),
+			Color3.fromRGB(231, 244, 245),
+			Color3.fromRGB(31, 63, 75),
+		},
+		Material = Enum.Material.Glacier,
+	},
+
+	AncientIce = {
+		Colors = {
+			Color3.fromRGB(45, 54, 55),
+			Color3.fromRGB(80, 89, 84),
+			Color3.fromRGB(119, 117, 92),
+			Color3.fromRGB(161, 140, 92),
+			Color3.fromRGB(193, 211, 204),
+			Color3.fromRGB(232, 237, 225),
+		},
+		Material = Enum.Material.Glacier,
+	},
+
+	-- Glass
+	SeaGlass = {
+		Colors = {
+			Color3.fromRGB(38, 103, 106),
+			Color3.fromRGB(59, 151, 142),
+			Color3.fromRGB(111, 199, 176),
+			Color3.fromRGB(177, 226, 205),
+			Color3.fromRGB(211, 164, 86),
+			Color3.fromRGB(233, 238, 219),
+		},
+		Material = Enum.Material.Glass,
+	},
+
+	StainedGlass = {
+		Colors = {
+			Color3.fromRGB(107, 24, 48),
+			Color3.fromRGB(36, 78, 155),
+			Color3.fromRGB(26, 131, 92),
+			Color3.fromRGB(218, 154, 34),
+			Color3.fromRGB(116, 55, 157),
+			Color3.fromRGB(28, 28, 36),
+		},
+		Material = Enum.Material.Glass,
+	},
+
+	SunsetGlass = {
+		Colors = {
+			Color3.fromRGB(62, 40, 87),
+			Color3.fromRGB(108, 46, 125),
+			Color3.fromRGB(200, 55, 126),
+			Color3.fromRGB(240, 105, 82),
+			Color3.fromRGB(244, 168, 67),
+			Color3.fromRGB(38, 64, 111),
+		},
+		Material = Enum.Material.Glass,
+	},
+
+	SmokedGlass = {
+		Colors = {
+			Color3.fromRGB(17, 20, 24),
+			Color3.fromRGB(42, 48, 55),
+			Color3.fromRGB(77, 87, 94),
+			Color3.fromRGB(127, 123, 112),
+			Color3.fromRGB(171, 128, 78),
+			Color3.fromRGB(194, 211, 215),
+		},
+		Material = Enum.Material.Glass,
+	},
+
+	-- ForceField
+	HolographicPearl = {
+		Colors = {
+			Color3.fromRGB(118, 217, 228),
+			Color3.fromRGB(152, 235, 213),
+			Color3.fromRGB(191, 207, 246),
+			Color3.fromRGB(226, 177, 239),
+			Color3.fromRGB(247, 221, 233),
+			Color3.fromRGB(239, 248, 246),
+		},
+		Material = Enum.Material.ForceField,
+	},
+
+	SpectralError = {
+		Colors = {
+			Color3.fromRGB(16, 18, 24),
+			Color3.fromRGB(32, 228, 148),
+			Color3.fromRGB(32, 180, 227),
+			Color3.fromRGB(231, 48, 159),
+			Color3.fromRGB(151, 64, 226),
+			Color3.fromRGB(241, 244, 237),
+		},
+		Material = Enum.Material.ForceField,
+	},
+
+	--// SOFT / PAPER / ARCHITECTURAL
+
+	-- Cardboard
+	PaperToy = {
+		Colors = {
+			Color3.fromRGB(89, 65, 45),
+			Color3.fromRGB(146, 104, 67),
+			Color3.fromRGB(210, 166, 103),
+			Color3.fromRGB(218, 53, 48),
+			Color3.fromRGB(40, 115, 185),
+			Color3.fromRGB(234, 199, 58),
+		},
+		Material = Enum.Material.Cardboard,
+	},
+
+	Newspaper = {
+		Colors = {
+			Color3.fromRGB(30, 31, 32),
+			Color3.fromRGB(87, 88, 87),
+			Color3.fromRGB(154, 153, 147),
+			Color3.fromRGB(225, 220, 205),
+			Color3.fromRGB(152, 48, 42),
+			Color3.fromRGB(183, 150, 96),
+		},
+		Material = Enum.Material.Cardboard,
+	},
+
+	-- Carpet
+	DesertRug = {
+		Colors = {
+			Color3.fromRGB(49, 31, 34),
+			Color3.fromRGB(103, 39, 49),
+			Color3.fromRGB(32, 51, 76),
+			Color3.fromRGB(194, 139, 44),
+			Color3.fromRGB(225, 199, 145),
+			Color3.fromRGB(91, 70, 47),
+		},
+		Material = Enum.Material.Carpet,
+	},
+
+	ArcadeCarpet = {
+		Colors = {
+			Color3.fromRGB(26, 23, 55),
+			Color3.fromRGB(61, 37, 101),
+			Color3.fromRGB(130, 53, 150),
+			Color3.fromRGB(227, 48, 147),
+			Color3.fromRGB(43, 186, 206),
+			Color3.fromRGB(239, 190, 48),
+		},
+		Material = Enum.Material.Carpet,
+	},
+
+	-- CeramicTiles
+	MediterraneanTiles = {
+		Colors = {
+			Color3.fromRGB(24, 65, 128),
+			Color3.fromRGB(46, 112, 174),
+			Color3.fromRGB(224, 230, 218),
+			Color3.fromRGB(203, 85, 57),
+			Color3.fromRGB(66, 157, 144),
+			Color3.fromRGB(231, 185, 59),
+		},
+		Material = Enum.Material.CeramicTiles,
+	},
+
+	Kintsugi = {
+		Colors = {
+			Color3.fromRGB(22, 22, 24),
+			Color3.fromRGB(63, 60, 58),
+			Color3.fromRGB(230, 223, 205),
+			Color3.fromRGB(190, 145, 52),
+			Color3.fromRGB(123, 39, 49),
+		},
+		Material = Enum.Material.CeramicTiles,
+	},
+
+	-- ClayRoofTiles
+	TuscanRoof = {
+		Colors = {
+			Color3.fromRGB(103, 54, 35),
+			Color3.fromRGB(161, 77, 45),
+			Color3.fromRGB(211, 111, 61),
+			Color3.fromRGB(130, 126, 62),
+			Color3.fromRGB(224, 207, 167),
+			Color3.fromRGB(100, 155, 185),
+		},
+		Material = Enum.Material.ClayRoofTiles,
+	},
+
+	FestivalRoof = {
+		Colors = {
+			Color3.fromRGB(111, 43, 39),
+			Color3.fromRGB(194, 66, 50),
+			Color3.fromRGB(227, 119, 58),
+			Color3.fromRGB(38, 149, 148),
+			Color3.fromRGB(231, 187, 46),
+			Color3.fromRGB(182, 65, 133),
+		},
+		Material = Enum.Material.ClayRoofTiles,
+	},
+
+	-- RoofShingles
+	RooftopRain = {
+		Colors = {
+			Color3.fromRGB(30, 34, 38),
+			Color3.fromRGB(54, 63, 71),
+			Color3.fromRGB(83, 101, 110),
+			Color3.fromRGB(67, 93, 75),
+			Color3.fromRGB(136, 159, 167),
+			Color3.fromRGB(195, 210, 211),
+		},
+		Material = Enum.Material.RoofShingles,
+	},
+
+	GingerbreadRoof = {
+		Colors = {
+			Color3.fromRGB(67, 39, 29),
+			Color3.fromRGB(118, 63, 38),
+			Color3.fromRGB(176, 93, 46),
+			Color3.fromRGB(194, 43, 48),
+			Color3.fromRGB(43, 99, 58),
+			Color3.fromRGB(238, 224, 192),
+		},
+		Material = Enum.Material.RoofShingles,
+	},
+
+	-- Leather
+	Leatherbound = {
+		Colors = {
+			Color3.fromRGB(25, 34, 28),
+			Color3.fromRGB(42, 66, 46),
+			Color3.fromRGB(91, 27, 38),
+			Color3.fromRGB(129, 70, 43),
+			Color3.fromRGB(198, 158, 82),
+			Color3.fromRGB(230, 210, 169),
+		},
+		Material = Enum.Material.Leather,
+	},
+
+	RacingLeather = {
+		Colors = {
+			Color3.fromRGB(18, 19, 21),
+			Color3.fromRGB(48, 51, 55),
+			Color3.fromRGB(104, 107, 108),
+			Color3.fromRGB(214, 42, 43),
+			Color3.fromRGB(238, 236, 224),
+			Color3.fromRGB(191, 128, 69),
+		},
+		Material = Enum.Material.Leather,
+	},
+
+	-- Plaster
+	ChalkStucco = {
+		Colors = {
+			Color3.fromRGB(230, 222, 203),
+			Color3.fromRGB(201, 189, 164),
+			Color3.fromRGB(188, 102, 75),
+			Color3.fromRGB(112, 136, 103),
+			Color3.fromRGB(101, 135, 158),
+		},
+		Material = Enum.Material.Plaster,
+	},
+
+	ArtDecoPlaster = {
+		Colors = {
+			Color3.fromRGB(24, 25, 27),
+			Color3.fromRGB(235, 225, 198),
+			Color3.fromRGB(36, 102, 87),
+			Color3.fromRGB(188, 145, 51),
+			Color3.fromRGB(206, 91, 77),
+		},
+		Material = Enum.Material.Plaster,
+	},
+
+	-- Rubber
+	RubberDuck = {
+		Colors = {
+			Color3.fromRGB(25, 30, 35),
+			Color3.fromRGB(245, 188, 31),
+			Color3.fromRGB(255, 222, 68),
+			Color3.fromRGB(235, 111, 34),
+			Color3.fromRGB(45, 127, 190),
+			Color3.fromRGB(237, 239, 226),
+		},
+		Material = Enum.Material.Rubber,
+	},
+
+	StealthRubber = {
+		Colors = {
+			Color3.fromRGB(10, 12, 15),
+			Color3.fromRGB(29, 33, 38),
+			Color3.fromRGB(59, 66, 73),
+			Color3.fromRGB(106, 119, 127),
+			Color3.fromRGB(173, 224, 51),
+			Color3.fromRGB(223, 229, 225),
+		},
+		Material = Enum.Material.Rubber,
 	},
 }
 
@@ -811,14 +1687,24 @@ local ALPHABET = {
 type KeyState = {
 	originalCFrame: CFrame,
 	originalColor: Color3,
+	originalMaterial: Enum.Material,
 	createdGui: SurfaceGui?,
+	themeConnection: RBXScriptConnection?,
 	pressed: boolean,
 	currentTween: Tween?,
 }
 
 local player = Players.LocalPlayer
 local trackedKeys: { [MeshPart]: KeyState } = {}
+local pressedKeys: { [MeshPart]: boolean } = {}
+local keysUnderPlayer: { [MeshPart]: boolean } = {}
+local normalizingTheme: { [MeshPart]: boolean } = {}
 local previousLetter = ""
+local excludedCharacter: Model? = nil
+
+local keyOverlapParams = OverlapParams.new()
+keyOverlapParams.MaxParts = 0
+keyOverlapParams.RespectCanCollide = false
 
 local LightUpKeysController = {}
 
@@ -879,25 +1765,34 @@ end
 
 local function applyTheme(key: MeshPart)
 	local attribute = key:GetAttribute(THEME_ATTRIBUTE)
-	local themeName = DEFAULT_THEME
+	local themeName = if typeof(attribute) == "string" and THEMES[attribute] ~= nil then attribute else DEFAULT_THEME
 
-	if attribute ~= nil then
-		if typeof(attribute) ~= "string" then
+	if attribute ~= themeName then
+		if attribute ~= nil then
 			log.warn(
-				`{key:GetFullName()}.{THEME_ATTRIBUTE} should be a string, got {typeof(attribute)} -- color unchanged`
+				`{key:GetFullName()}.{THEME_ATTRIBUTE} has invalid theme {tostring(attribute)} -- using {DEFAULT_THEME}`
 			)
-			return
 		end
-		themeName = attribute
+
+		normalizingTheme[key] = true
+		key:SetAttribute(THEME_ATTRIBUTE, themeName)
+		normalizingTheme[key] = nil
 	end
 
-	local palette = THEMES[themeName]
-	if palette == nil then
-		log.warn(`{key:GetFullName()}.{THEME_ATTRIBUTE} has unknown theme "{themeName}" -- color unchanged`)
+	local theme = THEMES[themeName]
+	if theme == nil then
+		log.warn(`default keycap theme "{DEFAULT_THEME}" is not configured -- appearance unchanged`)
 		return
 	end
 
-	key.Color = palette[math.random(1, #palette)]
+	local colors = theme.Colors
+	if #colors == 0 then
+		log.warn(`keycap theme "{themeName}" has no colors -- appearance unchanged`)
+		return
+	end
+
+	key.Color = colors[math.random(1, #colors)]
+	key.Material = theme.Material
 end
 
 -- One transient Sound per press allows rapid or overlapping presses to layer.
@@ -958,12 +1853,14 @@ local function pressKey(key: MeshPart, state: KeyState)
 		return
 	end
 	state.pressed = true
+	pressedKeys[key] = true
 
 	playKeySound(key)
 	tweenKey(key, state, state.originalCFrame * CFrame.new(0, -DROP_DISTANCE, 0), PRESS_INFO)
 end
 
 local function releaseKey(key: MeshPart, state: KeyState)
+	pressedKeys[key] = nil
 	if not state.pressed then
 		return
 	end
@@ -972,14 +1869,7 @@ local function releaseKey(key: MeshPart, state: KeyState)
 	tweenKey(key, state, state.originalCFrame, RELEASE_INFO)
 end
 
-local function isPlayerOnKey(key: MeshPart): boolean
-	local character = player.Character
-	local root = if character ~= nil then character:FindFirstChild("HumanoidRootPart") else nil
-	if root == nil or not root:IsA("BasePart") then
-		return false
-	end
-
-	local position = root.Position
+local function isPlayerOnKey(position: Vector3, key: MeshPart): boolean
 	local keyPosition = key.Position
 	local keySize = key.Size
 
@@ -1003,13 +1893,20 @@ local function wireKey(instance: Instance)
 	local state: KeyState = {
 		originalCFrame = instance.CFrame,
 		originalColor = instance.Color,
+		originalMaterial = instance.Material,
 		createdGui = nil,
+		themeConnection = nil,
 		pressed = false,
 		currentTween = nil,
 	}
 	trackedKeys[instance] = state
 
 	applyTheme(instance)
+	state.themeConnection = instance:GetAttributeChangedSignal(THEME_ATTRIBUTE):Connect(function()
+		if not normalizingTheme[instance] then
+			applyTheme(instance)
+		end
+	end)
 	state.createdGui = createLetterGui(instance)
 end
 
@@ -1023,11 +1920,17 @@ local function unwireKey(instance: Instance)
 		return
 	end
 	trackedKeys[instance] = nil
+	pressedKeys[instance] = nil
+	normalizingTheme[instance] = nil
 
 	cancelTween(state)
+	if state.themeConnection ~= nil then
+		state.themeConnection:Disconnect()
+	end
 	if instance.Parent ~= nil then
 		instance.CFrame = state.originalCFrame
 		instance.Color = state.originalColor
+		instance.Material = state.originalMaterial
 	end
 
 	local createdGui = state.createdGui
@@ -1037,13 +1940,43 @@ local function unwireKey(instance: Instance)
 end
 
 local function updateKeys()
-	for key, state in trackedKeys do
-		if key.Parent == nil then
-			unwireKey(key)
-		elseif isPlayerOnKey(key) then
-			pressKey(key, state)
-		else
-			releaseKey(key, state)
+	table.clear(keysUnderPlayer)
+
+	local character = player.Character
+	if excludedCharacter ~= character then
+		excludedCharacter = character
+
+		local excludedInstances: { Instance } = {}
+		if character ~= nil then
+			table.insert(excludedInstances, character)
+		end
+		keyOverlapParams.ExcludeInstances = excludedInstances
+	end
+
+	local root = if character ~= nil then character:FindFirstChild("HumanoidRootPart") else nil
+	if root ~= nil and root:IsA("BasePart") then
+		local queryCFrame = CFrame.new(root.Position + KEY_QUERY_OFFSET)
+		local nearbyParts = workspace:GetPartBoundsInBox(queryCFrame, KEY_QUERY_SIZE, keyOverlapParams)
+
+		for _, part in nearbyParts do
+			if part:IsA("MeshPart") then
+				local state = trackedKeys[part]
+				if state ~= nil and isPlayerOnKey(root.Position, part) then
+					keysUnderPlayer[part] = true
+					pressKey(part, state)
+				end
+			end
+		end
+	end
+
+	for key in pressedKeys do
+		if not keysUnderPlayer[key] then
+			local state = trackedKeys[key]
+			if state ~= nil then
+				releaseKey(key, state)
+			else
+				pressedKeys[key] = nil
+			end
 		end
 	end
 end

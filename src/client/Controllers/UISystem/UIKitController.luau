@@ -567,13 +567,6 @@ local function initCashDisplay()
 	addTemplate.Parent = nil
 	subTemplate.Parent = nil
 
-	local tickSound = Instance.new("Sound")
-	tickSound.Name = "CashTick"
-	tickSound.SoundId = "rbxassetid://92934806799441"
-	tickSound.Volume = 0.15
-	tickSound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
-	tickSound.Parent = SoundService
-
 	local activeRender: RBXScriptConnection? = nil
 
 	local function setCashLabel(amount: number)
@@ -654,9 +647,6 @@ local function initCashDisplay()
 			return
 		end
 
-		if diff > 0 then
-			tickSound:Play()
-		end
 		task.spawn(showTransactionBadge, diff)
 		tweenCashValue(old, coins, 0.5)
 	end)
