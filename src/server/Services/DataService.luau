@@ -21,6 +21,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local Log = require(ReplicatedStorage.Shared.Log)
 local ProfileStore = require(ServerStorage.ServerPackages.ProfileStore)
 local Replica = require(ServerStorage.ReplicaServer)
+local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 
 local log = Log.new("DataService")
 
@@ -38,7 +39,7 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 1
+local DATA_VERSION = 2
 
 local TEMPLATE = {
 	Version = DATA_VERSION,
@@ -52,7 +53,7 @@ local TEMPLATE = {
 	},
 
 	--[[
-		Merge-gameplay loop (Phase 1). Objects is a COMPACT array -- no gaps,
+		Merge-gameplay loop. Squishies is a COMPACT array -- no gaps,
 		ever -- because Replica cannot replicate a sparse numeric table
 		(this file's own WARNING above); a future removal must table.remove
 		it, never write nil into the middle. X/Z are PAD-LOCAL coordinates
@@ -68,8 +69,13 @@ local TEMPLATE = {
 		small enough not to need a shared type to stay in sync.
 	]]
 	Merge = {
-		Objects = {} :: { { Tier: number, X: number, Z: number } },
+		Squishies = {} :: { { Tier: number, X: number, Z: number } },
 		SpawnLevel = 1,
+		-- Trusted server time used to calculate the next offline-income grant.
+		LastActiveAt = 0,
+		-- The latest grant receipt is persisted/replicated so the joining
+		-- client can reliably show it even if data arrives late.
+		OfflineEarnings = { Amount = 0, Seconds = 0, AwardedAt = 0 },
 	},
 
 	--[[
@@ -103,9 +109,25 @@ local TEMPLATE = {
 export type PlayerData = typeof(TEMPLATE)
 
 -- Index N migrates version N -> N+1. Never delete or renumber one.
-local MIGRATIONS: { (data: any) -> () } = {}
+local MIGRATIONS: { (data: any) -> () } = {
+	[1] = function(data)
+		-- Objects was the original internal name for the player's collected
+		-- merge items. Preserve every existing entry while adopting the
+		-- player-facing Squishies terminology.
+		local merge = if type(data.Merge) == "table" then data.Merge else {}
+		if merge.Squishies == nil then
+			merge.Squishies = merge.Objects or {}
+		end
+		merge.Objects = nil
+		data.Merge = merge
+	end,
+}
 
-local PROFILE_STORE_NAME = "PlayerData_v1.1"
+local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.1"
+-- Studio writes to a separate DataStore, so persistence can be tested across
+-- Play sessions without ever touching production player profiles.
+local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.1_Studio"
+local PROFILE_STORE_NAME = if RunService:IsStudio() then STUDIO_PROFILE_STORE_NAME else LIVE_PROFILE_STORE_NAME
 
 local DataService = {
 	-- Loads before anything that reads player data.
@@ -116,22 +138,10 @@ local DataService = {
 -- string twice, so it lives at module scope, not inside a function.
 local PLAYER_DATA_TOKEN = Replica.Token("PlayerData")
 
---[[
-	Mock in Studio. Without this, Studio testing with API services enabled writes
-	to LIVE player keys -- and a bad migration tested in Studio corrupts real
-	players' data.
-
-	This lives in the module body, not Init(), deliberately. `store.Mock` is a
-	plain field on the store table and the Mock table has no `.Mock` of its own,
-	so `store = store.Mock` run twice yields nil. Module bodies run exactly once
-	(require caches), so doing it here is idempotent by construction; doing it in
-	Init() is only correct as long as nothing ever calls Init() twice.
-]]
-local liveStore = ProfileStore.New(PROFILE_STORE_NAME, TEMPLATE)
--- Both branches expose the same persistence methods. Typing the result as the
--- mock interface also accepts the live store, whose extra `.Mock` field is not
--- needed below.
-local store: typeof(liveStore.Mock) = if RunService:IsStudio() then liveStore.Mock else liveStore
+-- ProfileStore automatically falls back to an in-memory mock when Studio API
+-- access is unavailable. When access is enabled, the isolated Studio store
+-- above persists normally across Play sessions.
+local store = ProfileStore.New(PROFILE_STORE_NAME, TEMPLATE)
 
 local profiles: { [Player]: any } = {}
 local replicas: { [Player]: any } = {}
@@ -162,6 +172,13 @@ local function onPlayerAdded(player: Player)
 	profile:AddUserId(player.UserId) -- GDPR compliance
 	runMigrations(profile.Data)
 	profile:Reconcile()
+
+	-- This runs before profiles[player] and Replica exist, making the offline
+	-- payout part of the atomic initial state delivered to the client.
+	local offlineEarnings, offlineSeconds = SquishyProgress.applySessionStart(profile.Data, os.time())
+	if offlineEarnings > 0 then
+		log.info(`{player.Name}'s squishies earned {offlineEarnings} coins over {offlineSeconds}s offline`)
+	end
 
 	profile.OnSessionEnd:Connect(function()
 		profiles[player] = nil
@@ -226,10 +243,12 @@ end
 local function onPlayerRemoving(player: Player)
 	local replica = replicas[player]
 	if replica ~= nil then
+		local now = os.time()
 		-- Session-end timestamp (PORT-SPEC.md §2). Same call DataService.set
 		-- makes internally -- done here directly, before Destroy(), since
 		-- there is nothing left to write through afterwards.
-		replica:Set({ "UISystem", "LastSessionTime" }, os.time())
+		replica:Set({ "UISystem", "LastSessionTime" }, now)
+		replica:Set({ "Merge", "LastActiveAt" }, now)
 		replica:Destroy()
 		replicas[player] = nil
 	end
@@ -242,6 +261,22 @@ local function onPlayerRemoving(player: Player)
 end
 
 function DataService.Start()
+	if RunService:IsStudio() then
+		task.spawn(function()
+			while ProfileStore.DataStoreState == "NotReady" do
+				task.wait()
+			end
+
+			if ProfileStore.DataStoreState == "Access" then
+				log.info(`Studio persistence enabled in isolated store {STUDIO_PROFILE_STORE_NAME}`)
+			else
+				log.warn(
+					"Studio persistence is using memory only. Publish the experience and enable Game Settings > Security > Enable Studio Access to API Services."
+				)
+			end
+		end)
+	end
+
 	for _, player in Players:GetPlayers() do
 		task.spawn(onPlayerAdded, player)
 	end
