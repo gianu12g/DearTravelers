@@ -121,12 +121,12 @@
 
 	PHASE 3 -- PASSIVE INCOME: see runIncomeTick's own header note for the
 	full reasoning. In one line: one aggregated CoinsService.add() per player
-	per second, summed over data.Merge.Squishies (not live.parts, not a remote,
-	not a per-object write), riding the same Heartbeat connection as Phase 2
-	rather than spawning a loop per player. The client's floating "+$X"
-	popups (IncomePopupController) are a pure visual guess in sync with this
-	tick only because both sides compute income the same way
-	(MergeConfig.incomeForTier) -- they do not talk to each other.
+	per second, summed over data.Merge.Squishies (not live.parts and not a
+	per-object write), riding the same Heartbeat connection as Phase 2 rather
+	than spawning a loop per player. After a successful grant, one transient
+	mergeIncomePulse event tells that owning client to display every resting
+	model's "+$X" popup in the same frame. Coins remains Replica-owned; the
+	event carries no balance state.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -293,21 +293,19 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	billboard.AlwaysOnTop = true
 	billboard.Parent = part
 
-	-- Phase 3: the label shows what the object EARNS, not its tier number --
-	-- tier stays readable through its per-tier visual (or the fallback cube's
-	-- size/color ramp) instead. incomeForTier is the one place tier ->
-	-- income is computed, so this can never disagree with the client's
-	-- floating "+$X" popups (IncomePopupController), which read the same
-	-- function off the same Tier attribute set below.
+	-- The permanent label is a clean progression value (1, 2, 4, 8...) rather
+	-- than currency. incomeForTier remains the single source of truth for that
+	-- doubling curve and for the separate floating "+$X" income popups.
 	local incomeText = Instance.new("TextLabel")
 	incomeText.Name = "IncomeText"
 	incomeText.Size = UDim2.fromScale(1, 1)
 	incomeText.BackgroundTransparency = 1
-	incomeText.Font = Enum.Font.GothamBold
+	incomeText.Font = Enum.Font.FredokaOne
 	incomeText.TextScaled = true
-	incomeText.TextColor3 = Color3.new(1, 1, 1)
-	incomeText.TextStrokeTransparency = 0.5
-	incomeText.Text = "$" .. Format.FormatNumber(MergeConfig.incomeForTier(entry.Tier))
+	incomeText.TextColor3 = Color3.fromRGB(255, 248, 231)
+	incomeText.TextStrokeColor3 = Color3.fromRGB(58, 38, 31)
+	incomeText.TextStrokeTransparency = 0.15
+	incomeText.Text = Format.FormatNumber(MergeConfig.incomeForTier(entry.Tier))
 	incomeText.Parent = billboard
 
 	return part
@@ -847,8 +845,8 @@ local function runIncomeTick()
 
 		local total = SquishyProgress.incomePerPulse(data.Merge.Squishies)
 
-		if total > 0 then
-			CoinsService.add(player, total)
+		if total > 0 and CoinsService.add(player, total) then
+			Net.mergeIncomePulse.sendTo(nil, player)
 		end
 	end
 end

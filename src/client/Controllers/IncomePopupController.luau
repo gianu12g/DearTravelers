@@ -1,26 +1,16 @@
 --!strict
 --[[
 	Phase 3 of the merge-gameplay loop: purely cosmetic "+$X" popups over
-	every owned merge object, roughly once per second, so a full pad reads as
-	visibly earning. This is decoration only -- MergeService's own income
-	tick (its PHASE 3 header note) is what actually grants coins; this
-	controller sends nothing and reads nothing that isn't already public
-	world state, so it cannot desync a balance even if it drifts or misses a
-	beat entirely.
+	every resting merge object on the local player's base. MergeService grants
+	the authoritative aggregated income first, then sends one
+	mergeIncomePulse event to that player. Handling one event by walking that
+	base's current MergeObjects children makes every popup start in the same
+	frame. A model created between pulses automatically joins the next one;
+	there is no per-model phase, timer, task, or connection to synchronize.
 
-	DISCOVERY: bases are static (Workspace.MapLayout.Bases.Base1..Base8), but
-	each base's "MergeObjects" folder is created and destroyed at runtime by
-	MergeService.activateBase/deactivateBase, and individual MergeObject
-	Parts inside it come and go on every auto-spawn, drop, and merge. So this
-	watches three layers, each with its own ChildAdded/ChildRemoved:
-	Bases (for bases that stream in late), each base Part (for its
-	MergeObjects folder appearing/disappearing), and each MergeObjects folder
-	(for the Parts themselves). `Instance:Destroy()` disconnects that
-	instance's own connections, so a destroyed MergeObjects folder needs no
-	explicit teardown of the ChildAdded/ChildRemoved connected on IT -- only
-	`trackedParts` (keyed on the Parts, which live longer than any one
-	folder's connections in Lua-table terms) needs an explicit sweep, done in
-	updatePopups below.
+	The packet carries no amount or balance. Persistent Coins still replicate
+	through DataService/Replica; missing this transient packet can only omit a
+	visual flourish and can never desync currency.
 
 	Every resting MergeObject Part carries a `Tier` attribute set once at
 	creation and never changed afterward (materializeObject never mutates an
@@ -31,9 +21,8 @@
 
 	spawnMergeVfx's anchor Part is parented into the SAME MergeObjects folder
 	as real objects (MergeService.luau), named "MergeVfx" rather than
-	"MergeObject" and carrying no Tier attribute -- the name filter in
-	trackPart below is what keeps it from being mistaken for an income
-	source and defaulting to a phantom tier-1 popup.
+	"MergeObject" and carrying no Tier attribute -- the pulse's name filter
+	keeps it from becoming a phantom tier-1 popup.
 
 	CARRIED OBJECTS: popups are skipped while an object is being carried,
 	detected via the presence of a "CarryWeld" child (the exact WeldConstraint
@@ -45,16 +34,6 @@
 	state); this is a visual choice only, made because a popup tweening
 	upward from a part that is itself moving with the carrying character
 	would fight its own motion.
-
-	SCHEDULING: one Heartbeat loop drives every tracked Part's popup timer
-	(a `nextFireTime` timestamp, not a per-object task.spawn/wait loop) --
-	the same "one loop, not N" shape MergeService's own Heartbeat consolidation
-	uses, and for the same reason: a full 8-base server can have on the order
-	of 200 tracked Parts, and 200 threads waking up every second is exactly
-	the kind of cost this file exists to avoid. Each Part's first fire is
-	offset by a random fraction of INCOME_INTERVAL so a freshly-filled pad's
-	objects shimmer independently instead of firing in one synchronized
-	burst every second -- purely a "rain, not a metronome" visual choice.
 
 	PARENTING: popups are BillboardGuis parented under a client-owned Folder
 	in PlayerGui (the same container CarryController's HUD lives under) with
@@ -75,13 +54,13 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
+local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("IncomePopupController")
 
@@ -98,23 +77,11 @@ local POPUP_TWEEN_INFO = TweenInfo.new(POPUP_LIFETIME, Enum.EasingStyle.Quad, En
 -- short enough that a full 8-base server isn't rendering all of them at once.
 local MAX_RENDER_DISTANCE = 90
 
-local random = Random.new()
-
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-type TrackedPart = {
-	nextFireTime: number,
-}
-
-local trackedParts: { [BasePart]: TrackedPart } = {}
+local basesFolder: Instance? = nil
 local popupHost: Folder? = nil
--- watchBase is called both from the Start() GetChildren snapshot and from
--- basesFolder.ChildAdded -- a base already present at Start() would
--- otherwise be watched twice if ChildAdded also fired for it (observed for
--- instances that exist before the connection, on some replication timings),
--- stacking duplicate ChildAdded/ChildRemoved listeners on the same base Part.
-local watchedBases: { [BasePart]: boolean } = {}
 
 local IncomePopupController = {}
 
@@ -173,8 +140,9 @@ local function spawnPopup(part: BasePart)
 	label.BackgroundTransparency = 1
 	label.Font = Enum.Font.GothamBold
 	label.TextScaled = true
-	label.TextColor3 = Color3.fromRGB(255, 221, 110)
-	label.TextStrokeTransparency = 0.4
+	label.TextColor3 = Color3.fromRGB(118, 255, 102)
+	label.TextStrokeColor3 = Color3.fromRGB(24, 78, 35)
+	label.TextStrokeTransparency = 0.2
 	label.Text = "+$" .. Format.FormatNumber(amount)
 	label.Parent = billboard
 
@@ -202,107 +170,37 @@ local function spawnPopup(part: BasePart)
 	task.delay(POPUP_LIFETIME + 0.5, destroyPopup)
 end
 
-local function untrackPart(part: Instance)
-	if not part:IsA("BasePart") then
-		return
-	end
-	trackedParts[part] = nil
-end
-
-local function trackPart(part: Instance)
-	if not part:IsA("BasePart") then
-		return
-	end
-	-- Name filter, not just "any child of this folder": spawnMergeVfx's
-	-- burst anchor lives in the same folder, is named "MergeVfx", and has no
-	-- Tier attribute -- without this it would be tracked and popup as a
-	-- phantom tier-1 object on every merge.
-	if part.Name ~= "MergeObject" then
-		return
-	end
-	if trackedParts[part] ~= nil then
-		return -- already tracked (defensive; ChildAdded fires once per add)
-	end
-
-	-- Random phase offset, not a shared clock: see the header's SCHEDULING
-	-- note for why a full pad should shimmer rather than fire in lockstep.
-	trackedParts[part] = { nextFireTime = os.clock() + random:NextNumber() * MergeConfig.INCOME_INTERVAL }
-end
-
-local function watchMergeObjectsFolder(folder: Folder)
-	for _, child in folder:GetChildren() do
-		trackPart(child)
-	end
-	folder.ChildAdded:Connect(trackPart)
-	folder.ChildRemoved:Connect(untrackPart)
-end
-
-local function watchBase(instance: Instance)
-	if not instance:IsA("BasePart") then
-		return
-	end
-	local basePart = instance
-
-	if watchedBases[basePart] then
-		return
-	end
-	watchedBases[basePart] = true
-
-	local existing = basePart:FindFirstChild("MergeObjects")
-	if existing ~= nil and existing:IsA("Folder") then
-		watchMergeObjectsFolder(existing)
-	end
-
-	-- Fires again on every future re-activation: MergeService.activateBase
-	-- creates a brand-new Folder instance each time (never reuses one), so
-	-- this one persistent connection on the (never-destroyed) base Part is
-	-- enough to pick up every generation of it.
-	basePart.ChildAdded:Connect(function(child: Instance)
-		if child.Name == "MergeObjects" and child:IsA("Folder") then
-			watchMergeObjectsFolder(child)
-		end
-	end)
-end
-
 --[[
-	One Heartbeat tick for every tracked Part. Stale-part removal is
-	collected into a list and applied AFTER the loop, not inside it -- same
-	"don't remove a table's keys while a `for...in` is traversing it" rule
-	MergeService.reArmSweep follows for its own disarmed-part sweep.
+	One authoritative pulse, one snapshot of the local player's current base.
+	No cached Part list is needed: MAX_OBJECTS bounds this to 25 children once
+	per second, and reading the folder live is what makes a newly spawned or
+	merged model automatically share the next pulse.
 
-	Distance-gated BEFORE spawnPopup, not just left to BillboardGui.MaxDistance:
-	MaxDistance only culls rendering, so without this every tracked part on
-	every one of the 8 bases would still allocate a BillboardGui + two tweens
-	every second regardless of whether the camera could ever see it -- on a
-	full server that's ~200 creates/destroys a second, ~90% of them invisible.
-	MaxDistance stays on the billboard as the visual backstop for the
-	remaining case (camera whips away mid-tween).
+	Distance is checked before allocation, not left only to MaxDistance, so a
+	remote camera cannot create invisible BillboardGuis and tweens.
 ]]
-local function updatePopups()
-	local now = os.clock()
-	local stale: { BasePart } = {}
+local function showIncomePulse()
+	local currentBasesFolder = basesFolder
+	if currentBasesFolder == nil then
+		return -- Start has not resolved the streamed map hierarchy yet
+	end
+
+	local baseName = player:GetAttribute("AssignedBase")
+	if typeof(baseName) ~= "string" then
+		return
+	end
+
+	local base = currentBasesFolder:FindFirstChild(baseName)
+	local mergeObjects = if base ~= nil then base:FindFirstChild("MergeObjects") else nil
+	if mergeObjects == nil then
+		return
+	end
+
 	local camera = Workspace.CurrentCamera
-
-	for part, info in trackedParts do
-		if part.Parent == nil then
-			table.insert(stale, part) -- defensive; ChildRemoved should already have caught this
+	for _, part in mergeObjects:GetChildren() do
+		if not part:IsA("BasePart") or part.Name ~= "MergeObject" then
 			continue
 		end
-		if now < info.nextFireTime then
-			continue
-		end
-
-		-- Snap instead of incrementally catching up: after a multi-second
-		-- hitch, `now` can be many INCOME_INTERVALs past nextFireTime, and
-		-- advancing by exactly one per tick would fire a burst of one popup
-		-- per frame per part until it catches up. Snapping to "one interval
-		-- from now" fires once and resumes the normal cadence.
-		if now - info.nextFireTime > MergeConfig.INCOME_INTERVAL then
-			info.nextFireTime = now + MergeConfig.INCOME_INTERVAL
-		else
-			info.nextFireTime += MergeConfig.INCOME_INTERVAL
-		end
-
 		if part:FindFirstChild("CarryWeld") ~= nil then
 			continue -- currently carried -- see the header's CARRIED OBJECTS note
 		end
@@ -313,10 +211,10 @@ local function updatePopups()
 
 		spawnPopup(part)
 	end
+end
 
-	for _, part in stale do
-		trackedParts[part] = nil
-	end
+function IncomePopupController.Init()
+	Net.mergeIncomePulse.listen(showIncomePulse)
 end
 
 function IncomePopupController.Start()
@@ -326,18 +224,12 @@ function IncomePopupController.Start()
 		return
 	end
 
-	local basesFolder = mapLayout:WaitForChild("Bases", WAIT_TIMEOUT)
-	if basesFolder == nil then
+	local foundBasesFolder = mapLayout:WaitForChild("Bases", WAIT_TIMEOUT)
+	if foundBasesFolder == nil then
 		log.error("Workspace.MapLayout.Bases did not appear within timeout -- income popups disabled")
 		return
 	end
-
-	for _, child in basesFolder:GetChildren() do
-		watchBase(child)
-	end
-	basesFolder.ChildAdded:Connect(watchBase)
-
-	RunService.Heartbeat:Connect(updatePopups)
+	basesFolder = foundBasesFolder
 
 	log.info("ready")
 end

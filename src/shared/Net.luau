@@ -155,5 +155,12 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 				direction = ByteNet.string,
 			}),
 		}),
+
+		-- server -> owning client. Fired only after the authoritative passive
+		-- income grant succeeds. The client displays every resting model's
+		-- popup in the same frame; persistent balance state does not travel here.
+		mergeIncomePulse = ByteNet.definePacket({
+			value = ByteNet.nothing,
+		}),
 	}
 end)
