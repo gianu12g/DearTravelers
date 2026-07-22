@@ -160,22 +160,28 @@ end
 
 local totalAssets = #targets
 local loadedAssets = 0
+local PRELOAD_BATCH_SIZE = 25
 
-for _, target in targets do
+for firstIndex = 1, totalAssets, PRELOAD_BATCH_SIZE do
 	if skipped then
 		break
+	end
+
+	local batch: { Instance | string } = {}
+	local lastIndex = math.min(firstIndex + PRELOAD_BATCH_SIZE - 1, totalAssets)
+	for index = firstIndex, lastIndex do
+		table.insert(batch, targets[index])
 	end
 
 	pcall(function()
 		-- PreloadAsync's real signature accepts a mixed array of Instances
 		-- and "rbxassetid://" strings (Roblox's own documented behavior);
 		-- luau-lsp isn't available in this environment to confirm the
-		-- bundled type definition agrees, hence the narrow cast rather than
-		-- widening `targets` itself.
-		ContentProvider:PreloadAsync({ target } :: any)
+		-- bundled type definition agrees, hence the narrow boundary cast.
+		ContentProvider:PreloadAsync(batch :: any)
 	end)
 
-	loadedAssets += 1
+	loadedAssets += #batch
 	local progress = if totalAssets > 0 then loadedAssets / totalAssets else 1
 
 	TweenService:Create(progressBar, progressTween, { Size = UDim2.fromScale(progress, 1) }):Play()
@@ -195,17 +201,25 @@ TweenService:Create(
 
 task.wait(0.4)
 
-local originalFov = camera.FieldOfView
-camera.FieldOfView = 45
+local originalFov = if camera ~= nil then camera.FieldOfView else nil
+if camera ~= nil then
+	camera.FieldOfView = 45
+end
 
 local blur = Instance.new("BlurEffect")
 blur.Name = "LoadingScreenBlur"
 blur.Size = 24
 blur.Parent = Lighting
 
-TweenService
-	:Create(camera, TweenInfo.new(1, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out), { FieldOfView = originalFov })
-	:Play()
+if camera ~= nil and originalFov ~= nil then
+	TweenService
+		:Create(
+			camera,
+			TweenInfo.new(1, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out),
+			{ FieldOfView = originalFov }
+		)
+		:Play()
+end
 TweenService:Create(blur, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = 0 }):Play()
 
 for _, obj in loadingScreenUi:GetDescendants() do

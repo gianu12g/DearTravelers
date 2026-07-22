@@ -23,14 +23,16 @@ local ServerStorage = game:GetService("ServerStorage")
 local DataService = require(ServerStorage.Services.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 
 local log = Log.new("UISettingsService")
 
 local UISettingsService = {}
+local updateLimiter = RateLimiter.new(10, 20)
 
 function UISettingsService.Init()
 	Net.settingUpdate.listen(function(data, player)
-		if player == nil then
+		if player == nil or not updateLimiter:allow(player) then
 			return
 		end
 

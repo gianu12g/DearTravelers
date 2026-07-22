@@ -18,8 +18,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 
+local EconomyConfig = require(ServerStorage.Modules.EconomyConfig)
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local ProfileStore = require(ServerStorage.ServerPackages.ProfileStore)
+local Progression = require(ReplicatedStorage.Shared.Progression)
 local Replica = require(ServerStorage.ReplicaServer)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 
@@ -39,7 +42,8 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 2
+local DATA_VERSION = 3
+local MAX_PROCESSED_PURCHASE_IDS = 200
 
 local TEMPLATE = {
 	Version = DATA_VERSION,
@@ -59,7 +63,7 @@ local TEMPLATE = {
 		it, never write nil into the middle. X/Z are PAD-LOCAL coordinates
 		(object space of the owning base's SpawnArea part, not world space),
 		so they stay valid across server restarts and even a base being
-		physically moved in Studio -- the 8 bases each sit at a different
+		physically moved in Studio -- discovered bases can each sit at a different
 		world rotation, and pad-local coordinates are the only representation
 		that doesn't have to know which one a given player owns.
 
@@ -90,8 +94,15 @@ local TEMPLATE = {
 	UISystem = {
 		GiftedPasses = {},
 		Packs = {},
-		PlaytimeRewards = { StartTimestamp = 0, StartPlaytime = 0, ClaimedRewards = {} },
-		DailyRewards = { StartTimestamp = 0, ClaimedRewards = {} },
+		PlaytimeRewards = {
+			StartTimestamp = 0,
+			StartPlaytime = 0,
+			ClaimedRewards = { false, false, false, false, false, false, false },
+		},
+		DailyRewards = {
+			StartTimestamp = 0,
+			ClaimedRewards = { false, false, false, false, false, false, false },
+		},
 		FriendsReward = { JoinedFriends = {}, Claimed = false },
 		GroupReward = false,
 		-- Config.WheelSpin.StartingSpins, hardcoded rather than required in:
@@ -103,6 +114,14 @@ local TEMPLATE = {
 		LastSessionTime = 0,
 		Playtime = 0,
 		Settings = { Music = 0.1, SFX = 0.9, Keyboard = 1 },
+		-- A bounded idempotency ledger for developer-product receipts. Entries
+		-- are appended before a receipt is acknowledged and are only considered
+		-- durable after Profile:Save() has completed successfully.
+		ProcessedPurchaseIds = {} :: { string },
+		-- Gift intent is persisted before opening Roblox's purchase prompt. A
+		-- receipt may arrive after a teleport, reconnect, or server shutdown, so
+		-- an in-memory cache is not sufficient to identify its recipient.
+		PendingGift = { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 },
 	},
 }
 
@@ -110,6 +129,11 @@ export type PlayerData = typeof(TEMPLATE)
 
 -- Index N migrates version N -> N+1. Never delete or renumber one.
 local MIGRATIONS: { (data: any) -> () } = {
+	[0] = function(_data)
+		-- Version was introduced before any breaking shape change. Explicitly
+		-- retain the historical 0 -> 1 no-op so migration-chain validation can
+		-- distinguish intent from a deployment that accidentally omits a step.
+	end,
 	[1] = function(data)
 		-- Objects was the original internal name for the player's collected
 		-- merge items. Preserve every existing entry while adopting the
@@ -120,6 +144,35 @@ local MIGRATIONS: { (data: any) -> () } = {
 		end
 		merge.Objects = nil
 		data.Merge = merge
+	end,
+	[2] = function(data)
+		-- ClaimedRewards used to be treated as a sparse numeric dictionary.
+		-- Replica numeric tables must be compact, so normalize both reward tracks
+		-- into dense boolean arrays while preserving every existing claim.
+		local uiSystem = if type(data.UISystem) == "table" then data.UISystem else {}
+
+		local function denseClaims(container: any, count: number): { boolean }
+			local old = if type(container) == "table" and type(container.ClaimedRewards) == "table"
+				then container.ClaimedRewards
+				else {}
+			local dense = table.create(count, false)
+			for i = 1, count do
+				dense[i] = old[i] == true or old[tostring(i)] == true
+			end
+			return dense
+		end
+
+		if type(uiSystem.DailyRewards) ~= "table" then
+			uiSystem.DailyRewards = { StartTimestamp = 0, ClaimedRewards = {} }
+		end
+		if type(uiSystem.PlaytimeRewards) ~= "table" then
+			uiSystem.PlaytimeRewards = { StartTimestamp = 0, StartPlaytime = 0, ClaimedRewards = {} }
+		end
+		uiSystem.DailyRewards.ClaimedRewards = denseClaims(uiSystem.DailyRewards, 7)
+		uiSystem.PlaytimeRewards.ClaimedRewards = denseClaims(uiSystem.PlaytimeRewards, 7)
+		uiSystem.ProcessedPurchaseIds = uiSystem.ProcessedPurchaseIds or {}
+		uiSystem.PendingGift = uiSystem.PendingGift or { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 }
+		data.UISystem = uiSystem
 	end,
 }
 
@@ -145,19 +198,257 @@ local store = ProfileStore.New(PROFILE_STORE_NAME, TEMPLATE)
 
 local profiles: { [Player]: any } = {}
 local replicas: { [Player]: any } = {}
+local readyConnections: { [Player]: any } = {}
+local loading: { [Player]: true } = {}
+local dataWaiters: { [Player]: { thread } } = {}
+
+export type ProfileMessageHandler = (player: Player, message: { [string]: any }) -> boolean
+local messageHandlers: { [string]: ProfileMessageHandler } = {}
+local warnedUnknownMessageKinds: { [string]: true } = {}
+local warnedMalformedMessage = false
+
+local function resumeDataWaiters(player: Player, loaded: boolean)
+	local waiters = dataWaiters[player]
+	if waiters == nil then
+		return
+	end
+	dataWaiters[player] = nil
+	for _, waiter in waiters do
+		task.spawn(waiter, loaded)
+	end
+end
+
+local function disconnectReadyConnection(player: Player)
+	local connection = readyConnections[player]
+	if connection ~= nil then
+		readyConnections[player] = nil
+		connection:Disconnect()
+	end
+end
+
+local function deepCopy(value: any): any
+	if type(value) ~= "table" then
+		return value
+	end
+	local copy = {}
+	for key, child in value do
+		copy[key] = deepCopy(child)
+	end
+	return copy
+end
+
+-- Reconcile handles missing string keys but intentionally preserves values of
+-- the wrong type. Repair those container/scalar mismatches before any service
+-- is allowed to consume the profile.
+local function repairTypes(data: any, template: any)
+	for key, templateValue in template do
+		local value = data[key]
+		if value == nil or type(value) ~= type(templateValue) then
+			data[key] = deepCopy(templateValue)
+		elseif type(templateValue) == "table" and next(templateValue) ~= nil then
+			repairTypes(value, templateValue)
+		end
+	end
+end
+
+local function compactStringArray(value: any, maxEntries: number): { string }
+	local compact: { string } = {}
+	local seen: { [string]: true } = {}
+	if type(value) ~= "table" then
+		return compact
+	end
+	for _, item in value do
+		if type(item) == "string" and #item > 0 and #item <= 128 and not seen[item] then
+			seen[item] = true
+			table.insert(compact, item)
+		end
+	end
+	if #compact > maxEntries then
+		local newest = table.create(maxEntries)
+		for index = #compact - maxEntries + 1, #compact do
+			table.insert(newest, compact[index])
+		end
+		return newest
+	end
+	return compact
+end
+
+local function denseBooleanArray(value: any, count: number): { boolean }
+	local dense = table.create(count, false)
+	if type(value) ~= "table" then
+		return dense
+	end
+	for index = 1, count do
+		dense[index] = value[index] == true or value[tostring(index)] == true
+	end
+	return dense
+end
+
+local function compactUserIds(value: any, maxEntries: number): { number }
+	local compact: { number } = {}
+	local seen: { [number]: true } = {}
+	if type(value) ~= "table" then
+		return compact
+	end
+	for _, userId in value do
+		if
+			type(userId) == "number"
+			and userId == math.floor(userId)
+			and userId > 0
+			and userId < math.huge
+			and not seen[userId]
+		then
+			seen[userId] = true
+			table.insert(compact, userId)
+			if #compact >= maxEntries then
+				break
+			end
+		end
+	end
+	return compact
+end
+
+local function finiteInteger(value: any, minimum: number, maximum: number, fallback: number): number
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		return fallback
+	end
+	return math.clamp(math.floor(value), minimum, maximum)
+end
+
+local function repairProfileData(data: any)
+	repairTypes(data, TEMPLATE)
+
+	local uiSystem = data.UISystem
+	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)
+	uiSystem.Packs = compactStringArray(uiSystem.Packs, 100)
+	uiSystem.RedeemedCodes = compactStringArray(uiSystem.RedeemedCodes, 500)
+	uiSystem.PlaytimeRewards.ClaimedRewards = denseBooleanArray(uiSystem.PlaytimeRewards.ClaimedRewards, 7)
+	uiSystem.DailyRewards.ClaimedRewards = denseBooleanArray(uiSystem.DailyRewards.ClaimedRewards, 7)
+	uiSystem.FriendsReward.JoinedFriends = compactUserIds(uiSystem.FriendsReward.JoinedFriends, 200)
+
+	local giftedPasses = {}
+	for passName, owned in uiSystem.GiftedPasses do
+		if type(passName) == "string" and #passName > 0 and #passName <= 64 and owned == true then
+			giftedPasses[passName] = true
+		end
+	end
+	uiSystem.GiftedPasses = giftedPasses
+
+	local pendingGift = uiSystem.PendingGift
+	local emptyIntent = pendingGift.Kind == ""
+		and pendingGift.ItemName == ""
+		and pendingGift.TargetUserId == 0
+		and pendingGift.ProductId == 0
+	local validIntent = (pendingGift.Kind == "Pass" or pendingGift.Kind == "Product")
+		and #pendingGift.ItemName > 0
+		and #pendingGift.ItemName <= 64
+		and pendingGift.TargetUserId > 0
+		and pendingGift.TargetUserId < math.huge
+		and pendingGift.TargetUserId == math.floor(pendingGift.TargetUserId)
+		and pendingGift.ProductId > 0
+		and pendingGift.ProductId < math.huge
+		and pendingGift.ProductId == math.floor(pendingGift.ProductId)
+	if not emptyIntent and not validIntent then
+		uiSystem.PendingGift = { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 }
+	end
+
+	data.Coins = finiteInteger(data.Coins, 0, EconomyConfig.MAX_COINS, 0)
+	data.Level, data.Experience = Progression.resolve(data.Level, data.Experience, 0)
+	data.Merge.SpawnLevel = finiteInteger(data.Merge.SpawnLevel, 1, MergeConfig.MAX_TIER, 1)
+	data.Merge.LastActiveAt = finiteInteger(data.Merge.LastActiveAt, 0, 2 ^ 53 - 1, 0)
+	data.Merge.OfflineEarnings.Amount = finiteInteger(data.Merge.OfflineEarnings.Amount, 0, EconomyConfig.MAX_GRANT, 0)
+	data.Merge.OfflineEarnings.Seconds =
+		finiteInteger(data.Merge.OfflineEarnings.Seconds, 0, MergeConfig.MAX_OFFLINE_SECONDS, 0)
+	data.Merge.OfflineEarnings.AwardedAt = finiteInteger(data.Merge.OfflineEarnings.AwardedAt, 0, 2 ^ 53 - 1, 0)
+	uiSystem.Spins = finiteInteger(uiSystem.Spins, 0, 1e9, 0)
+	uiSystem.Playtime = finiteInteger(uiSystem.Playtime, 0, 2 ^ 53 - 1, 0)
+	uiSystem.LastSessionTime = finiteInteger(uiSystem.LastSessionTime, 0, 2 ^ 53 - 1, 0)
+	uiSystem.PlaytimeRewards.StartTimestamp = finiteInteger(uiSystem.PlaytimeRewards.StartTimestamp, 0, 2 ^ 53 - 1, 0)
+	uiSystem.PlaytimeRewards.StartPlaytime = finiteInteger(uiSystem.PlaytimeRewards.StartPlaytime, 0, 2 ^ 53 - 1, 0)
+	uiSystem.DailyRewards.StartTimestamp = finiteInteger(uiSystem.DailyRewards.StartTimestamp, 0, 2 ^ 53 - 1, 0)
+	local settings = {}
+	for settingName, fallback in TEMPLATE.UISystem.Settings do
+		local settingValue = uiSystem.Settings[settingName]
+		settings[settingName] = if type(settingValue) == "number"
+				and settingValue == settingValue
+				and settingValue ~= math.huge
+				and settingValue ~= -math.huge
+			then math.clamp(settingValue, 0, 1)
+			else fallback
+	end
+	uiSystem.Settings = settings
+	data.Settings = { MusicEnabled = data.Settings.MusicEnabled == true }
+
+	local inventory = {}
+	for key, count in data.Inventory do
+		if
+			type(key) == "string"
+			and #key > 0
+			and #key <= 64
+			and type(count) == "number"
+			and count == count
+			and count > 0
+			and count < math.huge
+		then
+			inventory[key] = math.min(math.floor(count), 1e12)
+		end
+	end
+	data.Inventory = inventory
+
+	local compactSquishies = {}
+	for _, entry in data.Merge.Squishies do
+		if #compactSquishies >= MergeConfig.MAX_OBJECTS then
+			break
+		end
+		if type(entry) ~= "table" then
+			continue
+		end
+		local tier, x, z = entry.Tier, entry.X, entry.Z
+		if
+			type(tier) ~= "number"
+			or tier ~= tier
+			or type(x) ~= "number"
+			or x ~= x
+			or type(z) ~= "number"
+			or z ~= z
+			or math.abs(x) == math.huge
+			or math.abs(z) == math.huge
+		then
+			continue
+		end
+		table.insert(compactSquishies, {
+			Tier = math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER),
+			X = math.clamp(x, -1000, 1000),
+			Z = math.clamp(z, -1000, 1000),
+		})
+	end
+	data.Merge.Squishies = compactSquishies
+end
 
 local function runMigrations(data: any)
-	local from = data.Version or 0
+	local from = if data.Version == nil then 0 else data.Version
+	if type(from) ~= "number" or from ~= math.floor(from) or from < 0 then
+		error(`invalid profile version {tostring(from)}`)
+	end
+	if from > DATA_VERSION then
+		error(`profile version {from} is newer than this server's version {DATA_VERSION}`)
+	end
 	for version = from, DATA_VERSION - 1 do
 		local migrate = MIGRATIONS[version]
-		if migrate ~= nil then
-			migrate(data)
+		if migrate == nil then
+			error(`missing profile migration {version} -> {version + 1}`)
 		end
+		migrate(data)
 	end
 	data.Version = DATA_VERSION
 end
 
 local function onPlayerAdded(player: Player)
+	if profiles[player] ~= nil or loading[player] then
+		return
+	end
+	loading[player] = true
+
 	local profile = store:StartSessionAsync(`{player.UserId}`, {
 		Cancel = function()
 			return player.Parent ~= Players
@@ -165,13 +456,32 @@ local function onPlayerAdded(player: Player)
 	})
 
 	if profile == nil then
+		loading[player] = nil
+		resumeDataWaiters(player, false)
 		player:Kick("Data failed to load. Please rejoin.")
 		return
 	end
 
-	profile:AddUserId(player.UserId) -- GDPR compliance
-	runMigrations(profile.Data)
-	profile:Reconcile()
+	local originalData = deepCopy(profile.Data)
+	local prepared, prepareError = pcall(function()
+		profile:AddUserId(player.UserId) -- GDPR compliance
+		local candidate = deepCopy(profile.Data)
+		runMigrations(candidate)
+		profile.Data = candidate
+		profile:Reconcile()
+		repairProfileData(profile.Data)
+	end)
+	if not prepared then
+		-- EndSession saves active profiles. Restore the last known-good data so
+		-- a failed migration can never persist its own partial mutations.
+		profile.Data = originalData
+		loading[player] = nil
+		resumeDataWaiters(player, false)
+		log.error(`profile preparation failed for {player.Name}: {tostring(prepareError)}`)
+		profile:EndSession()
+		player:Kick("Your data could not be prepared safely. Please rejoin.")
+		return
+	end
 
 	-- This runs before profiles[player] and Replica exist, making the offline
 	-- payout part of the atomic initial state delivered to the client.
@@ -181,16 +491,23 @@ local function onPlayerAdded(player: Player)
 	end
 
 	profile.OnSessionEnd:Connect(function()
+		loading[player] = nil
+		disconnectReadyConnection(player)
+		resumeDataWaiters(player, false)
 		profiles[player] = nil
 		if replicas[player] ~= nil then
 			-- No LastSessionTime write here: this branch fires only on a stolen session, so this server no longer owns the profile to persist it -- onPlayerRemoving writes it; the stealing server writes its own.
 			replicas[player]:Destroy()
 			replicas[player] = nil
 		end
-		player:Kick("Data session ended. Please rejoin.")
+		if player.Parent == Players then
+			player:Kick("Data session ended. Please rejoin.")
+		end
 	end)
 
 	if player.Parent ~= Players then
+		loading[player] = nil
+		resumeDataWaiters(player, false)
 		profile:EndSession()
 		return
 	end
@@ -211,6 +528,38 @@ local function onPlayerAdded(player: Player)
 		Data = profile.Data,
 	})
 	replicas[player] = replica
+	loading[player] = nil
+	resumeDataWaiters(player, true)
+
+	profile:MessageHandler(function(message: any, processed: () -> ())
+		if type(message) ~= "table" or type(message.Kind) ~= "string" then
+			if not warnedMalformedMessage then
+				warnedMalformedMessage = true
+				log.warn(`discarding malformed profile message for {player.Name}; further warnings suppressed`)
+			end
+			processed()
+			return
+		end
+		local handler = messageHandlers[message.Kind]
+		if handler == nil then
+			-- Keep unknown messages queued so a temporarily missing feature can
+			-- process them after the next deployment instead of losing them.
+			if not warnedUnknownMessageKinds[message.Kind] then
+				warnedUnknownMessageKinds[message.Kind] = true
+				log.warn(`no profile-message handler registered for kind "{message.Kind}"; further warnings suppressed`)
+			end
+			return
+		end
+		local ok, handled = pcall(handler, player, message)
+		if ok and handled then
+			processed()
+			-- Persist the reward and removal from the durable message queue
+			-- promptly; otherwise both wait for the next five-minute autosave.
+			profile:Save()
+		elseif not ok then
+			log.warn(`profile-message handler "{message.Kind}" errored for {player.Name}: {tostring(handled)}`)
+		end
+	end)
 
 	--[[
 		Subscribe = "send this replica to this one player". This is what makes
@@ -231,16 +580,21 @@ local function onPlayerAdded(player: Player)
 				return
 			end
 			connection:Disconnect()
+			readyConnections[player] = nil
 			if replicas[player] == replica and replica:IsActive() then
 				replica:Subscribe(player)
 			end
 		end)
+		readyConnections[player] = connection
 	end
 
 	log.info(`loaded profile for {player.Name}`)
 end
 
 local function onPlayerRemoving(player: Player)
+	loading[player] = nil
+	disconnectReadyConnection(player)
+	resumeDataWaiters(player, false)
 	local replica = replicas[player]
 	if replica ~= nil then
 		local now = os.time()
@@ -285,9 +639,114 @@ function DataService.Start()
 
 	game:BindToClose(function()
 		for _, player in Players:GetPlayers() do
-			task.spawn(onPlayerRemoving, player)
+			-- onPlayerRemoving has a yield-free mutation/release prefix. Run it
+			-- synchronously so our final timestamps are present before this close
+			-- callback returns and ProfileStore finishes its own shutdown saves.
+			onPlayerRemoving(player)
 		end
 	end)
+end
+
+-- One readiness primitive for every service. This replaces per-service polling
+-- loops and returns false if the player leaves or the timeout expires.
+function DataService.awaitData(player: Player, timeout: number?): boolean
+	if profiles[player] ~= nil then
+		return true
+	end
+	if player.Parent ~= Players then
+		return false
+	end
+
+	local waiter = coroutine.running()
+	local waiters = dataWaiters[player]
+	if waiters == nil then
+		waiters = {}
+		dataWaiters[player] = waiters
+	end
+	table.insert(waiters, waiter)
+
+	if timeout ~= nil then
+		task.delay(timeout, function()
+			local current = dataWaiters[player]
+			if current == nil then
+				return
+			end
+			local index = table.find(current, waiter)
+			if index ~= nil then
+				table.remove(current, index)
+				if #current == 0 then
+					dataWaiters[player] = nil
+				end
+				task.spawn(waiter, false)
+			end
+		end)
+	end
+
+	return coroutine.yield()
+end
+
+-- Requests an immediate ProfileStore save and waits until a successful saved
+-- snapshot satisfies `verify`. Receipt processing uses this to ensure both the
+-- reward and PurchaseId are durable before acknowledging Robux.
+function DataService.saveAndAwait(player: Player, verify: (savedData: any) -> boolean, timeout: number?): boolean
+	local profile = profiles[player]
+	if profile == nil or not profile:IsActive() then
+		return false
+	end
+	if verify(profile.LastSavedData) then
+		return true
+	end
+
+	local waiter = coroutine.running()
+	local finished = false
+	local connection
+	connection = profile.OnAfterSave:Connect(function(savedData: any)
+		if finished or not verify(savedData) then
+			return
+		end
+		finished = true
+		connection:Disconnect()
+		if coroutine.status(waiter) == "suspended" then
+			task.spawn(waiter, true)
+		end
+	end)
+
+	profile:Save()
+	-- ProfileStore normally saves asynchronously, but this check also makes
+	-- the helper safe if a mock implementation fires OnAfterSave inline.
+	if finished then
+		return true
+	end
+	task.delay(timeout or 30, function()
+		if finished then
+			return
+		end
+		finished = true
+		connection:Disconnect()
+		if coroutine.status(waiter) == "suspended" then
+			task.spawn(waiter, false)
+		end
+	end)
+
+	return coroutine.yield()
+end
+
+function DataService.messagePlayer(userId: number, message: { [string]: any }): boolean
+	local ok, sent = pcall(function()
+		return store:MessageAsync(tostring(userId), message)
+	end)
+	if not ok then
+		log.warn(`failed to enqueue profile message for userId {userId}: {tostring(sent)}`)
+		return false
+	end
+	return sent == true
+end
+
+function DataService.registerMessageHandler(kind: string, handler: ProfileMessageHandler)
+	if messageHandlers[kind] ~= nil then
+		error(`profile-message handler "{kind}" already registered`, 2)
+	end
+	messageHandlers[kind] = handler
 end
 
 --[[
@@ -315,6 +774,18 @@ function DataService.setValues(player: Player, path: { string | number }, values
 		return
 	end
 	replica:SetValues(path, values)
+end
+
+-- Compact arrays can append without retransmitting every existing element.
+-- Multi-element transactions (such as a merge replacing two entries with
+-- one) should still use set() once so clients never observe a half-commit.
+function DataService.tableInsert(player: Player, path: { string }, value: any): number?
+	local replica = replicas[player]
+	if replica == nil or not replica:IsActive() then
+		log.warn(`tableInsert() on {player.Name} with no active replica -- dropped`)
+		return nil
+	end
+	return replica:TableInsert(path, value)
 end
 
 function DataService.getData(player: Player): PlayerData?

@@ -25,7 +25,7 @@ local log = Log.new("CodeDefinitions")
 export type CodeInfo = {
 	isValid: (Player) -> boolean,
 	numberOfUses: number,
-	reward: (Player) -> (),
+	reward: (Player) -> boolean,
 }
 
 local codes: { [string]: CodeInfo } = {
@@ -35,7 +35,7 @@ local codes: { [string]: CodeInfo } = {
 		end,
 		numberOfUses = 999,
 		reward = function(player: Player)
-			CoinsService.add(player, 100)
+			return CoinsService.add(player, 100)
 		end,
 	},
 	["TestCode1"] = {
@@ -45,6 +45,7 @@ local codes: { [string]: CodeInfo } = {
 		numberOfUses = 999,
 		reward = function(player: Player)
 			log.debug(`redeemed TestCode1: {player.Name} (no real reward -- source test code)`)
+			return true
 		end,
 	},
 	["TestCode2"] = {
@@ -54,6 +55,7 @@ local codes: { [string]: CodeInfo } = {
 		numberOfUses = -1,
 		reward = function(player: Player)
 			log.debug(`redeemed TestCode2: {player.Name} (no real reward -- source test code)`)
+			return true
 		end,
 	},
 	["Hey"] = {
@@ -61,7 +63,9 @@ local codes: { [string]: CodeInfo } = {
 			return true
 		end,
 		numberOfUses = -1,
-		reward = function(_player: Player) end,
+		reward = function(_player: Player)
+			return true
+		end,
 	},
 }
 

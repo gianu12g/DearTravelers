@@ -22,6 +22,7 @@ local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
 local PlaytimeRewardsService = require(ServerStorage.Services.UISystem.PlaytimeRewardsService)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
 local WheelSpinConfig = require(ReplicatedStorage.Shared.UISystem.Config.WheelSpin)
@@ -33,6 +34,7 @@ local REWARD_RETRIES = 3
 local FREE_SPIN_POLL_SECONDS = 5
 
 local random = Random.new()
+local spinLimiter = RateLimiter.new(2, 3)
 
 local function rollRewardIndex(): number
 	local totalChance = 0
@@ -60,12 +62,10 @@ end
 local spinning: { [Player]: true } = {}
 
 local function waitForData(player: Player): DataService.PlayerData?
-	local data = DataService.getData(player)
-	while data == nil and player.Parent == Players do
-		task.wait(0.25)
-		data = DataService.getData(player)
+	if not DataService.awaitData(player, 120) then
+		return nil
 	end
-	return data
+	return DataService.getData(player)
 end
 
 local WheelSpinService = {}
@@ -91,7 +91,7 @@ end
 
 function WheelSpinService.Init()
 	Net.spinRequest.listen(function(_, player)
-		if player == nil then
+		if player == nil or not spinLimiter:allow(player) then
 			return
 		end
 
@@ -113,20 +113,29 @@ function WheelSpinService.Init()
 		DataService.set(player, { "UISystem", "Spins" }, data.UISystem.Spins - 1)
 
 		local rewardIndex = rollRewardIndex()
-		Net.spinResult.sendTo({ rewardIndex = rewardIndex }, player)
+		local rewardFunction = WheelSpinRewardFunctions[rewardIndex]
+		local rewarded, rewardError = Format.Retry(function()
+			if rewardFunction == nil or not rewardFunction(player) then
+				error("reward rejected the grant")
+			end
+			return true
+		end, REWARD_RETRIES)
+		if not rewarded then
+			spinning[player] = nil
+			WheelSpinService.AddSpins(player, 1)
+			log.warn(`spin reward {rewardIndex} failed for {player.Name}: {tostring(rewardError)}`)
+			UINotificationService.SendNotification(player, "Error", "The spin failed; your spin was refunded")
+			return
+		end
 
+		-- Grant before animating. A player who disconnects during the wheel
+		-- animation keeps the result instead of losing both the spin and reward.
+		Net.spinResult.sendTo({ rewardIndex = rewardIndex }, player)
 		task.delay(WheelSpinConfig.FullSpinDuration, function()
 			spinning[player] = nil
 
 			if player.Parent ~= Players then
 				return
-			end
-
-			local rewardFunction = WheelSpinRewardFunctions[rewardIndex]
-			if rewardFunction ~= nil then
-				Format.Retry(function()
-					rewardFunction(player)
-				end, REWARD_RETRIES)
 			end
 
 			local rewardText = WheelSpinConfig.Rewards[rewardIndex].Text

@@ -18,6 +18,7 @@ local DataService = require(ServerStorage.Services.DataService)
 local General = require(ReplicatedStorage.Shared.UISystem.Config.General)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
 
 local log = Log.new("GroupRewardService")
@@ -25,8 +26,9 @@ local log = Log.new("GroupRewardService")
 local REWARD_RETRIES = 3
 
 -- STUB: replace with the real group-membership reward.
-local function grantReward(player: Player)
+local function grantReward(player: Player): boolean
 	log.debug(`granting group reward to {player.Name} (stub)`)
+	return false
 end
 
 -- Anti-double-claim lock. Released on EVERY path below, including errors --
@@ -34,6 +36,7 @@ end
 -- transient IsInGroupAsync failure, permanently unable to retry
 -- (quality-gate.md: pcall + explicit release, no `finally` in Luau).
 local claiming: { [Player]: true } = {}
+local claimLimiter = RateLimiter.new(0.2, 1)
 
 local function onPlayerRemoving(player: Player)
 	claiming[player] = nil
@@ -70,7 +73,8 @@ local function handleClaim(player: Player)
 
 	local rewarded = false
 	for _ = 1, REWARD_RETRIES do
-		if pcall(grantReward, player) then
+		local callOk, granted = pcall(grantReward, player)
+		if callOk and granted then
 			rewarded = true
 			break
 		end
@@ -91,7 +95,7 @@ local GroupRewardService = {}
 
 function GroupRewardService.Init()
 	Net.groupClaimRequest.listen(function(_, player)
-		if player == nil then
+		if player == nil or not claimLimiter:allow(player) then
 			return
 		end
 

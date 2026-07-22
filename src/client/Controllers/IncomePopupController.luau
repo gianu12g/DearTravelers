@@ -43,7 +43,7 @@
 	out of the server-replicated MergeObjects folder -- that folder and its
 	Parts are destroyed and recreated constantly (every merge, every pad
 	(de)activation), and a popup parented inside it would be yanked away
-	mid-tween instead of finishing its own independent fade-and-destroy on
+	mid-tween instead of finishing its own independent fade-and-release on
 	schedule. Once spawned, a popup's lifetime is entirely decoupled from its
 	target Part's: if the Part is destroyed mid-tween (the object it was
 	celebrating just got merged into something else), the popup simply loses
@@ -68,7 +68,7 @@ local log = Log.new("IncomePopupController")
 -- base whose pieces never stream in must not hang this controller forever.
 local WAIT_TIMEOUT = 10
 
-local RISE_DISTANCE = 3.5 -- studs the popup tweens upward before destroying itself
+local RISE_DISTANCE = 3.5 -- studs the popup tweens upward before returning to its pool
 local POPUP_LIFETIME = 0.9 -- seconds -- tween AND fade duration together
 local POPUP_TWEEN_INFO = TweenInfo.new(POPUP_LIFETIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 -- Generous rather than tuned to the map's actual base spacing (unknown to
@@ -82,6 +82,13 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local basesFolder: Instance? = nil
 local popupHost: Folder? = nil
+
+type Popup = {
+	billboard: BillboardGui,
+	label: TextLabel,
+}
+
+local popupPool: { Popup } = {}
 
 local IncomePopupController = {}
 
@@ -113,25 +120,16 @@ local function sanitizeTier(tier: unknown): number
 	return math.clamp(math.floor(raw), 1, MergeConfig.MAX_TIER)
 end
 
-local function spawnPopup(part: BasePart)
-	local tier = sanitizeTier(part:GetAttribute("Tier"))
-	local tierDef = MergeConfig.Tiers[tier]
-	local amount = MergeConfig.incomeForTier(tier)
-
-	local startOffset = Vector3.new(0, tierDef.Size / 2 + 0.5, 0)
-	local endOffset = startOffset + Vector3.new(0, RISE_DISTANCE, 0)
-
+local function createPopup(): Popup
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "IncomePopup"
-	billboard.Adornee = part
 	billboard.Size = UDim2.fromOffset(100, 32)
-	billboard.StudsOffset = startOffset
 	-- Deliberately false, unlike the resting object's own IncomeLabel: that
-	-- label is persistent HUD-ish info that must always read through
-	-- geometry, but a popup is a one-shot flourish -- letting it occlude
-	-- normally reads as more "in the world" and cheaper to render at scale.
+	-- label is persistent HUD-ish info that must always read through geometry,
+	-- but a popup is a one-shot flourish and can occlude normally.
 	billboard.AlwaysOnTop = false
 	billboard.MaxDistance = MAX_RENDER_DISTANCE
+	billboard.Enabled = false
 	billboard.Parent = getPopupHost()
 
 	local label = Instance.new("TextLabel")
@@ -142,23 +140,57 @@ local function spawnPopup(part: BasePart)
 	label.TextScaled = true
 	label.TextColor3 = Color3.fromRGB(118, 255, 102)
 	label.TextStrokeColor3 = Color3.fromRGB(24, 78, 35)
-	label.TextStrokeTransparency = 0.2
-	label.Text = "+$" .. Format.FormatNumber(amount)
 	label.Parent = billboard
 
-	local destroyed = false
-	local function destroyPopup()
-		if destroyed then
+	return { billboard = billboard, label = label }
+end
+
+local function acquirePopup(): Popup
+	local popup = table.remove(popupPool)
+	return popup or createPopup()
+end
+
+local function releasePopup(popup: Popup)
+	popup.billboard.Enabled = false
+	popup.billboard.Adornee = nil
+	if #popupPool < MergeConfig.MAX_OBJECTS then
+		table.insert(popupPool, popup)
+	else
+		popup.billboard:Destroy()
+	end
+end
+
+local function spawnPopup(part: BasePart)
+	local tier = sanitizeTier(part:GetAttribute("Tier"))
+	local tierDef = MergeConfig.Tiers[tier]
+	local amount = MergeConfig.incomeForTier(tier)
+
+	local startOffset = Vector3.new(0, tierDef.Size / 2 + 0.5, 0)
+	local endOffset = startOffset + Vector3.new(0, RISE_DISTANCE, 0)
+
+	local popup = acquirePopup()
+	local billboard = popup.billboard
+	local label = popup.label
+	billboard.Adornee = part
+	billboard.StudsOffset = startOffset
+	billboard.Enabled = true
+	label.TextTransparency = 0
+	label.TextStrokeTransparency = 0.2
+	label.Text = "+$" .. Format.FormatNumber(amount)
+
+	local released = false
+	local function finishPopup()
+		if released then
 			return
 		end
-		destroyed = true
-		billboard:Destroy()
+		released = true
+		releasePopup(popup)
 	end
 
 	local riseTween = TweenService:Create(billboard, POPUP_TWEEN_INFO, { StudsOffset = endOffset })
 	local fadeTween = TweenService:Create(label, POPUP_TWEEN_INFO, { TextTransparency = 1, TextStrokeTransparency = 1 })
 
-	riseTween.Completed:Once(destroyPopup)
+	riseTween.Completed:Once(finishPopup)
 	riseTween:Play()
 	fadeTween:Play()
 
@@ -166,8 +198,9 @@ local function spawnPopup(part: BasePart)
 	-- Completed PlaybackState, and this popup has no owner that would ever
 	-- cancel it, but a bare timeout means it is IMPOSSIBLE for a popup to
 	-- outlive its own animation regardless of how TweenService's signal
-	-- behaves.
-	task.delay(POPUP_LIFETIME + 0.5, destroyPopup)
+	-- behaves. The released GUI is pooled for the next pulse instead of
+	-- allocating and garbage-collecting 50 Instances per second.
+	task.delay(POPUP_LIFETIME + 0.5, finishPopup)
 end
 
 --[[

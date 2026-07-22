@@ -12,14 +12,15 @@ local Log = require(ReplicatedStorage.Shared.Log)
 
 local log = Log.new("PackRewards")
 
-local function stub(packName: string): (Player) -> ()
+local function stub(packName: string): (Player) -> boolean
 	return function(player: Player)
 		-- STUB: replace with the real reward for the "{packName}" pack.
 		log.debug(`pack reward stub "{packName}" for {player.Name}`)
+		return false
 	end
 end
 
-local PackRewards: { [string]: (Player) -> () } = {
+local PackRewards: { [string]: (Player) -> boolean } = {
 	["Starter Pack"] = stub("Starter Pack"),
 	["Secret Pack"] = stub("Secret Pack"),
 }

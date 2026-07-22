@@ -22,28 +22,28 @@ local DataService = require(ServerStorage.Services.DataService)
 local General = require(ReplicatedStorage.Shared.UISystem.Config.General)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
 
 local log = Log.new("FriendRewardService")
 
 -- STUB: replace with the real friend-invite reward.
-local function grantReward(player: Player)
+local function grantReward(player: Player): boolean
 	log.debug(`granting friend-invite reward to {player.Name} (stub)`)
+	return false
 end
 
 -- DataService.getData(player) returns nil until this player's ProfileStore
 -- session finishes loading (async, started from DataService.Start()). This
 -- service needs a loaded profile before it can read/write FriendsReward, so
--- it polls briefly rather than assuming the profile is ready the instant
--- PlayerAdded fires.
+-- it uses DataService's shared readiness signal rather than creating another
+-- per-service polling loop.
 local function waitForData(player: Player): DataService.PlayerData?
-	local data = DataService.getData(player)
-	while data == nil and player.Parent == Players do
-		task.wait(0.25)
-		data = DataService.getData(player)
+	if not DataService.awaitData(player, 120) then
+		return nil
 	end
-	return data
+	return DataService.getData(player)
 end
 
 -- `data`'s JoinedFriends array is the SAME table DataService.set mutates
@@ -67,10 +67,11 @@ local function registerFriends(a: Player, aData: DataService.PlayerData, b: Play
 end
 
 local FriendRewardService = {}
+local claimLimiter = RateLimiter.new(1, 2)
 
 function FriendRewardService.Init()
 	Net.friendClaim.listen(function(_, player)
-		if player == nil then
+		if player == nil or not claimLimiter:allow(player) then
 			return
 		end
 
@@ -88,8 +89,12 @@ function FriendRewardService.Init()
 			return
 		end
 
+		local ok, rewarded = pcall(grantReward, player)
+		if not ok or not rewarded then
+			UINotificationService.SendNotification(player, "Error", "This reward is not available yet")
+			return
+		end
 		DataService.set(player, { "UISystem", "FriendsReward", "Claimed" }, true)
-		grantReward(player)
 		UINotificationService.SendNotification(player, "Success", "Claimed Reward")
 	end)
 end

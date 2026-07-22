@@ -137,25 +137,34 @@ end
 	writes under the path it watches -- it just never fires, with no error. That
 	is not a defect you find by reading the call site.
 
-	Cost: every observer is consulted on every change to the replica, rather than
-	a single hash lookup. For player data that is a handful of comparisons on a
-	human-paced event. Correctness is worth more here.
+	Returns a disconnect closure. Callers with a shorter lifetime than the
+	controller can suppress a pending registration and release the underlying
+	Replica signal connection instead of accumulating listeners.
 ]]
-function DataController.observe(path: { string | number }, listener: (value: any, old: any?) -> ())
+function DataController.observe(path: { string | number }, listener: (value: any, old: any?) -> ()): () -> ()
+	local disconnected = false
+	local connection: any = nil
+	local observedPath = table.clone(path)
+
 	task.spawn(function()
 		if not DataController.await(30) then
-			log.warn(`observe({table.concat(path :: any, ".")}) timed out waiting for data`)
+			if not disconnected then
+				log.warn(`observe({table.concat(observedPath :: any, ".")}) timed out waiting for data`)
+			end
+			return
+		end
+		if disconnected then
 			return
 		end
 
-		local last: any = readPath(dataReplica.Data, path)
+		local last: any = readPath(dataReplica.Data, observedPath)
 
-		dataReplica:OnChange(function(_action: string, changedPath: { string | number })
-			if not pathsIntersect(path, changedPath) then
+		connection = dataReplica:OnChange(function(_action: string, changedPath: { string | number })
+			if disconnected or not pathsIntersect(observedPath, changedPath) then
 				return
 			end
 
-			local current: any = readPath(dataReplica.Data, path)
+			local current: any = readPath(dataReplica.Data, observedPath)
 
 			--[[
 				Suppress no-op fires for scalars -- SetValues on a sibling key
@@ -177,6 +186,17 @@ function DataController.observe(path: { string | number }, listener: (value: any
 
 		listener(last, nil)
 	end)
+
+	return function()
+		if disconnected then
+			return
+		end
+		disconnected = true
+		if connection ~= nil then
+			connection:Disconnect()
+			connection = nil
+		end
+	end
 end
 
 return DataController

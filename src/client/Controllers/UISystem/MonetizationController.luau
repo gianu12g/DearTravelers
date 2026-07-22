@@ -80,6 +80,8 @@ local priceCache: { [ItemType]: { [number]: number } } = {
 -- source's own ReplicationController.Subscribe calls assumed.
 local giftedPasses: { [string]: boolean } = {}
 local ownedPacks: { string } = {}
+local passButtons: { { button: GuiButton, name: string } } = {}
+local packButtons: { { button: GuiButton, name: string } } = {}
 
 local MonetizationController = {}
 
@@ -184,7 +186,7 @@ end
 
 function MonetizationController.StartPassPrompt(passName: string)
 	local passConfig = PassesConfig[passName]
-	if passConfig == nil then
+	if passConfig == nil or not passConfig.Enabled then
 		log.warn(`StartPassPrompt: unknown pass "{passName}"`)
 		return
 	end
@@ -204,7 +206,7 @@ end
 
 function MonetizationController.StartPackPrompt(packName: string)
 	local packConfig = PacksConfig[packName]
-	if packConfig == nil then
+	if packConfig == nil or not packConfig.Enabled then
 		log.warn(`StartPackPrompt: unknown pack "{packName}"`)
 		return
 	end
@@ -224,21 +226,31 @@ local function applyOwnedState(button: GuiButton)
 	end
 end
 
+local function updateOwnedButtons(buttons: { { button: GuiButton, name: string } }, owns: (string) -> boolean)
+	for index = #buttons, 1, -1 do
+		local entry = buttons[index]
+		if entry.button.Parent == nil then
+			table.remove(buttons, index)
+		elseif owns(entry.name) then
+			applyOwnedState(entry.button)
+		end
+	end
+end
+
 function MonetizationController.SetPassButton(button: GuiButton, passName: string)
+	local passConfig = PassesConfig[passName]
+	if passConfig == nil or not passConfig.Enabled then
+		button.Visible = false
+		return
+	end
+	table.insert(passButtons, { button = button, name = passName })
 	button.MouseButton1Click:Connect(function()
 		MonetizationController.StartPassPrompt(passName)
 	end)
 
 	if MonetizationController.IsPassOwned(passName) then
 		applyOwnedState(button)
-		return
 	end
-
-	DataController.observe({ "UISystem", "GiftedPasses" }, function(value: any)
-		if type(value) == "table" and value[passName] then
-			applyOwnedState(button)
-		end
-	end)
 end
 
 function MonetizationController.SetProductButton(button: GuiButton, productName: string)
@@ -248,23 +260,27 @@ function MonetizationController.SetProductButton(button: GuiButton, productName:
 end
 
 function MonetizationController.SetPackButton(button: GuiButton, packName: string)
+	local packConfig = PacksConfig[packName]
+	if packConfig == nil or not packConfig.Enabled then
+		button.Visible = false
+		return
+	end
+	table.insert(packButtons, { button = button, name = packName })
 	button.MouseButton1Click:Connect(function()
 		MonetizationController.StartPackPrompt(packName)
 	end)
 
 	if MonetizationController.IsPackOwned(packName) then
 		applyOwnedState(button)
-		return
 	end
-
-	DataController.observe({ "UISystem", "Packs" }, function(value: any)
-		if type(value) == "table" and table.find(value, packName) ~= nil then
-			applyOwnedState(button)
-		end
-	end)
 end
 
 function MonetizationController.SetPassGiftButton(button: GuiButton, passName: string)
+	local passConfig = PassesConfig[passName]
+	if passConfig == nil or not passConfig.Enabled then
+		button.Visible = false
+		return
+	end
 	button.MouseButton1Click:Connect(function()
 		giftData.GiftType = "Pass"
 		giftData.GiftName = passName
@@ -408,12 +424,18 @@ function MonetizationController.Start()
 	DataController.observe({ "UISystem", "GiftedPasses" }, function(value: any)
 		if type(value) == "table" then
 			giftedPasses = value
+			updateOwnedButtons(passButtons, function(passName: string)
+				return giftedPasses[passName] == true
+			end)
 		end
 	end)
 
 	DataController.observe({ "UISystem", "Packs" }, function(value: any)
 		if type(value) == "table" then
 			ownedPacks = value
+			updateOwnedButtons(packButtons, function(packName: string)
+				return table.find(ownedPacks, packName) ~= nil
+			end)
 		end
 	end)
 

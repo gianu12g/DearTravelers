@@ -13,14 +13,15 @@ local Log = require(ReplicatedStorage.Shared.Log)
 
 local log = Log.new("DailyRewardFunctions")
 
-local function stub(index: number): (Player) -> ()
+local function stub(index: number): (Player) -> boolean
 	return function(player: Player)
 		-- STUB: replace with the real daily-reward payout for slot {index}.
 		log.debug(`daily reward stub {index} for {player.Name}`)
+		return false
 	end
 end
 
-local DailyRewardFunctions: { [number]: (Player) -> () } = {
+local DailyRewardFunctions: { [number]: (Player) -> boolean } = {
 	[1] = stub(1),
 	[2] = stub(2),
 	[3] = stub(3),

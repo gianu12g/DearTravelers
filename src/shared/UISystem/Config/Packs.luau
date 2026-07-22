@@ -9,10 +9,12 @@
 
 local Packs = {
 	["Starter Pack"] = {
+		Enabled = false, -- Enable only after PackRewards implements the contents.
 		ProductID = 3596657710, -- Change this to whatever your product ID is
 	},
 
 	["Secret Pack"] = {
+		Enabled = false,
 		ProductID = 3596657806, -- Change this to whatever your product ID is
 	},
 }

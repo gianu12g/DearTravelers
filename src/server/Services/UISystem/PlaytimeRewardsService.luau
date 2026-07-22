@@ -27,12 +27,17 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
 local PlaytimeRewardFunctions = require(ServerStorage.Modules.UISystem.PlaytimeRewardFunctions)
 local PlaytimeRewardsConfig = require(ReplicatedStorage.Shared.UISystem.Config.PlaytimeRewards)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
 
 local log = Log.new("PlaytimeRewardsService")
 
 local FLUSH_INTERVAL_SECONDS = 20
+
+local function newClaimedRewards(): { boolean }
+	return table.create(#PlaytimeRewardsConfig.Rewards, false)
+end
 
 type LiveState = {
 	startTimestamp: number,
@@ -59,15 +64,14 @@ local live: { [Player]: LiveState } = {}
 -- exists: DataService.getData(player) returns nil until the async
 -- ProfileStore session load finishes.
 local function waitForData(player: Player): DataService.PlayerData?
-	local data = DataService.getData(player)
-	while data == nil and player.Parent == Players do
-		task.wait(0.25)
-		data = DataService.getData(player)
+	if not DataService.awaitData(player, 120) then
+		return nil
 	end
-	return data
+	return DataService.getData(player)
 end
 
 local PlaytimeRewardsService = {}
+local claimLimiter = RateLimiter.new(1, 2)
 
 --[[
 	The live, up-to-the-second playtime for `player`, or nil if this service
@@ -108,13 +112,13 @@ local function resetIfStale(player: Player)
 	DataService.setValues(player, { "UISystem", "PlaytimeRewards" }, {
 		StartTimestamp = os.time(),
 		StartPlaytime = playtime,
-		ClaimedRewards = {},
+		ClaimedRewards = newClaimedRewards(),
 	})
 end
 
 function PlaytimeRewardsService.Init()
 	Net.playtimeClaim.listen(function(data, player)
-		if player == nil then
+		if player == nil or not claimLimiter:allow(player) then
 			return
 		end
 
@@ -146,17 +150,14 @@ function PlaytimeRewardsService.Init()
 
 		local claimed = table.clone(rewards.ClaimedRewards)
 		claimed[index] = true
-		-- Persisted before the reward runs -- fine while rewardFunction is a
-		-- stub, but a real payout that errors would be forfeited. Decide
-		-- grant-then-mark vs gating this write on reward success when
-		-- PlaytimeRewardFunctions.luau stops being stubs.
-		DataService.set(player, { "UISystem", "PlaytimeRewards", "ClaimedRewards" }, claimed)
-
-		local ok = pcall(rewardFunction, player)
-		if not ok then
-			log.warn(`reward function for playtime index {index} errored for {player.Name}`)
+		local ok, rewarded = pcall(rewardFunction, player)
+		if not ok or not rewarded then
+			log.warn(`reward function for playtime index {index} rejected the claim for {player.Name}`)
+			UINotificationService.SendNotification(player, "Error", "This reward is not available yet")
+			return
 		end
 
+		DataService.set(player, { "UISystem", "PlaytimeRewards", "ClaimedRewards" }, claimed)
 		UINotificationService.SendNotification(player, "Success", "Successfully claimed")
 	end)
 end

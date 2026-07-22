@@ -152,7 +152,8 @@ function PromotionController.Start()
 		local pool: { PoolEntry } = {}
 
 		for packName, iconId in PromotionConfig.Packs do
-			if not MonetizationController.IsPackOwned(packName) and PacksConfig[packName] ~= nil then
+			local packConfig = PacksConfig[packName]
+			if packConfig ~= nil and packConfig.Enabled and not MonetizationController.IsPackOwned(packName) then
 				table.insert(pool, {
 					Type = "Pack",
 					Name = packName,
@@ -163,7 +164,8 @@ function PromotionController.Start()
 		end
 
 		for passName, iconId in PromotionConfig.Passes do
-			if not MonetizationController.IsPassOwned(passName) and PassesConfig[passName] ~= nil then
+			local passConfig = PassesConfig[passName]
+			if passConfig ~= nil and passConfig.Enabled and not MonetizationController.IsPassOwned(passName) then
 				table.insert(pool, {
 					Type = "Pass",
 					Name = passName,

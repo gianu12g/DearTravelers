@@ -19,14 +19,15 @@ local Log = require(ReplicatedStorage.Shared.Log)
 
 local log = Log.new("PassRewards")
 
-local function stub(passName: string): (Player) -> ()
+local function stub(passName: string): (Player) -> boolean
 	return function(player: Player)
 		-- STUB: replace with the real reward for the "{passName}" gamepass.
 		log.debug(`pass reward stub "{passName}" for {player.Name}`)
+		return false
 	end
 end
 
-local PassRewards: { [string]: (Player) -> () } = {
+local PassRewards: { [string]: (Player) -> boolean } = {
 	["VIP"] = stub("VIP"),
 	["Teleporter"] = stub("Teleporter"),
 	["x2 Speed"] = stub("x2 Speed"),

@@ -11,21 +11,21 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local CoinsService = require(ServerStorage.Services.CoinsService)
 
-local WheelSpinRewardFunctions: { [number]: (Player) -> () } = {
+local WheelSpinRewardFunctions: { [number]: (Player) -> boolean } = {
 	[1] = function(player: Player)
-		CoinsService.add(player, 100)
+		return CoinsService.add(player, 100)
 	end,
 	[2] = function(player: Player)
-		CoinsService.add(player, 1000)
+		return CoinsService.add(player, 1000)
 	end,
 	[3] = function(player: Player)
-		CoinsService.add(player, 10000)
+		return CoinsService.add(player, 10000)
 	end,
 	[4] = function(player: Player)
-		CoinsService.add(player, 100000)
+		return CoinsService.add(player, 100000)
 	end,
 	[5] = function(player: Player)
-		CoinsService.add(player, 150000)
+		return CoinsService.add(player, 150000)
 	end,
 }
 

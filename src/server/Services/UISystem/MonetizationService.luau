@@ -23,15 +23,11 @@
 	the merged Coins balance via CoinsService (PORT-SPEC.md §2) -- see
 	Modules/UISystem/ProductRewards.luau.
 
-	KNOWN GAP (flagged, not silently dropped -- see the implementer's
-	report): the source supported gifting an OFFLINE player via
-	DataService:MessagePlayer, a cross-server ProfileStore messaging feature
-	the target DataService does not expose (it was not part of
-	PORT-SPEC.md's DataService merge). Gifting here requires the target to be
-	in THIS server at both gift-start and purchase-completion time; if they
-	leave in between, the purchase still completes (the buyer already paid --
-	ProcessReceipt cannot un-charge Robux) but the gift is lost and logged as
-	an error rather than silently eaten.
+	Developer-product receipts use a bounded PurchaseId ledger. Rewards are
+	mutated and immediately saved before PurchaseGranted is returned. Paid
+	gifts are first written into the target profile's durable ProfileStore
+	message queue, so the recipient may be offline, in another server, or
+	leave while the purchase prompt is open without losing the gift.
 ]]
 
 local MarketplaceService = game:GetService("MarketplaceService")
@@ -40,7 +36,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
 local DataService = require(ServerStorage.Services.DataService)
-local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local General = require(ReplicatedStorage.Shared.UISystem.Config.General)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
@@ -50,16 +45,19 @@ local PassRewards = require(ServerStorage.Modules.UISystem.PassRewards)
 local Passes = require(ReplicatedStorage.Shared.UISystem.Config.Passes)
 local ProductRewards = require(ServerStorage.Modules.UISystem.ProductRewards)
 local Products = require(ReplicatedStorage.Shared.UISystem.Config.Products)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
 
 local log = Log.new("MonetizationService")
 
 local MAX_ITEM_NAME_LENGTH = 64
 local REWARD_RETRIES = 5
+local MAX_PROCESSED_PURCHASE_IDS = 200
+local GIFT_MESSAGE_KIND = "MonetizationGift"
 
-type PassEntry = { PassID: number, GiftID: number? }
+type PassEntry = { Enabled: boolean, PassID: number, GiftID: number? }
 type ProductEntry = { ProductID: number, GiftID: number? }
-type PackEntry = { ProductID: number }
+type PackEntry = { Enabled: boolean, ProductID: number }
 
 --[[
 	Shared/UISystem/Config/{Passes,Products,Packs}.luau are each typed via
@@ -76,21 +74,58 @@ local PassesByName = (Passes :: any) :: { [string]: PassEntry }
 local ProductsByName = (Products :: any) :: { [string]: ProductEntry }
 local PacksByName = (Packs :: any) :: { [string]: PackEntry }
 
-type GiftCacheEntry = {
-	kind: "Pass" | "Product",
-	itemName: string,
-	targetUserId: number,
-}
-
 type ProductInfo = {
 	kind: "PassGift" | "ProductPurchase" | "ProductGift" | "PackPurchase" | "Unknown",
 	name: string,
 }
 
--- Which product/gift the gifter is mid-purchase of, keyed by the GIFTER.
--- Cleared on PlayerRemoving -- an abandoned gift attempt has nothing left to
--- resolve once the gifter is gone.
-local giftCache: { [Player]: GiftCacheEntry } = {}
+local processingReceipts: { [Player]: true } = {}
+local giftStartLimiter = RateLimiter.new(0.2, 1)
+local warnedUnavailableRewards: { [string]: true } = {}
+local warnedReceipts: { [string]: true } = {}
+
+local function warnUnavailableReward(kind: string, itemName: string, playerName: string)
+	local key = `{kind}:{itemName}`
+	if warnedUnavailableRewards[key] then
+		return
+	end
+	warnedUnavailableRewards[key] = true
+	log.warn(`{kind} reward "{itemName}" is unavailable for {playerName}; further warnings suppressed`)
+end
+
+local function warnReceiptOnce(purchaseId: string, message: string)
+	if warnedReceipts[purchaseId] then
+		return
+	end
+	warnedReceipts[purchaseId] = true
+	log.error(message .. "; further warnings for this receipt suppressed")
+end
+
+local function emptyPendingGift()
+	return { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 }
+end
+
+local function hasProcessedPurchase(data: DataService.PlayerData, purchaseId: string): boolean
+	local ids = (data.UISystem.ProcessedPurchaseIds :: any) :: { string }
+	return table.find(ids, purchaseId) ~= nil
+end
+
+local function appendProcessedPurchase(data: DataService.PlayerData, purchaseId: string): { string }
+	local ids = (data.UISystem.ProcessedPurchaseIds :: any) :: { string }
+	local updated = table.clone(ids)
+	table.insert(updated, purchaseId)
+	while #updated > MAX_PROCESSED_PURCHASE_IDS do
+		table.remove(updated, 1)
+	end
+	return updated
+end
+
+local function savedPurchaseExists(savedData: any, purchaseId: string): boolean
+	return type(savedData) == "table"
+		and type(savedData.UISystem) == "table"
+		and type(savedData.UISystem.ProcessedPurchaseIds) == "table"
+		and table.find(savedData.UISystem.ProcessedPurchaseIds, purchaseId) ~= nil
+end
 
 local function isValidUserId(value: unknown): boolean
 	return typeof(value) == "number"
@@ -122,8 +157,9 @@ local function getProductInfo(productId: number): ProductInfo
 	return { kind = "Unknown", name = "" }
 end
 
-local function passOwned(target: Player, passName: string): boolean
-	local data = DataService.getData(target)
+local function passOwned(targetUserId: number, passName: string): boolean?
+	local target = Players:GetPlayerByUserId(targetUserId)
+	local data = if target ~= nil then DataService.getData(target) else nil
 	if data ~= nil then
 		local giftedPasses = (data.UISystem.GiftedPasses :: any) :: { [string]: boolean }
 		if giftedPasses[passName] then
@@ -133,13 +169,13 @@ local function passOwned(target: Player, passName: string): boolean
 
 	local passInfo = PassesByName[passName]
 	if passInfo == nil then
-		return false
+		return nil
 	end
 
 	local ok, owned = pcall(function()
-		return MarketplaceService:UserOwnsGamePassAsync(target.UserId, passInfo.PassID)
+		return MarketplaceService:UserOwnsGamePassAsync(targetUserId, passInfo.PassID)
 	end)
-	return ok and owned == true
+	return if ok then owned == true else nil
 end
 
 local function notifyGiftSent(target: Player, gifterUserId: number?, itemLabel: string)
@@ -151,22 +187,38 @@ local function notifyGiftSent(target: Player, gifterUserId: number?, itemLabel: 
 	UINotificationService.SendNotification(target, "Success", `Someone sent you {itemLabel}`)
 end
 
-local function givePass(target: Player, passName: string, isGift: boolean, gifterUserId: number?, isNew: boolean)
+local function runReward(rewardFunction: (Player) -> boolean, target: Player): boolean
+	local lastError: any = nil
+	for _ = 1, REWARD_RETRIES do
+		local ok, granted = pcall(rewardFunction, target)
+		if ok then
+			return granted == true
+		end
+		lastError = granted
+	end
+	log.warn(`reward failed for {target.Name}: {tostring(lastError)}`)
+	return false
+end
+
+local function givePass(
+	target: Player,
+	passName: string,
+	isGift: boolean,
+	gifterUserId: number?,
+	isNew: boolean
+): boolean
+	local rewardFunction = PassRewards[passName]
+	if rewardFunction == nil or not runReward(rewardFunction, target) then
+		warnUnavailableReward("pass", passName, target.Name)
+		return false
+	end
+
 	if isGift then
 		DataService.set(target, { "UISystem", "GiftedPasses", passName }, true)
 	end
 
-	local rewardFunction = PassRewards[passName]
-	if rewardFunction ~= nil then
-		task.spawn(function()
-			Format.Retry(function()
-				rewardFunction(target)
-			end, REWARD_RETRIES)
-		end)
-	end
-
 	if not isNew then
-		return
+		return true
 	end
 
 	if isGift then
@@ -175,20 +227,24 @@ local function givePass(target: Player, passName: string, isGift: boolean, gifte
 		UINotificationService.SendNotification(target, "Success", `Purchased {passName} gamepass successfully`)
 		UINotificationService.EmitConfetti(target)
 	end
+	return true
 end
 
-local function giveProduct(target: Player, productName: string, isGift: boolean, gifterUserId: number?, isNew: boolean)
+local function giveProduct(
+	target: Player,
+	productName: string,
+	isGift: boolean,
+	gifterUserId: number?,
+	isNew: boolean
+): boolean
 	local rewardFunction = ProductRewards[productName]
-	if rewardFunction ~= nil then
-		task.spawn(function()
-			Format.Retry(function()
-				rewardFunction(target)
-			end, REWARD_RETRIES)
-		end)
+	if rewardFunction == nil or not runReward(rewardFunction, target) then
+		warnUnavailableReward("product", productName, target.Name)
+		return false
 	end
 
 	if not isNew then
-		return
+		return true
 	end
 
 	if isGift then
@@ -197,38 +253,72 @@ local function giveProduct(target: Player, productName: string, isGift: boolean,
 		UINotificationService.SendNotification(target, "Success", `Purchased {productName} successfully`)
 		UINotificationService.EmitConfetti(target)
 	end
+	return true
 end
 
-local function givePack(player: Player, packName: string)
+local function givePack(player: Player, packName: string): boolean
 	local data = DataService.getData(player)
 	if data == nil then
-		return
+		return false
 	end
 
 	local packs = (data.UISystem.Packs :: any) :: { string }
 	if table.find(packs, packName) ~= nil then
-		return
+		return true
+	end
+
+	local rewardFunction = PackRewards[packName]
+	if rewardFunction == nil or not runReward(rewardFunction, player) then
+		warnUnavailableReward("pack", packName, player.Name)
+		return false
 	end
 
 	local updated = table.clone(packs)
 	table.insert(updated, packName)
 	DataService.set(player, { "UISystem", "Packs" }, updated)
 
-	local rewardFunction = PackRewards[packName]
-	if rewardFunction ~= nil then
-		task.spawn(function()
-			Format.Retry(function()
-				rewardFunction(player)
-			end, REWARD_RETRIES)
-		end)
-	end
-
 	UINotificationService.SendNotification(player, "Success", `Purchased {packName} successfully`)
 	UINotificationService.EmitConfetti(player)
+	return true
 end
 
-local function startPassGift(gifter: Player, passName: string, target: Player)
-	if passOwned(target, passName) then
+local function persistGiftIntent(
+	gifter: Player,
+	kind: "Pass" | "Product",
+	itemName: string,
+	targetUserId: number,
+	productId: number
+): boolean
+	local pending = { Kind = kind, ItemName = itemName, TargetUserId = targetUserId, ProductId = productId }
+	DataService.set(gifter, { "UISystem", "PendingGift" }, pending)
+	return DataService.saveAndAwait(gifter, function(savedData: any)
+		local saved = if type(savedData) == "table" and type(savedData.UISystem) == "table"
+			then savedData.UISystem.PendingGift
+			else nil
+		return type(saved) == "table"
+			and saved.Kind == kind
+			and saved.ItemName == itemName
+			and saved.TargetUserId == targetUserId
+			and saved.ProductId == productId
+	end, 30)
+end
+
+local function hasPendingGift(player: Player): boolean
+	local data = DataService.getData(player)
+	return data ~= nil and data.UISystem.PendingGift.Kind ~= ""
+end
+
+local function startPassGift(gifter: Player, passName: string, targetUserId: number)
+	if hasPendingGift(gifter) then
+		UINotificationService.SendNotification(gifter, "Error", "Your previous purchase is still resolving")
+		return
+	end
+	local owned = passOwned(targetUserId, passName)
+	if owned == nil then
+		UINotificationService.SendNotification(gifter, "Error", "Ownership could not be verified. Please try again.")
+		return
+	end
+	if owned then
 		UINotificationService.SendNotification(gifter, "Error", "Player already owns the gamepass")
 		return
 	end
@@ -239,19 +329,29 @@ local function startPassGift(gifter: Player, passName: string, target: Player)
 		return
 	end
 
-	giftCache[gifter] = { kind = "Pass", itemName = passName, targetUserId = target.UserId }
+	if not persistGiftIntent(gifter, "Pass", passName, targetUserId, giftProductId) then
+		UINotificationService.SendNotification(gifter, "Error", "Gift could not be prepared. Please try again.")
+		return
+	end
 	Net.promptStart.sendTo(nil, gifter)
 	MarketplaceService:PromptProductPurchase(gifter, giftProductId)
 end
 
-local function startProductGift(gifter: Player, productName: string, target: Player)
+local function startProductGift(gifter: Player, productName: string, targetUserId: number)
+	if hasPendingGift(gifter) then
+		UINotificationService.SendNotification(gifter, "Error", "Your previous purchase is still resolving")
+		return
+	end
 	local giftProductId = ProductsByName[productName].GiftID
 	if giftProductId == nil then
 		UINotificationService.SendNotification(gifter, "Error", "That item can't be gifted")
 		return
 	end
 
-	giftCache[gifter] = { kind = "Product", itemName = productName, targetUserId = target.UserId }
+	if not persistGiftIntent(gifter, "Product", productName, targetUserId, giftProductId) then
+		UINotificationService.SendNotification(gifter, "Error", "Gift could not be prepared. Please try again.")
+		return
+	end
 	Net.promptStart.sendTo(nil, gifter)
 	MarketplaceService:PromptProductPurchase(gifter, giftProductId)
 end
@@ -264,6 +364,10 @@ local function onGiftStart(data: { targetUserId: number, itemKind: string, itemN
 	if not isValidUserId(targetUserId) then
 		return
 	end
+	if targetUserId == player.UserId then
+		UINotificationService.SendNotification(player, "Error", "You can't gift yourself")
+		return
+	end
 	if itemKind ~= "Pass" and itemKind ~= "Product" then
 		return
 	end
@@ -271,82 +375,183 @@ local function onGiftStart(data: { targetUserId: number, itemKind: string, itemN
 		return
 	end
 
-	local target = Players:GetPlayerByUserId(targetUserId)
-	if target == nil then
-		UINotificationService.SendNotification(player, "Error", "That player must be online to receive a gift")
-		return
-	end
-
 	local fromAdmin = table.find(General.Admins, player.UserId) ~= nil
+	local target = Players:GetPlayerByUserId(targetUserId)
 
 	if itemKind == "Pass" then
-		if PassesByName[itemName] == nil then
+		local passInfo = PassesByName[itemName]
+		if passInfo == nil or not passInfo.Enabled then
+			UINotificationService.SendNotification(player, "Error", "That gamepass is not available yet")
 			return
 		end
 		if fromAdmin then
-			givePass(target, itemName, true, player.UserId, true)
+			if target == nil or not givePass(target, itemName, true, player.UserId, true) then
+				UINotificationService.SendNotification(player, "Error", "The admin gift could not be granted")
+			end
 			return
 		end
-		startPassGift(player, itemName, target)
+		startPassGift(player, itemName, targetUserId)
 	else
 		if ProductsByName[itemName] == nil then
 			return
 		end
 		if fromAdmin then
-			giveProduct(target, itemName, true, player.UserId, true)
+			if target == nil or not giveProduct(target, itemName, true, player.UserId, true) then
+				UINotificationService.SendNotification(player, "Error", "The admin gift could not be granted")
+			end
 			return
 		end
-		startProductGift(player, itemName, target)
+		startProductGift(player, itemName, targetUserId)
 	end
 end
 
-local function onProcessReceipt(receiptInfo: { PlayerId: number, ProductId: number }): Enum.ProductPurchaseDecision
-	local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
-	if player == nil then
-		-- The player is not in THIS server (a different server, or they've
-		-- already left). Roblox retries ProcessReceipt on future
-		-- joins/servers until a non-NotProcessedYet decision is returned, so
-		-- this is the correct response, not a dropped purchase.
+type ReceiptInfo = { PlayerId: number, ProductId: number, PurchaseId: string }
+
+local function pendingGiftMatches(data: DataService.PlayerData, info: ProductInfo, productId: number): (boolean, number)
+	local pending = data.UISystem.PendingGift
+	local expectedKind = if info.kind == "PassGift" then "Pass" else "Product"
+	local matches = pending.Kind == expectedKind
+		and pending.ItemName == info.name
+		and pending.ProductId == productId
+		and isValidUserId(pending.TargetUserId)
+	return matches, pending.TargetUserId
+end
+
+local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player): Enum.ProductPurchaseDecision
+	if #receiptInfo.PurchaseId == 0 or #receiptInfo.PurchaseId > 128 then
+		log.error(`invalid PurchaseId received for product {receiptInfo.ProductId}`)
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+	if not DataService.awaitData(player, 60) then
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
-	local info = getProductInfo(receiptInfo.ProductId)
-
-	if info.kind == "PassGift" then
-		local cache = giftCache[player]
-		if cache ~= nil and cache.kind == "Pass" and cache.itemName == info.name then
-			local target = Players:GetPlayerByUserId(cache.targetUserId)
-			if target ~= nil then
-				givePass(target, info.name, true, player.UserId, true)
-			else
-				log.error(
-					`gift target (userId {cache.targetUserId}) left before "{info.name}" gift resolved -- {player.Name} paid, nothing granted`
-				)
-			end
-		end
-	elseif info.kind == "ProductGift" then
-		local cache = giftCache[player]
-		if cache ~= nil and cache.kind == "Product" and cache.itemName == info.name then
-			local target = Players:GetPlayerByUserId(cache.targetUserId)
-			if target ~= nil then
-				giveProduct(target, info.name, true, player.UserId, true)
-			else
-				log.error(
-					`gift target (userId {cache.targetUserId}) left before "{info.name}" gift resolved -- {player.Name} paid, nothing granted`
-				)
-			end
-		end
-	elseif info.kind == "ProductPurchase" then
-		giveProduct(player, info.name, false, nil, true)
-	elseif info.kind == "PackPurchase" then
-		givePack(player, info.name)
-	else
-		log.warn(`unrecognised product id {receiptInfo.ProductId} purchased by {player.Name}`)
+	local data = DataService.getData(player)
+	if data == nil then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
-	giftCache[player] = nil
+	-- A previous attempt may have granted the reward but timed out while
+	-- waiting for the DataStore. Never grant twice; just keep driving the
+	-- same PurchaseId to durable storage.
+	if hasProcessedPurchase(data, receiptInfo.PurchaseId) then
+		local saved = DataService.saveAndAwait(player, function(savedData: any)
+			return savedPurchaseExists(savedData, receiptInfo.PurchaseId)
+		end, 30)
+		return if saved
+			then Enum.ProductPurchaseDecision.PurchaseGranted
+			else Enum.ProductPurchaseDecision.NotProcessedYet
+	end
 
-	return Enum.ProductPurchaseDecision.PurchaseGranted
+	local info = getProductInfo(receiptInfo.ProductId)
+	if info.kind == "Unknown" then
+		-- A stale/misconfigured product must remain retryable. Acknowledging it
+		-- would permanently discard a paid purchase with no reward.
+		warnReceiptOnce(
+			receiptInfo.PurchaseId,
+			`unrecognised product id {receiptInfo.ProductId} purchased by {player.Name}`
+		)
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	local granted = false
+	if info.kind == "PassGift" or info.kind == "ProductGift" then
+		local matches, targetUserId = pendingGiftMatches(data, info, receiptInfo.ProductId)
+		if not matches then
+			warnReceiptOnce(
+				receiptInfo.PurchaseId,
+				`receipt {receiptInfo.PurchaseId} has no matching durable gift intent for {player.Name}`
+			)
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+		granted = DataService.messagePlayer(targetUserId, {
+			Kind = GIFT_MESSAGE_KIND,
+			PurchaseId = receiptInfo.PurchaseId,
+			RewardKind = if info.kind == "PassGift" then "Pass" else "Product",
+			ItemName = info.name,
+			GifterUserId = player.UserId,
+		})
+	else
+		granted = if info.kind == "ProductPurchase"
+			then giveProduct(player, info.name, false, nil, true)
+			else givePack(player, info.name)
+	end
+
+	if not granted then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	DataService.setValues(player, { "UISystem" }, {
+		ProcessedPurchaseIds = appendProcessedPurchase(data, receiptInfo.PurchaseId),
+		PendingGift = if info.kind == "PassGift" or info.kind == "ProductGift"
+			then emptyPendingGift()
+			else data.UISystem.PendingGift,
+	})
+
+	local saved = DataService.saveAndAwait(player, function(savedData: any)
+		return savedPurchaseExists(savedData, receiptInfo.PurchaseId)
+	end, 30)
+	return if saved then Enum.ProductPurchaseDecision.PurchaseGranted else Enum.ProductPurchaseDecision.NotProcessedYet
+end
+
+local function onProcessReceipt(receiptInfo: ReceiptInfo): Enum.ProductPurchaseDecision
+	local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
+	if player == nil then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+	if processingReceipts[player] then
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
+	processingReceipts[player] = true
+	local ok, decision = xpcall(function()
+		return processReceiptForPlayer(receiptInfo, player)
+	end, debug.traceback)
+	processingReceipts[player] = nil
+
+	if not ok then
+		log.error(`receipt processing failed for {player.Name}: {tostring(decision)}`)
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+	return decision
+end
+
+local function onGiftMessage(player: Player, message: { [string]: any }): boolean
+	local purchaseId = message.PurchaseId
+	local rewardKind = message.RewardKind
+	local itemName = message.ItemName
+	local gifterUserId = message.GifterUserId
+	if
+		type(purchaseId) ~= "string"
+		or #purchaseId == 0
+		or #purchaseId > 128
+		or (rewardKind ~= "Pass" and rewardKind ~= "Product")
+		or type(itemName) ~= "string"
+		or #itemName == 0
+		or #itemName > MAX_ITEM_NAME_LENGTH
+		or not isValidUserId(gifterUserId)
+	then
+		log.warn(`discarding malformed paid-gift message for {player.Name}`)
+		return true
+	end
+
+	local data = DataService.getData(player)
+	if data == nil then
+		return false
+	end
+	if hasProcessedPurchase(data, purchaseId) then
+		return true
+	end
+
+	local granted = if rewardKind == "Pass"
+		then PassesByName[itemName] ~= nil and givePass(player, itemName, true, gifterUserId, true)
+		else ProductsByName[itemName] ~= nil and giveProduct(player, itemName, true, gifterUserId, true)
+	if not granted then
+		return false
+	end
+
+	DataService.set(player, { "UISystem", "ProcessedPurchaseIds" }, appendProcessedPurchase(data, purchaseId))
+	return true
 end
 
 local MonetizationService = {}
@@ -355,7 +560,7 @@ function MonetizationService.Init()
 	--[[
 		The bundled Roblox type defs' exact ReceiptInfo shape is not
 		verified here (no luau-lsp on PATH for this pass). onProcessReceipt
-		only reads PlayerId and ProductId, real fields on every receipt
+		only reads PlayerId, ProductId, and PurchaseId, real fields on every receipt
 		Roblox has ever sent, so the narrow local param type above is
 		safe; the cast below is only needed because the property's
 		declared parameter type may be wider than what's deliberately
@@ -363,9 +568,10 @@ function MonetizationService.Init()
 		cast at the boundary, same pattern as DataService's Token cast).
 	]]
 	MarketplaceService.ProcessReceipt = onProcessReceipt :: any
+	DataService.registerMessageHandler(GIFT_MESSAGE_KIND, onGiftMessage)
 
 	Net.giftStart.listen(function(data, player)
-		if player == nil then
+		if player == nil or not giftStartLimiter:allow(player) then
 			return
 		end
 		onGiftStart(data, player)
@@ -374,8 +580,21 @@ end
 
 function MonetizationService.Start()
 	Players.PlayerRemoving:Connect(function(player: Player)
-		giftCache[player] = nil
+		processingReceipts[player] = nil
 	end)
+
+	MarketplaceService.PromptProductPurchaseFinished:Connect(
+		function(userId: number, productId: number, purchased: boolean)
+			if purchased then
+				return
+			end
+			local player = Players:GetPlayerByUserId(userId)
+			local data = if player ~= nil then DataService.getData(player) else nil
+			if player ~= nil and data ~= nil and data.UISystem.PendingGift.ProductId == productId then
+				DataService.set(player, { "UISystem", "PendingGift" }, emptyPendingGift())
+			end
+		end
+	)
 
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(
 		function(player: Player, passId: number, purchased: boolean)
@@ -394,7 +613,9 @@ function MonetizationService.Start()
 				return
 			end
 
-			givePass(player, passName, false, nil, true)
+			if not givePass(player, passName, false, nil, true) then
+				log.warn(`gamepass {passName} was purchased but its reward is unavailable`)
+			end
 		end
 	)
 

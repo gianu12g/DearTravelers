@@ -143,12 +143,12 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
 local Net = require(ReplicatedStorage.Shared.Net)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 
 local log = Log.new("MergeService")
 
-local BASE_COUNT = 8
 -- Same tolerance and bound as BaseService: a base whose pieces never stream
 -- in must not hang Start() (and therefore every player join) forever.
 local WAIT_TIMEOUT = 10
@@ -231,6 +231,7 @@ local activityCheckpointAccumulator = 0
 
 local MUSH_BOOST_AMOUNT = 5
 local MUSH_BOOST_DURATION = 5
+local mergeInputLimiter = RateLimiter.new(8, 12)
 
 local MergeService = {}
 
@@ -358,12 +359,10 @@ end
 -- DataService.getData(player) returns nil until that player's ProfileStore
 -- session finishes loading (async, started from DataService.Start()).
 local function waitForData(player: Player): DataService.PlayerData?
-	local data = DataService.getData(player)
-	while data == nil and player.Parent == Players do
-		task.wait(0.25)
-		data = DataService.getData(player)
+	if not DataService.awaitData(player, 120) then
+		return nil
 	end
-	return data
+	return DataService.getData(player)
 end
 
 --[[
@@ -571,15 +570,12 @@ local function trySpawnObject(player: Player, live: LiveBase)
 
 	local entry: MergeObjectEntry = { Tier = tier, X = roundedX, Z = roundedZ }
 
-	--[[
-		NEVER mutate profile data directly (ARCHITECTURE.md). table.clone
-		copies the array wrapper only -- existing entry tables inside it (and
-		therefore every key already in live.parts) keep their identity, which
-		is what the header's IDENTITY note depends on.
-	]]
-	local updated = table.clone(data.Merge.Squishies)
-	table.insert(updated, entry)
-	DataService.set(player, { "Merge", "Squishies" }, updated)
+	-- Append incrementally: auto-spawn runs every few seconds, so replacing the
+	-- entire growing array here would turn one small entry into O(n) replicated
+	-- payload over the life of every pad.
+	if DataService.tableInsert(player, { "Merge", "Squishies" }, entry) == nil then
+		return
+	end
 
 	spawnRestingPart(player, live, entry)
 end
@@ -877,7 +873,7 @@ end
 	rather than read from RunService here, keeping this a pure function of
 	its arguments like the rest of this module's Heartbeat-driven code.
 
-	`liveBases` is bounded by BASE_COUNT (8), so iterating all of it every
+	`liveBases` is bounded by the server's discovered base count, so iterating all of it every
 	Heartbeat is cheap on its own; the `next(live.disarmed) == nil` check
 	skips the character lookup and inner scan entirely for the (usual) case
 	of a pad with nothing disarmed on it right now.
@@ -1019,11 +1015,13 @@ local function dropCarried(player: Player)
 	-- profile.Data directly" rule applies even though carry.entry IS a
 	-- profile.Data table (see the header's IDENTITY note); only a
 	-- DataService.set call may change what a client sees.
-	local updated = table.create(#data.Merge.Squishies)
-	for _, existingEntry in data.Merge.Squishies do
-		table.insert(updated, if existingEntry == carry.entry then newEntry else existingEntry)
+	local entryIndex = table.find(data.Merge.Squishies, carry.entry)
+	if entryIndex == nil then
+		log.warn(`carried squishy disappeared from {player.Name}'s profile -- drop cancelled`)
+		cancelCarry(player)
+		return
 	end
-	DataService.set(player, { "Merge", "Squishies" }, updated)
+	DataService.set(player, { "Merge", "Squishies", entryIndex }, newEntry)
 
 	carries[player] = nil
 	player:SetAttribute("CarryingTier", nil)
@@ -1171,13 +1169,13 @@ end
 ]]
 function MergeService.Init()
 	Net.mergeDropRequest.listen(function(_data, player)
-		if player ~= nil then
+		if player ~= nil and mergeInputLimiter:allow(player) then
 			dropCarried(player)
 		end
 	end)
 
 	Net.mergeMushRequest.listen(function(_data, player)
-		if player ~= nil then
+		if player ~= nil and mergeInputLimiter:allow(player) then
 			activateMush(player)
 		end
 	end)
@@ -1197,17 +1195,18 @@ function MergeService.Start()
 	end
 
 	local baseCount = 0
-	for i = 1, BASE_COUNT do
-		local baseName = `Base{i}`
-
-		local part = basesFolder:WaitForChild(baseName, WAIT_TIMEOUT)
-		if part == nil or not part:IsA("BasePart") then
-			log.warn(`Bases.{baseName} is missing or not a BasePart -- excluded from merge spawning`)
+	for _, part in basesFolder:GetChildren() do
+		if string.match(part.Name, "^Base%d+$") == nil then
+			continue
+		end
+		local baseName = part.Name
+		if not part:IsA("BasePart") then
+			log.warn(`Bases.{baseName} is not a BasePart -- excluded from merge spawning`)
 			continue
 		end
 		local basePart: BasePart = part
 
-		local spawnAreaInstance = basePart:WaitForChild("SpawnArea", WAIT_TIMEOUT)
+		local spawnAreaInstance = basePart:FindFirstChild("SpawnArea")
 		if spawnAreaInstance == nil or not spawnAreaInstance:IsA("BasePart") then
 			log.warn(`{baseName}.SpawnArea is missing or not a BasePart -- excluded from merge spawning`)
 			continue

@@ -1,8 +1,8 @@
 --!strict
 --[[
 	Assigns each connecting player a private base out of
-	Workspace.MapLayout.Bases (Base1..Base8), server-authoritative and
-	race-safe.
+	Workspace.MapLayout.Bases (any Base<number> children),
+	server-authoritative and race-safe.
 
 	The whole claim happens inside claimBase(): scan `baseOrder` for the
 	first entry absent from `assignments`, then write the owner into that
@@ -16,16 +16,14 @@
 	`assignments` (baseName -> Player) is the source of truth. `playerBases`
 	(Player -> baseName) is a reverse index that exists only so
 	PlayerRemoving -- which hands us a Player and nothing else -- can find
-	and release that player's base in O(1) instead of scanning all 8.
+	and release that player's base in O(1) instead of scanning every base.
 
-	The Base1..Base8 parts, their NameLabel.NameText, and their KeyCaps
+	The Base<number> parts, their NameLabel.NameText, and their KeyCaps
 	folder already exist in Studio -- Rojo does not mount Workspace
 	(ARCHITECTURE.md's map), so this service only ever READS them, and it
-	does so with WaitForChild in Start() rather than Init(): Init() must
-	never yield, and the map is not guaranteed to have streamed in by the
-	time this service boots. A base whose expected children never show up
-	within the timeout is logged and left out of rotation instead of taking
-	the whole service down.
+	resolves the map hierarchy in Start() rather than Init(): Init() must never
+	yield. Once the Bases folder is present, its children are discovered in one
+	snapshot and malformed bases are logged and left out of rotation.
 
 	ATTRIBUTES: base assignment is public info (every player can already see
 	whose name is on a base's NameText), so it is fine to publish it as a
@@ -57,7 +55,6 @@ local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 
 local log = Log.new("BaseService")
 
-local BASE_COUNT = 8
 -- Generous but bounded: a base whose pieces never arrive must not hang
 -- Start() (and therefore every player join) forever. Reused as the
 -- HumanoidRootPart streaming timeout below for the same reason.
@@ -77,7 +74,7 @@ type BaseRecord = {
 }
 
 local bases: { [string]: BaseRecord } = {}
--- Base1..Base8 in claim order, populated once during Start() setup.
+-- Base<number> in numeric claim order, populated once during Start() setup.
 local baseOrder: { string } = {}
 
 local assignments: { [string]: Player } = {}
@@ -86,8 +83,55 @@ local playerBases: { [Player]: string } = {}
 -- currently owns a base. Reverse-indexed by Player for the same reason
 -- playerBases is: PlayerRemoving only hands us a Player.
 local characterConnections: { [Player]: RBXScriptConnection } = {}
+local waitingPlayers: { Player } = {}
+local queuedPlayers: { [Player]: true } = {}
 
 local BaseService = {}
+local onPlayerAdded: (Player) -> ()
+
+local function updateQueuePositions()
+	for position, player in waitingPlayers do
+		if player.Parent == Players then
+			player:SetAttribute("BaseQueuePosition", position)
+		end
+	end
+end
+
+local function removeFromQueue(player: Player)
+	if queuedPlayers[player] == nil then
+		return
+	end
+	queuedPlayers[player] = nil
+	player:SetAttribute("BaseQueuePosition", nil)
+	local index = table.find(waitingPlayers, player)
+	if index ~= nil then
+		table.remove(waitingPlayers, index)
+		updateQueuePositions()
+	end
+end
+
+local function queuePlayer(player: Player)
+	if queuedPlayers[player] or player.Parent ~= Players then
+		return
+	end
+	queuedPlayers[player] = true
+	table.insert(waitingPlayers, player)
+	updateQueuePositions()
+	log.warn(`queued {player.Name} for a base (position {#waitingPlayers})`)
+end
+
+local function popWaitingPlayer(): Player?
+	while #waitingPlayers > 0 do
+		local player = table.remove(waitingPlayers, 1)
+		queuedPlayers[player] = nil
+		player:SetAttribute("BaseQueuePosition", nil)
+		if player.Parent == Players then
+			updateQueuePositions()
+			return player
+		end
+	end
+	return nil
+end
 
 local function claimBase(player: Player): string?
 	for _, baseName in baseOrder do
@@ -141,9 +185,17 @@ local function releaseBase(player: Player)
 		record.nameText.Text = record.defaultText
 		record.part:SetAttribute("OwnerUserId", nil)
 	end
+
+	local waitingPlayer = popWaitingPlayer()
+	if waitingPlayer ~= nil then
+		onPlayerAdded(waitingPlayer)
+	end
 end
 
-local function onPlayerAdded(player: Player)
+onPlayerAdded = function(player: Player)
+	if player.Parent ~= Players then
+		return
+	end
 	if playerBases[player] ~= nil then
 		-- Already holds a base -- nothing to do.
 		return
@@ -151,9 +203,10 @@ local function onPlayerAdded(player: Player)
 
 	local baseName = claimBase(player)
 	if baseName == nil then
-		log.warn(`no free base for {player.Name} -- all {BASE_COUNT} bases are taken`)
+		queuePlayer(player)
 		return
 	end
+	removeFromQueue(player)
 
 	-- Claim is committed above (yield-free). Everything from here on may
 	-- yield freely.
@@ -181,6 +234,7 @@ local function onPlayerAdded(player: Player)
 end
 
 local function onPlayerRemoving(player: Player)
+	removeFromQueue(player)
 	releaseBase(player)
 end
 
@@ -211,24 +265,38 @@ function BaseService.Start()
 		return
 	end
 
-	for i = 1, BASE_COUNT do
-		local baseName = `Base{i}`
+	local discovered: { { index: number, instance: Instance } } = {}
+	for _, child in basesFolder:GetChildren() do
+		local indexText = string.match(child.Name, "^Base(%d+)$")
+		local index = if indexText ~= nil then tonumber(indexText) else nil
+		if index ~= nil then
+			table.insert(discovered, { index = index, instance = child })
+		end
+	end
+	table.sort(discovered, function(a, b)
+		if a.index == b.index then
+			return a.instance.Name < b.instance.Name
+		end
+		return a.index < b.index
+	end)
 
-		local part = basesFolder:WaitForChild(baseName, WAIT_TIMEOUT)
-		if part == nil or not part:IsA("BasePart") then
-			log.error(`Bases.{baseName} is missing or not a BasePart -- that base will never be assigned`)
+	for _, candidate in discovered do
+		local part = candidate.instance
+		local baseName = part.Name
+		if not part:IsA("BasePart") then
+			log.error(`Bases.{baseName} is not a BasePart -- that base will never be assigned`)
 			continue
 		end
 		local basePart: BasePart = part
 
-		local nameLabelInstance = basePart:WaitForChild("NameLabel", WAIT_TIMEOUT)
+		local nameLabelInstance = basePart:FindFirstChild("NameLabel")
 		if nameLabelInstance == nil or not nameLabelInstance:IsA("BillboardGui") then
 			log.error(`{baseName}.NameLabel is missing or not a BillboardGui -- that base will never be assigned`)
 			continue
 		end
 		local nameLabel: BillboardGui = nameLabelInstance
 
-		local nameTextInstance = nameLabel:WaitForChild("NameText", WAIT_TIMEOUT)
+		local nameTextInstance = nameLabel:FindFirstChild("NameText")
 		if nameTextInstance == nil or not nameTextInstance:IsA("TextLabel") then
 			log.error(`{baseName}.NameLabel.NameText is missing or not a TextLabel -- that base will never be assigned`)
 			continue
@@ -239,6 +307,11 @@ function BaseService.Start()
 		-- is only worth a warning, never a reason to drop the base.
 		if basePart:FindFirstChild("KeyCaps") == nil then
 			log.warn(`{baseName}.KeyCaps folder is missing`)
+		end
+		local spawnArea = basePart:FindFirstChild("SpawnArea")
+		if spawnArea == nil or not spawnArea:IsA("BasePart") then
+			log.error(`{baseName}.SpawnArea is missing or not a BasePart -- that base will never be assigned`)
+			continue
 		end
 
 		bases[baseName] = {
@@ -252,6 +325,11 @@ function BaseService.Start()
 	if #baseOrder == 0 then
 		log.error("no usable bases found under Workspace.MapLayout.Bases -- BaseService disabled")
 		return
+	end
+	if Players.MaxPlayers > #baseOrder then
+		log.warn(
+			`server capacity is {Players.MaxPlayers}, but only {#baseOrder} usable bases exist; extra players will queue`
+		)
 	end
 
 	-- Connected before SafePlayerAdded runs its snapshot loop so that a
