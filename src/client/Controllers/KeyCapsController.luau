@@ -21,6 +21,7 @@ local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
 local Log = require(ReplicatedStorage.Shared.Log)
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 
 local log = Log.new("LightUpKeysController")
 
@@ -33,7 +34,7 @@ local LETTER_LABEL_NAME = "LetterLabel"
 local LETTER_STROKE_NAME = "LetterStroke"
 
 local SOUND_NAME = "ClickSound"
-local SOUND_ID = "rbxassetid://84953529887338"
+local SOUND_ID = `rbxassetid://{Sounds.KeyPress}`
 local SOUND_VOLUME = 0.75
 local SOUND_GROUP_NAME = "Keyboard"
 local SOUND_LOAD_TIMEOUT = 3

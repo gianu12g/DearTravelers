@@ -5,7 +5,14 @@
 	dump's ReplicatedStorage.Configuration.WheelSpin.
 
 	A plain module (Loader ignores it, ARCHITECTURE.md Recipe 3).
+
+	Icon IDs now come from Shared.AssetIds.Images instead of being inlined
+	here.
 ]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 
 local WheelSpin = {
 	NumberOfSpins = 5, -- Number of spins made before landing on selected segment
@@ -16,27 +23,27 @@ local WheelSpin = {
 	Rewards = {
 		[1] = {
 			Chance = 35, -- Percentage chance
-			Icon = 110024503496390, -- Icon on UI
+			Icon = Images.Cash, -- Icon on UI
 			Text = "100 Cash", -- Text on UI
 		},
 		[2] = {
 			Chance = 30, -- Percentage chance
-			Icon = 110024503496390, -- Icon on UI
+			Icon = Images.Cash, -- Icon on UI
 			Text = "1K Cash", -- Text on UI
 		},
 		[3] = {
 			Chance = 20, -- Percentage chance
-			Icon = 110024503496390, -- Icon on UI
+			Icon = Images.Cash, -- Icon on UI
 			Text = "10K Cash", -- Text on UI
 		},
 		[4] = {
 			Chance = 10, -- Percentage chance
-			Icon = 110024503496390, -- Icon on UI
+			Icon = Images.Cash, -- Icon on UI
 			Text = "100K Cash", -- Text on UI
 		},
 		[5] = {
 			Chance = 5, -- Percentage chance
-			Icon = 110024503496390, -- Icon on UI
+			Icon = Images.Cash, -- Icon on UI
 			Text = "150K Cash", -- Text on UI
 		},
 	},

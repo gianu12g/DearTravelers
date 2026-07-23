@@ -6,16 +6,23 @@
 
 	A plain module -- the name ends in neither Service nor Controller, so the
 	Loader ignores it (ARCHITECTURE.md Recipe 3). Require it directly.
+
+	Ambient-music IDs now come from Shared.AssetIds.Sounds instead of being
+	inlined here.
 ]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 
 local General = {
 	GroupID = 584245985, -- ID of the group for group rewards
 	Admins = { 11068316955 }, -- List of Admin IDs for admin commands
 
 	AmbientMusic = { -- List of Music IDs which will run in the background in order
-		1841647093,
-		1848354536,
-		5409360995,
+		Sounds.MusicLifeInAnElevator,
+		Sounds.MusicRelaxedScene,
+		Sounds.MusicShiawase,
 	},
 
 	--[[

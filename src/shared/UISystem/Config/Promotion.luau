@@ -6,21 +6,28 @@
 	ReplicatedStorage.Configuration.Promotion.
 
 	A plain module (Loader ignores it, ARCHITECTURE.md Recipe 3).
+
+	Icon IDs now come from Shared.AssetIds.Images instead of being inlined
+	here.
 ]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 
 local Promotion = {
 	Packs = {
-		["Starter Pack"] = 73167539394400, -- Change this to the Icon ID you want to use.
-		["Secret Pack"] = 88132060004695, -- Change this to the Icon ID you want to use.
+		["Starter Pack"] = Images.StarterPack, -- Change this to the Icon ID you want to use.
+		["Secret Pack"] = Images.SecretPack, -- Change this to the Icon ID you want to use.
 	},
 	Passes = {
-		["VIP"] = 122420734012429, -- Change this to the Icon ID you want to use.
-		["Teleporter"] = 113198463459379, -- Change this to the Icon ID you want to use.
-		["x2 Speed"] = 130304640405359, -- Change this to the Icon ID you want to use.
+		["VIP"] = Images.VipPass, -- Change this to the Icon ID you want to use.
+		["Teleporter"] = Images.TeleporterPass, -- Change this to the Icon ID you want to use.
+		["x2 Speed"] = Images.SpeedPass, -- Change this to the Icon ID you want to use.
 	},
 	Products = {
-		["100K Cash"] = 72195296200818, -- Change this to the Icon ID you want to use.
-		["x5 Spins"] = 101212300915466, -- Change this to the Icon ID you want to use.
+		["100K Cash"] = Images.Cash100K, -- Change this to the Icon ID you want to use.
+		["x5 Spins"] = Images.Wheel, -- Change this to the Icon ID you want to use.
 	},
 }
 

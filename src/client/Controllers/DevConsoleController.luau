@@ -31,6 +31,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Icon = require(ReplicatedStorage.Packages.TopbarPlus)
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("DevConsoleController")
@@ -69,6 +70,7 @@ local bodyScroll: ScrollingFrame? = nil
 local statusLabel: TextLabel? = nil
 local newKeyPathBox: TextBox? = nil
 local newKeyValueBox: TextBox? = nil
+local radiusDebugButton: TextButton? = nil
 local icon: any = nil
 
 local rows: { [string]: Row } = {}
@@ -333,8 +335,27 @@ local function onDamageSquishiesClicked()
 	Net.devDamageSquishies.send({ targetUserId = currentTargetUserId })
 end
 
+local function updateRadiusDebugButton()
+	local button = radiusDebugButton
+	if button == nil then
+		return
+	end
+
+	local enabled = player:GetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE) == true
+	button.Text = `Blast Radius Bounds: {if enabled then "ON" else "OFF"}  (R={MergeConfig.LAUNCH_IMPACT_RADIUS})`
+	button.BackgroundColor3 = if enabled then Color3.fromRGB(48, 124, 105) else FIELD_COLOR
+end
+
+local function onRadiusDebugClicked()
+	local enabled = player:GetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE) == true
+	player:SetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE, not enabled)
+	updateRadiusDebugButton()
+end
+
 local function cleanup()
 	stopRefreshLoop()
+	radiusDebugButton = nil
+	player:SetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE, nil)
 	local topbarIcon = icon
 	if topbarIcon ~= nil then
 		topbarIcon:destroy()
@@ -453,6 +474,19 @@ local function buildUI()
 	damageButton.BackgroundColor3 = Color3.fromRGB(177, 70, 111)
 	damageButton.Parent = actionRow
 
+	local radiusDebugRow = Instance.new("Frame")
+	radiusDebugRow.Name = "RadiusDebugRow"
+	radiusDebugRow.BackgroundTransparency = 1
+	radiusDebugRow.Position = UDim2.fromOffset(12, 118)
+	radiusDebugRow.Size = UDim2.new(1, -24, 0, 28)
+	radiusDebugRow.Parent = root
+
+	local radiusButton = newButton("", UDim2.fromScale(1, 1))
+	radiusButton.Name = "RadiusDebugButton"
+	radiusButton.Parent = radiusDebugRow
+	radiusDebugButton = radiusButton
+	updateRadiusDebugButton()
+
 	-- Target picker overlay -- hidden until the target row is clicked.
 	local targetList = Instance.new("ScrollingFrame")
 	targetList.Name = "TargetList"
@@ -476,8 +510,8 @@ local function buildUI()
 	-- Body: one row per snapshot entry.
 	local body = Instance.new("ScrollingFrame")
 	body.Name = "Body"
-	body.Position = UDim2.fromOffset(12, 118)
-	body.Size = UDim2.new(1, -24, 1, -200)
+	body.Position = UDim2.fromOffset(12, 154)
+	body.Size = UDim2.new(1, -24, 1, -236)
 	body.BackgroundColor3 = FIELD_COLOR
 	body.BorderSizePixel = 0
 	body.ScrollBarThickness = 6
@@ -540,6 +574,7 @@ local function buildUI()
 
 	setBtn.Activated:Connect(onCreateClicked)
 	damageButton.Activated:Connect(onDamageSquishiesClicked)
+	radiusButton.Activated:Connect(onRadiusDebugClicked)
 
 	gui.Destroying:Connect(cleanup)
 

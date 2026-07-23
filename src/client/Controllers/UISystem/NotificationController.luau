@@ -17,6 +17,7 @@ local SoundService = game:GetService("SoundService")
 
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 
 local log = Log.new("NotificationController")
 
@@ -31,9 +32,21 @@ type NotificationTypeData = {
 }
 
 local TYPES: { [NotificationKind]: NotificationTypeData } = {
-	Success = { Background = Color3.fromRGB(0, 170, 0), Stroke = Color3.fromRGB(0, 106, 0), Sound = 124743961969068 },
-	Error = { Background = Color3.fromRGB(230, 0, 0), Stroke = Color3.fromRGB(170, 0, 0), Sound = 137500936341394 },
-	Info = { Background = Color3.fromRGB(0, 170, 255), Stroke = Color3.fromRGB(0, 90, 135), Sound = 74379627889513 },
+	Success = {
+		Background = Color3.fromRGB(0, 170, 0),
+		Stroke = Color3.fromRGB(0, 106, 0),
+		Sound = Sounds.NotificationSuccess,
+	},
+	Error = {
+		Background = Color3.fromRGB(230, 0, 0),
+		Stroke = Color3.fromRGB(170, 0, 0),
+		Sound = Sounds.NotificationError,
+	},
+	Info = {
+		Background = Color3.fromRGB(0, 170, 255),
+		Stroke = Color3.fromRGB(0, 90, 135),
+		Sound = Sounds.NotificationInfo,
+	},
 }
 
 type ActiveNotification = {

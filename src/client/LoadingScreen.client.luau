@@ -11,12 +11,15 @@
 	exists -- Loader.load() hasn't required a single Controller yet by the
 	time this script starts, so it must not require any *Controller
 	(UIKitController included). It CAN require plain shared modules (no
-	lifecycle, Loader ignores them) -- this file uses the UISystem Config
-	modules for icon ids, and deliberately does NOT require Shared.Net or
-	Shared.UISystem.Net: both block on the client until BytenetStorage AND
-	their namespace replicate, which is exactly the kind of wait this
-	script cannot afford this early and does not need (see those modules'
-	own header comments).
+	lifecycle, Loader ignores them) -- this file requires
+	Shared.AssetIds.Preloader, which collects every id declared in the
+	Images and Sounds config tables (formatted as rbxassetid://, deduped)
+	so the preload list stays in one place; UI sounds and the ambient
+	music playlist now preload here too, which they didn't before. It
+	deliberately does NOT require Shared.Net or Shared.UISystem.Net: both
+	block on the client until BytenetStorage AND their namespace replicate,
+	which is exactly the kind of wait this script cannot afford this early
+	and does not need (see those modules' own header comments).
 
 	Handshake with UIKitController (open DailyRewards once loading ends):
 	a bare Signal fire would race -- UIKitController.Start() may not have
@@ -100,21 +103,21 @@ end)
 	(whatever of Main/Full has already cloned in from StarterGui by now --
 	that replication is independent of this script's own execution order)
 	plus ReplicatedStorage.Assets (the Confetti/Shine templates) plus every
-	icon id referenced by the UISystem Config modules, since
+	asset id declared in Shared.AssetIds (images and sounds alike), since
 	ContentProvider:PreloadAsync accepts bare "rbxassetid://" strings
 	alongside Instances.
 ]]
 -- ReplicatedFirst runs before ReplicatedStorage's descendants are guaranteed
--- to exist on the client. These modules are plain config tables and are safe
--- to require here, but their folder chain still has to finish replicating.
+-- to exist on the client. AssetIds/Preloader is a plain shared module (no
+-- lifecycle, safe to require here), but its folder chain still has to
+-- finish replicating -- the two bare WaitForChilds below are load-bearing:
+-- Preloader's body requires its Images/Sounds siblings via script.Parent,
+-- and this script cannot assume they've replicated by the time it runs.
 local shared = ReplicatedStorage:WaitForChild("Shared")
-local uiSystem = shared:WaitForChild("UISystem")
-local config = uiSystem:WaitForChild("Config")
-
-local DailyRewardsConfig = require(config:WaitForChild("DailyRewards") :: ModuleScript)
-local PlaytimeRewardsConfig = require(config:WaitForChild("PlaytimeRewards") :: ModuleScript)
-local PromotionConfig = require(config:WaitForChild("Promotion") :: ModuleScript)
-local WheelSpinConfig = require(config:WaitForChild("WheelSpin") :: ModuleScript)
+local assetIds = shared:WaitForChild("AssetIds")
+assetIds:WaitForChild("Images")
+assetIds:WaitForChild("Sounds")
+local Preloader = require(assetIds:WaitForChild("Preloader") :: ModuleScript)
 
 local targets: { Instance | string } = {}
 
@@ -139,23 +142,8 @@ if assets ~= nil then
 	end
 end
 
-for _, info in DailyRewardsConfig do
-	table.insert(targets, `rbxassetid://{info.Icon}`)
-end
-for _, info in PlaytimeRewardsConfig.Rewards do
-	table.insert(targets, `rbxassetid://{info.Icon}`)
-end
-for _, info in WheelSpinConfig.Rewards do
-	table.insert(targets, `rbxassetid://{info.Icon}`)
-end
-for _, id in PromotionConfig.Packs do
-	table.insert(targets, `rbxassetid://{id}`)
-end
-for _, id in PromotionConfig.Passes do
-	table.insert(targets, `rbxassetid://{id}`)
-end
-for _, id in PromotionConfig.Products do
-	table.insert(targets, `rbxassetid://{id}`)
+for _, id in Preloader.collect() do
+	table.insert(targets, id)
 end
 
 local totalAssets = #targets

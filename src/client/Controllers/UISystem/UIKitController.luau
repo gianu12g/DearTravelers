@@ -44,6 +44,7 @@ local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Frames = require(script.Parent.Parent.Parent.UI.UISystem.Frames)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MonetizationController = require(script.Parent.MonetizationController)
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local UISignals = require(script.Parent.Parent.Parent.UI.UISystem.UISignals)
 
 local log = Log.new("UIKitController")
@@ -302,7 +303,7 @@ local ClickEffects: { [string]: (GuiObject, number?) -> () } = {
 
 local HoverSounds: { [string]: (GuiObject) -> () } = {
 	Default = function(item)
-		local sound = makeSound(item, "rbxassetid://139800881181209")
+		local sound = makeSound(item, `rbxassetid://{Sounds.UiHover}`)
 		item.MouseEnter:Connect(function()
 			sound:Play()
 		end)
@@ -314,7 +315,7 @@ local ClickSounds: { [string]: (GuiObject) -> () } = {
 		if not item:IsA("GuiButton") then
 			return
 		end
-		local sound = makeSound(item, "rbxassetid://88442833509532")
+		local sound = makeSound(item, `rbxassetid://{Sounds.UiClick}`)
 		item.MouseButton1Click:Connect(function()
 			sound:Play()
 		end)
@@ -324,7 +325,7 @@ local ClickSounds: { [string]: (GuiObject) -> () } = {
 		if not item:IsA("GuiButton") then
 			return
 		end
-		local sound = makeSound(item, "rbxassetid://74657965144290")
+		local sound = makeSound(item, `rbxassetid://{Sounds.UiClose}`)
 		item.MouseButton1Click:Connect(function()
 			sound:Play()
 		end)
@@ -334,7 +335,7 @@ local ClickSounds: { [string]: (GuiObject) -> () } = {
 		if not item:IsA("GuiButton") then
 			return
 		end
-		local sound = makeSound(item, "rbxassetid://1210852193")
+		local sound = makeSound(item, `rbxassetid://{Sounds.UiMoney}`)
 		item.MouseButton1Click:Connect(function()
 			sound:Play()
 		end)

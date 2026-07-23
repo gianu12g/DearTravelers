@@ -77,21 +77,22 @@
 	Attribute is the cheap, no-persistence-needed way to tell the client
 	CarryController when to show its DROP button.
 
-	Every carry-ending path (drop, merge, character removing, pad
-	deactivation) funnels through either dropCarried, commitMerge, or
-	cancelCarry -- all three clear `carries[player]` and the attribute before
-	doing anything else, so a second signal arriving for the same player
+	Every carry-ending path (drop, launch, merge, character removing, pad
+	deactivation) clears `carries[player]` and the attribute before doing
+	anything else, so a second signal arriving for the same player
 	(e.g. CharacterRemoving firing while a merge is also mid-Heartbeat) finds
 	nothing left to act on rather than double-processing.
 
 	No remotes in Phase 1: every decision was made on the server with Parts
-	replicating automatically. Phase 2 adds exactly one remote -- a
-	no-payload "drop request" -- because "which spot" is a server decision
+	replicating automatically. Phase 2 adds a no-payload "drop request"
+	because "which spot" is a server decision
 	(see Net.luau's mergeDropRequest comment) but "the player wants to drop
-	now" genuinely is client-originated input.
+	now" genuinely is client-originated input. Launching adds a bounded map
+	X/Z target request; the server still owns its source, surface height,
+	damage, radius, flight, and return state.
 
 	DISARM/RE-ARM (walk-off-to-re-arm, no grab cooldowns): a part placed by
-	dropCarried, cancelCarry, or commitMerge's result lands at or right next
+	dropCarried, cancelCarry, finishLaunch, or commitMerge's result lands at or right next
 	to the owning player, so without this it would be instantly re-Touched
 	and re-picked-up -- the player could never actually put anything down.
 	markDisarmed adds the part to `live.disarmed`; the pickup Touched handler
@@ -139,6 +140,7 @@ local Workspace = game:GetService("Workspace")
 local CoinsService = require(script.Parent.CoinsService)
 local DataService = require(script.Parent.DataService)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
+local LaunchTrailRuntime = require(ReplicatedStorage.Shared.LaunchTrailRuntime)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
@@ -168,6 +170,15 @@ type MergeObjectEntry = {
 type BaseRecord = {
 	part: BasePart,
 	spawnArea: BasePart,
+}
+
+type LaunchMapBounds = {
+	minX: number,
+	maxX: number,
+	minY: number,
+	maxY: number,
+	minZ: number,
+	maxZ: number,
 }
 
 type LiveBase = {
@@ -204,6 +215,14 @@ type CarryState = {
 	weld: WeldConstraint,
 }
 
+type LaunchState = {
+	live: LiveBase,
+	part: BasePart,
+	entry: MergeObjectEntry,
+	trailAttachment0: Attachment?,
+	trailAttachment1: Attachment?,
+}
+
 type MushBoostState = {
 	humanoid: Humanoid,
 	originalWalkSpeed: number,
@@ -211,6 +230,10 @@ type MushBoostState = {
 
 -- Populated once during Start(); read-only afterwards.
 local bases: { [string]: BaseRecord } = {}
+local launchMapLayout: Instance? = nil
+local launchMapBounds: LaunchMapBounds? = nil
+local launchFallbackSurfaceY = 0
+local defaultLaunchTrailTemplate: Model? = nil
 
 local liveBases: { [Player]: LiveBase } = {}
 local attributeConnections: { [Player]: RBXScriptConnection } = {}
@@ -219,6 +242,11 @@ local activationTokens: { [Player]: number } = {}
 
 -- Phase 2. At most one entry per player (capacity is exactly one).
 local carries: { [Player]: CarryState } = {}
+-- A launched squishy remains the owner's persisted entry and returns to its
+-- saved pad position after impact. This state locks only that exact projectile;
+-- the owner may keep picking up, dropping, and merging every other squishy
+-- while it is in flight.
+local activeLaunches: { [Player]: LaunchState } = {}
 local mushBoosts: { [Player]: MushBoostState } = {}
 -- Drives cancelCarry on death/respawn/leaving -- reverse-indexed by Player
 -- for the same reason attributeConnections is (PlayerRemoving only hands us
@@ -234,8 +262,51 @@ local activityCheckpointAccumulator = 0
 local MUSH_BOOST_AMOUNT = 5
 local MUSH_BOOST_DURATION = 5
 local mergeInputLimiter = RateLimiter.new(8, 12)
+local launchInputLimiter = RateLimiter.new(2, 3)
 
 local MergeService = {}
+
+local function clearCarryingAttributes(player: Player)
+	player:SetAttribute("CarryingTier", nil)
+	player:SetAttribute("CarryingLaunchReadyAt", nil)
+end
+
+local function publishCarryingAttributes(player: Player, tier: number, part: BasePart)
+	player:SetAttribute("CarryingTier", tier)
+	local readyAt = part:GetAttribute("LaunchReadyAt")
+	player:SetAttribute("CarryingLaunchReadyAt", if typeof(readyAt) == "number" then readyAt else nil)
+end
+
+local function destroyLaunchTrail(launch: LaunchState)
+	local attachment0 = launch.trailAttachment0
+	local attachment1 = launch.trailAttachment1
+	launch.trailAttachment0 = nil
+	launch.trailAttachment1 = nil
+	LaunchTrailRuntime.destroy(attachment0, attachment1)
+end
+
+-- The one physical Workspace model is the source of truth. Each launch gets
+-- cloned attachments and visuals so projectiles never share mutable state.
+local function attachDefaultLaunchTrail(launch: LaunchState)
+	local template = defaultLaunchTrailTemplate
+	if template == nil or launch.part.Parent == nil then
+		return
+	end
+
+	local ok, err = xpcall(function()
+		local attachment0, attachment1 = LaunchTrailRuntime.attach(launch.part, template)
+		if attachment0 == nil or attachment1 == nil then
+			return
+		end
+		launch.trailAttachment0 = attachment0
+		launch.trailAttachment1 = attachment1
+	end, debug.traceback)
+
+	if not ok then
+		destroyLaunchTrail(launch)
+		log.warn(`default launch trail could not be attached: {err}`)
+	end
+end
 
 --[[
 	Clamps `tier` into [1, MAX_TIER] and floors it, defaulting to 1 for
@@ -253,6 +324,10 @@ local function sanitizeTier(tier: number): number
 	return math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER)
 end
 
+local function isFiniteNumber(value: any): boolean
+	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
 local function sanitizeHealth(health: number, tier: number): number
 	local maxHealth = MergeConfig.healthForTier(tier)
 	if type(health) ~= "number" or health ~= health or health == math.huge or health == -math.huge then
@@ -263,6 +338,72 @@ end
 
 local function tierDefFor(tier: number): MergeConfig.TierDef
 	return MergeConfig.Tiers[sanitizeTier(tier)]
+end
+
+local function calculateLaunchMapBounds(mapLayout: Instance): LaunchMapBounds?
+	local minimum = Vector3.new(math.huge, math.huge, math.huge)
+	local maximum = Vector3.new(-math.huge, -math.huge, -math.huge)
+	local found = false
+
+	for _, descendant in mapLayout:GetDescendants() do
+		if not descendant:IsA("BasePart") then
+			continue
+		end
+		found = true
+		local half = descendant.Size / 2
+		for x = -1, 1, 2 do
+			for y = -1, 1, 2 do
+				for z = -1, 1, 2 do
+					local corner = descendant.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+					minimum = Vector3.new(
+						math.min(minimum.X, corner.X),
+						math.min(minimum.Y, corner.Y),
+						math.min(minimum.Z, corner.Z)
+					)
+					maximum = Vector3.new(
+						math.max(maximum.X, corner.X),
+						math.max(maximum.Y, corner.Y),
+						math.max(maximum.Z, corner.Z)
+					)
+				end
+			end
+		end
+	end
+
+	if not found then
+		return nil
+	end
+	return {
+		minX = minimum.X,
+		maxX = maximum.X,
+		minY = minimum.Y,
+		maxY = maximum.Y,
+		minZ = minimum.Z,
+		maxZ = maximum.Z,
+	}
+end
+
+local function resolveLaunchTarget(worldX: number, worldZ: number, squishyHalfSize: number): Vector3?
+	local mapLayout = launchMapLayout
+	local bounds = launchMapBounds
+	if mapLayout == nil or bounds == nil or not isFiniteNumber(worldX) or not isFiniteNumber(worldZ) then
+		return nil
+	end
+	if worldX < bounds.minX - 1 or worldX > bounds.maxX + 1 or worldZ < bounds.minZ - 1 or worldZ > bounds.maxZ + 1 then
+		return nil
+	end
+
+	local safeX = math.clamp(worldX, bounds.minX, bounds.maxX)
+	local safeZ = math.clamp(worldZ, bounds.minZ, bounds.maxZ)
+	local rayHeight = bounds.maxY + 50
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { mapLayout }
+	params.IgnoreWater = false
+	local result =
+		Workspace:Raycast(Vector3.new(safeX, rayHeight, safeZ), Vector3.new(0, bounds.minY - rayHeight - 50, 0), params)
+	local surfaceY = if result ~= nil then result.Position.Y else launchFallbackSurfaceY
+	return Vector3.new(safeX, surfaceY + squishyHalfSize, safeZ)
 end
 
 -- Keeps the public attributes and the replicated in-world bar in lockstep.
@@ -399,6 +540,91 @@ local function createHealthBar(part: BasePart, statusBillboard: BillboardGui, ti
 	updateHealthVisual(part, tier, health)
 end
 
+local function createLaunchCooldownCounter(part: BasePart, statusBillboard: BillboardGui)
+	local statusWidth = statusBillboard.Size.X.Scale
+	local statusHeight = statusBillboard.Size.Y.Scale
+	local counterHeight = math.max(0.8, statusHeight * 0.52)
+	local counterBillboard = Instance.new("BillboardGui")
+	counterBillboard.Name = "LaunchCooldownBillboard"
+	counterBillboard.Size = UDim2.fromScale(statusWidth * 0.76, counterHeight)
+	counterBillboard.StudsOffset =
+		Vector3.new(0, statusBillboard.StudsOffset.Y + statusHeight / 2 + counterHeight / 2 + 0.12, 0)
+	counterBillboard.AlwaysOnTop = true
+	counterBillboard.LightInfluence = 0
+	counterBillboard.Enabled = false
+	counterBillboard.Parent = part
+
+	local counter = Instance.new("TextLabel")
+	counter.Name = "LaunchCooldownText"
+	counter.Size = UDim2.fromScale(1, 1)
+	counter.BackgroundTransparency = 1
+	counter.BorderSizePixel = 0
+	counter.Font = Enum.Font.FredokaOne
+	counter.Text = ""
+	counter.TextColor3 = Color3.fromRGB(255, 244, 249)
+	counter.TextScaled = true
+	counter.TextStrokeColor3 = Color3.fromRGB(255, 86, 136)
+	counter.TextStrokeTransparency = 0
+	counter.ZIndex = 2
+	counter.Parent = counterBillboard
+
+	local stroke = Instance.new("UIStroke")
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	stroke.Color = Color3.fromRGB(126, 48, 76)
+	stroke.Thickness = 1.5
+	stroke.Parent = counter
+end
+
+local function setLaunchCooldownCounter(part: BasePart, secondsRemaining: number)
+	local counterBillboard = part:FindFirstChild("LaunchCooldownBillboard")
+	local counter = if counterBillboard ~= nil then counterBillboard:FindFirstChild("LaunchCooldownText") else nil
+	if counter == nil or not counter:IsA("TextLabel") then
+		return
+	end
+
+	local wholeSeconds = math.max(0, math.ceil(secondsRemaining))
+	if counterBillboard:IsA("BillboardGui") then
+		counterBillboard.Enabled = wholeSeconds > 0
+	end
+	counter.Text = if wholeSeconds > 0 then `{wholeSeconds}s` else ""
+end
+
+local function startLaunchCooldown(player: Player, part: BasePart)
+	local duration = MergeConfig.LAUNCH_COOLDOWN_SECONDS
+	if duration <= 0 or part.Parent == nil then
+		return
+	end
+
+	local readyAt = Workspace:GetServerTimeNow() + duration
+	part:SetAttribute("LaunchReadyAt", readyAt)
+	setLaunchCooldownCounter(part, duration)
+
+	task.spawn(function()
+		local lastWholeSeconds = -1
+		while part.Parent ~= nil and part:GetAttribute("LaunchReadyAt") == readyAt do
+			local remaining = math.max(0, readyAt - Workspace:GetServerTimeNow())
+			local wholeSeconds = math.ceil(remaining)
+			if wholeSeconds ~= lastWholeSeconds then
+				lastWholeSeconds = wholeSeconds
+				setLaunchCooldownCounter(part, remaining)
+			end
+			if remaining <= 0 then
+				break
+			end
+			task.wait(math.min(0.2, remaining))
+		end
+
+		if part.Parent ~= nil and part:GetAttribute("LaunchReadyAt") == readyAt then
+			part:SetAttribute("LaunchReadyAt", nil)
+			setLaunchCooldownCounter(part, 0)
+			local carry = carries[player]
+			if carry ~= nil and carry.part == part then
+				player:SetAttribute("CarryingLaunchReadyAt", nil)
+			end
+		end
+	end)
+end
+
 --[[
 	One authoritative MergeObject root Part for `entry`, NOT yet parented.
 	Replaceable artwork is cloned under that root by MergeObjectVisuals, keeping
@@ -462,6 +688,7 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	incomeText.Parent = billboard
 
 	createHealthBar(part, billboard, entry.Tier, entry.Health)
+	createLaunchCooldownCounter(part, billboard)
 
 	return part
 end
@@ -542,6 +769,8 @@ local function reAnchorPart(live: LiveBase, part: BasePart, entry: MergeObjectEn
 	part.CFrame = live.spawnArea.CFrame * CFrame.new(entry.X, yOffset, entry.Z)
 	part.Massless = false
 	part.CanCollide = false
+	part.CanTouch = true
+	part.CanQuery = true
 end
 
 --[[
@@ -637,6 +866,38 @@ local function spawnSquishyPopVfx(objectsFolder: Folder, position: Vector3, colo
 	Debris:AddItem(anchor, SQUISHY_POP_LIFETIME)
 end
 
+local function spawnLaunchImpactVfx(objectsFolder: Folder, position: Vector3, color: Color3)
+	local anchor = Instance.new("Part")
+	anchor.Name = "LaunchImpactVfx"
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanTouch = false
+	anchor.CanQuery = false
+	anchor.Transparency = 1
+	anchor.Size = Vector3.one * 0.2
+	anchor.CFrame = CFrame.new(position)
+	anchor.Parent = objectsFolder
+
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Name = "ImpactBurst"
+	emitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	emitter.Rate = 0
+	emitter.Color = ColorSequence.new(color, Color3.new(1, 1, 1))
+	emitter.Lifetime = NumberRange.new(0.45, 0.8)
+	emitter.Speed = NumberRange.new(12, 24)
+	emitter.SpreadAngle = Vector2.new(180, 180)
+	emitter.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1.1),
+		NumberSequenceKeypoint.new(0.7, 0.55),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	emitter.LightEmission = 0.75
+	emitter.Parent = anchor
+	emitter:Emit(EXPLOSION_PARTICLE_COUNT)
+
+	Debris:AddItem(anchor, EXPLOSION_LIFETIME)
+end
+
 --[[
 	Attaches `part` (a resting object on `live`'s pad) to `player`'s torso,
 	floating in front of it, offset by the object's own half-size so bigger
@@ -656,6 +917,10 @@ end
 local function pickUp(player: Player, part: BasePart)
 	if carries[player] ~= nil then
 		return -- capacity is exactly one; a second Touched this tick is a no-op
+	end
+	local activeLaunch = activeLaunches[player]
+	if activeLaunch ~= nil and activeLaunch.part == part then
+		return -- only the projectile itself is unavailable while it is flying
 	end
 
 	local live = liveBases[player]
@@ -687,7 +952,7 @@ local function pickUp(player: Player, part: BasePart)
 	weld.Parent = part
 
 	carries[player] = { live = live, part = part, entry = entry, weld = weld }
-	player:SetAttribute("CarryingTier", entry.Tier)
+	publishCarryingAttributes(player, entry.Tier, part)
 end
 
 --[[
@@ -817,13 +1082,27 @@ local function cancelCarry(player: Player)
 		return
 	end
 	carries[player] = nil
-	player:SetAttribute("CarryingTier", nil)
+	clearCarryingAttributes(player)
 
 	carry.weld:Destroy()
 	reAnchorPart(carry.live, carry.part, carry.entry)
 	-- The respawned player can land right on top of this spot (base center)
 	-- -- see MergeConfig.REARM_CLEARANCE's comment.
 	markDisarmed(carry.live, carry.part)
+end
+
+local function cancelLaunch(player: Player)
+	local launch = activeLaunches[player]
+	if launch == nil then
+		return
+	end
+	activeLaunches[player] = nil
+	destroyLaunchTrail(launch)
+
+	if liveBases[player] == launch.live and launch.part.Parent ~= nil then
+		reAnchorPart(launch.live, launch.part, launch.entry)
+		markDisarmed(launch.live, launch.part)
+	end
 end
 
 local function deactivateBase(player: Player)
@@ -835,6 +1114,7 @@ local function deactivateBase(player: Player)
 	-- Before the objectsFolder (and therefore the carried Part) disappears --
 	-- see cancelCarry's own header note on why this is safe either way.
 	cancelCarry(player)
+	cancelLaunch(player)
 
 	local live = liveBases[player]
 	if live == nil then
@@ -943,9 +1223,14 @@ local function commitMerge(player: Player, carry: CarryState, targetPart: BasePa
 	-- Captured before Destroy: the VFX plays at the mergee's position, and
 	-- reading .Position after Destroy is not something to rely on.
 	local vfxPosition = targetPart.Position
+	local serverNow = Workspace:GetServerTimeNow()
+	local carryReadyAt = carry.part:GetAttribute("LaunchReadyAt")
+	local targetReadyAt = targetPart:GetAttribute("LaunchReadyAt")
+	local restartLaunchCooldown = (typeof(carryReadyAt) == "number" and carryReadyAt > serverNow)
+		or (typeof(targetReadyAt) == "number" and targetReadyAt > serverNow)
 
 	carries[player] = nil
-	player:SetAttribute("CarryingTier", nil)
+	clearCarryingAttributes(player)
 	carry.weld:Destroy()
 
 	live.parts[carry.part] = nil
@@ -967,6 +1252,9 @@ local function commitMerge(player: Player, carry: CarryState, targetPart: BasePa
 	-- re-grab problem as a drop, same fix.
 	local newPart = spawnRestingPart(player, live, newEntry)
 	markDisarmed(live, newPart)
+	if restartLaunchCooldown then
+		startLaunchCooldown(player, newPart)
+	end
 end
 
 --[[
@@ -990,8 +1278,13 @@ local function tryMergeCarry(player: Player, carry: CarryState)
 	-- to the gap itself.
 	local target: BasePart? = nil
 	local targetEntry: MergeObjectEntry? = nil
+	local activeLaunch = activeLaunches[player]
 	for otherPart, otherEntry in carry.live.parts do
-		if otherPart == carry.part or otherEntry.Tier ~= entry.Tier then
+		if
+			otherPart == carry.part
+			or (activeLaunch ~= nil and otherPart == activeLaunch.part)
+			or otherEntry.Tier ~= entry.Tier
+		then
 			continue
 		end
 
@@ -1239,7 +1532,7 @@ local function dropCarried(player: Player)
 	DataService.set(player, { "Merge", "Squishies", entryIndex }, newEntry)
 
 	carries[player] = nil
-	player:SetAttribute("CarryingTier", nil)
+	clearCarryingAttributes(player)
 	carry.weld:Destroy()
 
 	live.parts[carry.part] = newEntry
@@ -1247,6 +1540,137 @@ local function dropCarried(player: Player)
 	-- Dropped at (or near) the player's own feet -- see
 	-- MergeConfig.REARM_CLEARANCE's comment.
 	markDisarmed(live, carry.part)
+end
+
+local function animateLaunchArc(player: Player, launch: LaunchState, targetPosition: Vector3): boolean
+	local part = launch.part
+	local startPosition = part.Position
+	local horizontalDelta = Vector3.new(targetPosition.X - startPosition.X, 0, targetPosition.Z - startPosition.Z)
+	local distance = horizontalDelta.Magnitude
+	local duration = math.clamp(
+		distance / MergeConfig.LAUNCH_STUDS_PER_SECOND,
+		MergeConfig.LAUNCH_MIN_FLIGHT_SECONDS,
+		MergeConfig.LAUNCH_MAX_FLIGHT_SECONDS
+	)
+	local arcHeight = math.clamp(
+		distance * MergeConfig.LAUNCH_ARC_DISTANCE_SCALE,
+		MergeConfig.LAUNCH_MIN_ARC_HEIGHT,
+		MergeConfig.LAUNCH_MAX_ARC_HEIGHT
+	)
+	local startingRotation = part.CFrame.Rotation
+	local elapsed = 0
+
+	while elapsed < duration do
+		if activeLaunches[player] ~= launch or part.Parent == nil then
+			return false
+		end
+
+		elapsed += RunService.Heartbeat:Wait()
+		local alpha = math.clamp(elapsed / duration, 0, 1)
+		local position = startPosition:Lerp(targetPosition, alpha)
+		position += Vector3.new(0, 4 * arcHeight * alpha * (1 - alpha), 0)
+		local spin = CFrame.Angles(alpha * math.pi * 4, alpha * math.pi * 2, alpha * math.pi * 3)
+		part.CFrame = CFrame.new(position) * spin * startingRotation
+	end
+
+	part.CFrame = CFrame.new(targetPosition) * startingRotation
+	return true
+end
+
+local function finishLaunch(player: Player, launch: LaunchState, startCooldown: boolean)
+	if activeLaunches[player] ~= launch then
+		return
+	end
+	activeLaunches[player] = nil
+	destroyLaunchTrail(launch)
+
+	if liveBases[player] == launch.live and launch.part.Parent ~= nil then
+		reAnchorPart(launch.live, launch.part, launch.entry)
+		markDisarmed(launch.live, launch.part)
+		if startCooldown then
+			startLaunchCooldown(player, launch.part)
+		end
+	end
+end
+
+local function runLaunch(player: Player, launch: LaunchState, targetPosition: Vector3)
+	if not animateLaunchArc(player, launch, targetPosition) then
+		return
+	end
+
+	local tier = sanitizeTier(launch.entry.Tier)
+	local attackerLevel = MergeConfig.healthForTier(tier)
+	local damage = attackerLevel * MergeConfig.LAUNCH_DAMAGE_FRACTION
+	spawnLaunchImpactVfx(launch.live.objectsFolder, targetPosition, tierDefFor(tier).Color)
+
+	-- A launch is allowed to land anywhere, including empty and unclaimed map
+	-- space. Every other player's live squishies are checked spatially; an empty
+	-- landing simply produces the impact visual and damages nothing.
+	for targetPlayer in liveBases do
+		if targetPlayer ~= player then
+			MergeService.damageSquishiesNear(targetPlayer, targetPosition, MergeConfig.LAUNCH_IMPACT_RADIUS, damage)
+		end
+	end
+
+	task.wait(MergeConfig.LAUNCH_IMPACT_PAUSE)
+	finishLaunch(player, launch, true)
+end
+
+-- Validates one overview selection and starts a server-owned flight. The
+-- client chooses only a bounded map X/Z point; it cannot choose the source
+-- object, damage, radius, surface height, arc, or duration.
+local function launchCarried(player: Player, worldX: number, worldZ: number): (boolean, string)
+	local carry = carries[player]
+	if carry == nil then
+		return false, "Pick up a Squishy first"
+	end
+	if activeLaunches[player] ~= nil then
+		return false, "A Squishy is already in flight"
+	end
+	local cooldownAttribute = carry.part:GetAttribute("LaunchReadyAt")
+	if typeof(cooldownAttribute) == "number" then
+		local remaining = cooldownAttribute - Workspace:GetServerTimeNow()
+		if remaining > 0 then
+			return false, `This Squishy can launch again in {math.ceil(remaining)}s`
+		end
+		carry.part:SetAttribute("LaunchReadyAt", nil)
+		player:SetAttribute("CarryingLaunchReadyAt", nil)
+	end
+	local halfSize = tierDefFor(carry.entry.Tier).Size / 2
+	local targetPosition = resolveLaunchTarget(worldX, worldZ, halfSize)
+	if targetPosition == nil then
+		return false, "Choose a point inside the map"
+	end
+
+	local launch: LaunchState = {
+		live = carry.live,
+		part = carry.part,
+		entry = carry.entry,
+		trailAttachment0 = nil,
+		trailAttachment1 = nil,
+	}
+	activeLaunches[player] = launch
+	carries[player] = nil
+	clearCarryingAttributes(player)
+	carry.weld:Destroy()
+	carry.part.Anchored = true
+	carry.part.Massless = false
+	carry.part.CanCollide = false
+	carry.part.CanTouch = false
+	carry.part.CanQuery = false
+	attachDefaultLaunchTrail(launch)
+
+	task.spawn(function()
+		local ok, err = xpcall(function()
+			runLaunch(player, launch, targetPosition)
+		end, debug.traceback)
+		if not ok then
+			log.error(`launch for {player.Name} failed: {err}`)
+			finishLaunch(player, launch, false)
+		end
+	end)
+
+	return true, "Launch accepted"
 end
 
 local function clearMushBoost(player: Player)
@@ -1374,21 +1798,16 @@ function MergeService.getSquishies(player: Player): { MergeObjectEntry }?
 	return copy
 end
 
--- Server-side damage entry point. Authentication belongs to the caller (the
--- developer console does its own ConfigService-backed check before calling
--- this). Health changes and deaths commit as one replacement of the compact
--- persisted array; live part/carry references are then moved to those exact new
--- entries before dead parts pop and disappear.
-function MergeService.damageSquishies(player: Player, maxHealthFraction: number): (number?, number)
-	if
-		type(maxHealthFraction) ~= "number"
-		or maxHealthFraction ~= maxHealthFraction
-		or maxHealthFraction <= 0
-		or maxHealthFraction == math.huge
-	then
-		return 0, 0
-	end
+type DamageForEntry = (MergeObjectEntry) -> number
 
+-- One transactional damage path shared by the developer test and real launch
+-- combat. `eligibleEntries == nil` means every squishy; launch combat passes a
+-- set built from actual live part positions so the landing point matters.
+local function applySquishyDamage(
+	player: Player,
+	damageForEntry: DamageForEntry,
+	eligibleEntries: { [any]: true }?
+): (number?, number)
 	local data = DataService.getData(player)
 	if data == nil then
 		return nil, 0
@@ -1399,11 +1818,14 @@ function MergeService.damageSquishies(player: Player, maxHealthFraction: number)
 	local deadEntries: { [any]: true } = {}
 	local damagedCount = 0
 	local killedCount = 0
-	local damageFraction = math.min(maxHealthFraction, 1)
 
 	for _, entry in data.Merge.Squishies do
-		local maxHealth = MergeConfig.healthForTier(entry.Tier)
-		local damage = maxHealth * damageFraction
+		if eligibleEntries ~= nil and eligibleEntries[entry] == nil then
+			table.insert(updated, entry)
+			continue
+		end
+
+		local damage = math.max(0, damageForEntry(entry))
 		local oldHealth = sanitizeHealth(entry.Health, entry.Tier)
 		local newHealth = math.max(0, oldHealth - damage)
 
@@ -1444,8 +1866,21 @@ function MergeService.damageSquishies(player: Player, maxHealthFraction: number)
 			carry.entry = replacement
 		elseif deadEntries[carry.entry] then
 			carries[player] = nil
-			player:SetAttribute("CarryingTier", nil)
+			clearCarryingAttributes(player)
 			carry.weld:Destroy()
+		end
+	end
+
+	local launch = activeLaunches[player]
+	if launch ~= nil then
+		local replacement = replacements[launch.entry]
+		if replacement ~= nil then
+			launch.entry = replacement
+		elseif deadEntries[launch.entry] then
+			-- The live-part cleanup below destroys the projectile. Clear the
+			-- state now so its animation exits without permanently blocking pickup.
+			activeLaunches[player] = nil
+			destroyLaunchTrail(launch)
 		end
 	end
 
@@ -1480,6 +1915,69 @@ function MergeService.damageSquishies(player: Player, maxHealthFraction: number)
 	return damagedCount, killedCount
 end
 
+-- Server-side all-squishy damage entry point used by the authenticated
+-- developer console. The real launch path below uses flat attacker-owned
+-- damage rather than a fraction of each victim's own max health.
+function MergeService.damageSquishies(player: Player, maxHealthFraction: number): (number?, number)
+	if not isFiniteNumber(maxHealthFraction) or maxHealthFraction <= 0 then
+		return 0, 0
+	end
+
+	local damageFraction = math.min(maxHealthFraction, 1)
+	return applySquishyDamage(player, function(entry: MergeObjectEntry): number
+		return MergeConfig.healthForTier(entry.Tier) * damageFraction
+	end, nil)
+end
+
+-- Applies one flat damage amount to every live squishy whose horizontal
+-- center falls inside the selected landing radius. The launch service chooses
+-- `damageAmount`; no client-supplied damage reaches this function.
+function MergeService.damageSquishiesNear(
+	player: Player,
+	worldPosition: Vector3,
+	radius: number,
+	damageAmount: number
+): (number?, number)
+	if
+		typeof(worldPosition) ~= "Vector3"
+		or not isFiniteNumber(worldPosition.X)
+		or not isFiniteNumber(worldPosition.Y)
+		or not isFiniteNumber(worldPosition.Z)
+		or not isFiniteNumber(radius)
+		or radius <= 0
+		or not isFiniteNumber(damageAmount)
+		or damageAmount <= 0
+	then
+		return 0, 0
+	end
+
+	local live = liveBases[player]
+	if live == nil then
+		return 0, 0
+	end
+
+	local eligibleEntries: { [any]: true } = {}
+	local radiusSquared = radius * radius
+	for part, entry in live.parts do
+		if part.Parent == nil then
+			continue
+		end
+		local dx = part.Position.X - worldPosition.X
+		local dz = part.Position.Z - worldPosition.Z
+		if dx * dx + dz * dz <= radiusSquared then
+			eligibleEntries[entry] = true
+		end
+	end
+
+	if next(eligibleEntries) == nil then
+		return 0, 0
+	end
+
+	return applySquishyDamage(player, function(_entry: MergeObjectEntry): number
+		return damageAmount
+	end, eligibleEntries)
+end
+
 --[[
 	Registered here, not Start(): NETWORKING-AND-DATA.md's rule for packet
 	listeners applies on the server the same as the client -- a listener that
@@ -1495,6 +1993,19 @@ function MergeService.Init()
 		end
 	end)
 
+	Net.mergeLaunchRequest.listen(function(data, player)
+		if player == nil then
+			return
+		end
+		if not launchInputLimiter:allow(player) then
+			Net.mergeLaunchResult.sendTo({ ok = false, message = "Please wait before launching again" }, player)
+			return
+		end
+
+		local ok, message = launchCarried(player, data.worldX, data.worldZ)
+		Net.mergeLaunchResult.sendTo({ ok = ok, message = message }, player)
+	end)
+
 	Net.mergeMushRequest.listen(function(_data, player)
 		if player ~= nil and mergeInputLimiter:allow(player) then
 			activateMush(player)
@@ -1503,10 +2014,33 @@ function MergeService.Init()
 end
 
 function MergeService.Start()
+	local trailTemplate =
+		ReplicatedStorage.Assets.VFX.LaunchTrails:FindFirstChild(MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME)
+	if
+		trailTemplate ~= nil
+		and trailTemplate:IsA("Model")
+		and trailTemplate:FindFirstChildWhichIsA("Trail", true) ~= nil
+	then
+		defaultLaunchTrailTemplate = trailTemplate
+	else
+		log.warn(
+			`Workspace.{MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME} is missing or malformed -- launches have no cosmetic`
+		)
+	end
+
 	local mapLayout = Workspace:WaitForChild("MapLayout", WAIT_TIMEOUT)
 	if mapLayout == nil then
 		log.error("Workspace.MapLayout did not appear within timeout -- MergeService disabled")
 		return
+	end
+	launchMapLayout = mapLayout
+	launchMapBounds = calculateLaunchMapBounds(mapLayout)
+	if launchMapBounds == nil then
+		log.warn("MapLayout has no BaseParts -- launch targeting disabled")
+	end
+	local centerMap = mapLayout:FindFirstChild("CenterMap")
+	if centerMap ~= nil and centerMap:IsA("BasePart") then
+		launchFallbackSurfaceY = centerMap.Position.Y + centerMap.Size.Y / 2
 	end
 
 	local basesFolder = mapLayout:WaitForChild("Bases", WAIT_TIMEOUT)

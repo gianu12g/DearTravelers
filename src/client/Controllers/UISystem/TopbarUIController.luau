@@ -20,12 +20,13 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Icon = require(ReplicatedStorage.Packages.TopbarPlus)
+local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 local Log = require(ReplicatedStorage.Shared.Log)
 local UIKitController = require(script.Parent.UIKitController)
 
 local log = Log.new("TopbarUIController")
 
-local TOPBAR_IMAGE = 106769461169677
+local TOPBAR_IMAGE = Images.TopbarSettings
 
 local TopbarUIController = {}
 

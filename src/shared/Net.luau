@@ -145,6 +145,22 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.nothing,
 		}),
 
+		-- client -> server. Requests that the currently carried squishy be
+		-- launched at one world X/Z point inside the map overview. The server
+		-- bounds-checks it, resolves surface height, and owns damage.
+		mergeLaunchRequest = ByteNet.definePacket({
+			value = ByteNet.struct({
+				worldX = ByteNet.float64,
+				worldZ = ByteNet.float64,
+			}),
+		}),
+
+		-- server -> requesting client. Keeps the map overview active after a
+		-- rejected click, but releases it as soon as a launch is accepted.
+		mergeLaunchResult = ByteNet.definePacket({
+			value = ByteNet.struct({ ok = ByteNet.bool, message = ByteNet.string }),
+		}),
+
 		-- client -> server. Request the carried object's Mush interaction.
 		-- MergeService verifies the sender is carrying and is not already
 		-- boosted; the client never chooses its tier, sound, or speed reward.

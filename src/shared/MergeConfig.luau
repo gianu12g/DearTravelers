@@ -84,6 +84,37 @@ MergeConfig.MAX_OFFLINE_SECONDS = 8 * 60 * 60
 -- to every one-second income pulse.
 MergeConfig.ACTIVITY_CHECKPOINT_INTERVAL = 60
 
+-- Launch combat. A squishy's player-facing level is the same 1, 2, 4, 8...
+-- value returned by incomeForTier/healthForTier, so one equal-level hit removes
+-- exactly one quarter of an undamaged target's health. Fractional health is
+-- intentional: rounding tier-1's 0.25 damage up to 1 would make it a one-shot.
+MergeConfig.LAUNCH_DAMAGE_FRACTION = 0.25
+-- Horizontal blast radius around the chosen landing point. A 35-stud radius
+-- gives the circle a 70-stud diameter, matching one playable base area while
+-- naturally leaving the square base's corners outside the circle. Kept shared
+-- so the targeting ring and debug bounds preview the exact server-owned area.
+MergeConfig.LAUNCH_IMPACT_RADIUS = 35
+-- Client-only cosmetic flag used by the authenticated developer console to
+-- toggle exact square bounds around the circular launch radius. It grants no
+-- gameplay authority, so the local attribute is intentionally not networked.
+MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE = "LaunchRadiusDebugEnabled"
+-- Flight tuning. Arc height grows with distance but remains bounded so nearby
+-- launches still climb visibly and opposite-corner launches do not disappear.
+MergeConfig.LAUNCH_MIN_ARC_HEIGHT = 55
+MergeConfig.LAUNCH_MAX_ARC_HEIGHT = 170
+MergeConfig.LAUNCH_ARC_DISTANCE_SCALE = 0.45
+MergeConfig.LAUNCH_STUDS_PER_SECOND = 25
+MergeConfig.LAUNCH_MIN_FLIGHT_SECONDS = 6
+MergeConfig.LAUNCH_MAX_FLIGHT_SECONDS = 6
+MergeConfig.LAUNCH_IMPACT_PAUSE = 0.35
+-- Per-squishy relaunch lockout. Five seconds is intentionally a short testing
+-- value; raise this to 120 for the planned two-minute production cooldown.
+MergeConfig.LAUNCH_COOLDOWN_SECONDS = 5
+-- One physical, Studio-editable model supplies the default launch cosmetic.
+-- Expected hierarchy: Model > TrailEmitter > TopAttachment, BottomAttachment,
+-- LaunchTrail. Instance names follow the Studio model naming convention.
+MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME = "DefaultLaunchTrail"
+
 --[[
 	10 tiers, gray -> near-white. Size grows per tier; tier 10 stays at 9
 	studs so it never exceeds the pad inset (35 - PAD_MARGIN on a 70-stud
