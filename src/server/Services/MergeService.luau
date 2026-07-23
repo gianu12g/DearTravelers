@@ -233,7 +233,9 @@ local bases: { [string]: BaseRecord } = {}
 local launchMapLayout: Instance? = nil
 local launchMapBounds: LaunchMapBounds? = nil
 local launchFallbackSurfaceY = 0
-local defaultLaunchTrailTemplate: Model? = nil
+-- Keyed by CosmeticsCatalog id (== the Model's Name under LaunchTrails).
+-- Populated once during Start(); read-only afterwards, same as `bases` above.
+local trailTemplates: { [string]: Model } = {}
 
 local liveBases: { [Player]: LiveBase } = {}
 local attributeConnections: { [Player]: RBXScriptConnection } = {}
@@ -285,10 +287,25 @@ local function destroyLaunchTrail(launch: LaunchState)
 	LaunchTrailRuntime.destroy(attachment0, attachment1)
 end
 
--- The one physical Workspace model is the source of truth. Each launch gets
--- cloned attachments and visuals so projectiles never share mutable state.
-local function attachDefaultLaunchTrail(launch: LaunchState)
-	local template = defaultLaunchTrailTemplate
+-- Player's equipped trail if its template loaded successfully, else the
+-- default's -- an unknown/unloaded id must never leave a launch with no
+-- cosmetic at all just because the profile has a stale id
+-- (COSMETICS_PLAN.md verification: "unknown id falls back to default").
+local function resolveTrailTemplate(player: Player): Model?
+	local data = DataService.getData(player)
+	local trailId = if data ~= nil then data.Cosmetics.SquishyTrailId else nil
+	local equipped = if typeof(trailId) == "string" then trailTemplates[trailId] else nil
+	if equipped ~= nil then
+		return equipped
+	end
+	return trailTemplates[MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME]
+end
+
+-- Templates live once in ReplicatedStorage.Assets.VFX.LaunchTrails. Each
+-- launch gets cloned attachments and visuals so projectiles never share
+-- mutable state.
+local function attachLaunchTrail(player: Player, launch: LaunchState)
+	local template = resolveTrailTemplate(player)
 	if template == nil or launch.part.Parent == nil then
 		return
 	end
@@ -304,7 +321,7 @@ local function attachDefaultLaunchTrail(launch: LaunchState)
 
 	if not ok then
 		destroyLaunchTrail(launch)
-		log.warn(`default launch trail could not be attached: {err}`)
+		log.warn(`launch trail could not be attached for {player.Name}: {err}`)
 	end
 end
 
@@ -1664,7 +1681,7 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 	carry.part.CanCollide = false
 	carry.part.CanTouch = false
 	carry.part.CanQuery = false
-	attachDefaultLaunchTrail(launch)
+	attachLaunchTrail(player, launch)
 
 	task.spawn(function()
 		local ok, err = xpcall(function()
@@ -2020,15 +2037,20 @@ function MergeService.Init()
 end
 
 function MergeService.Start()
-	local trailTemplate =
-		ReplicatedStorage.Assets.VFX.LaunchTrails:FindFirstChild(MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME)
-	if
-		trailTemplate ~= nil
-		and trailTemplate:IsA("Model")
-		and trailTemplate:FindFirstChildWhichIsA("Trail", true) ~= nil
-	then
-		defaultLaunchTrailTemplate = trailTemplate
-	else
+	-- Every child is a candidate cosmetic trail (COSMETICS_PLAN.md) -- same
+	-- per-child validation the single default template used to get alone:
+	-- a Model with a descendant Trail. Id == the Model's Name, matching
+	-- CosmeticsCatalog.SquishyTrails.
+	for _, child in ReplicatedStorage.Assets.VFX.LaunchTrails:GetChildren() do
+		if child:IsA("Model") and child:FindFirstChildWhichIsA("Trail", true) ~= nil then
+			trailTemplates[child.Name] = child
+		else
+			log.warn(
+				`{child:GetFullName()} is not a valid launch trail (needs a Model with a descendant Trail) -- skipped`
+			)
+		end
+	end
+	if trailTemplates[MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME] == nil then
 		log.warn(
 			`Workspace.{MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME} is missing or malformed -- launches have no cosmetic`
 		)

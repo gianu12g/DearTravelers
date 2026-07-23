@@ -18,6 +18,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 
+local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local EconomyConfig = require(ServerStorage.Modules.EconomyConfig)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
@@ -44,6 +45,10 @@ local log = Log.new("DataService")
 ]]
 local DATA_VERSION = 4
 local MAX_PROCESSED_PURCHASE_IDS = 200
+-- Comfortably above CosmeticsCatalog's current id count for either slot --
+-- a bound exists only to keep a corrupted profile from growing unbounded,
+-- not because owning every cosmetic is a real limit.
+local MAX_OWNED_COSMETICS = 512
 
 local TEMPLATE = {
 	Version = DATA_VERSION,
@@ -122,6 +127,24 @@ local TEMPLATE = {
 		-- receipt may arrive after a teleport, reconnect, or server shutdown, so
 		-- an in-memory cache is not sufficient to identify its recipient.
 		PendingGift = { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 },
+	},
+
+	--[[
+		Owned + equipped cosmetics (COSMETICS_PLAN.md). New players own only the
+		defaults; equip = a plain field write here, applied client-side via
+		DataController.observe and server-side by CosmeticsService (theme
+		attribute stamp / MergeService trail resolution). No version bump --
+		Reconcile() backfills this whole subtree onto existing profiles, and
+		repairProfileData below enforces the one invariant Reconcile can't:
+		equipped id must be owned.
+	]]
+	Cosmetics = {
+		KeycapThemeId = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID,
+		SquishyTrailId = CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID,
+		Owned = {
+			KeycapThemes = { CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID } :: { string },
+			SquishyTrails = { CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID } :: { string },
+		},
 	},
 }
 
@@ -287,6 +310,24 @@ local function compactStringArray(value: any, maxEntries: number): { string }
 	return compact
 end
 
+-- Dedupes and drops unknown ids (compactStringArray's own sanitation, plus
+-- the catalog membership check compactStringArray has no way to know about),
+-- then guarantees `defaultId` is present -- a cosmetic slot is never owned-
+-- but-empty, since the default is what an unequip falls back to.
+local function repairOwnedCosmetics(value: any, isValidId: (string) -> boolean, defaultId: string): { string }
+	local compact = compactStringArray(value, MAX_OWNED_COSMETICS)
+	local owned: { string } = {}
+	for _, id in compact do
+		if isValidId(id) then
+			table.insert(owned, id)
+		end
+	end
+	if not table.find(owned, defaultId) then
+		table.insert(owned, 1, defaultId)
+	end
+	return owned
+end
+
 local function denseBooleanArray(value: any, count: number): { boolean }
 	local dense = table.create(count, false)
 	if type(value) ~= "table" then
@@ -338,6 +379,33 @@ end
 
 local function repairProfileData(data: any)
 	repairTypes(data, TEMPLATE)
+
+	-- repairTypes backfills shape but cannot enforce cross-field invariants
+	-- (COSMETICS_PLAN.md): dedupe/unknown-id filtering, defaults always
+	-- owned, and equipped id must be owned (else revert to default).
+	local cosmetics = data.Cosmetics
+	cosmetics.Owned.KeycapThemes = repairOwnedCosmetics(
+		cosmetics.Owned.KeycapThemes,
+		CosmeticsCatalog.isKeycapTheme,
+		CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
+	)
+	cosmetics.Owned.SquishyTrails = repairOwnedCosmetics(
+		cosmetics.Owned.SquishyTrails,
+		CosmeticsCatalog.isSquishyTrail,
+		CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID
+	)
+	if
+		type(cosmetics.KeycapThemeId) ~= "string"
+		or not table.find(cosmetics.Owned.KeycapThemes, cosmetics.KeycapThemeId)
+	then
+		cosmetics.KeycapThemeId = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
+	end
+	if
+		type(cosmetics.SquishyTrailId) ~= "string"
+		or not table.find(cosmetics.Owned.SquishyTrails, cosmetics.SquishyTrailId)
+	then
+		cosmetics.SquishyTrailId = CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID
+	end
 
 	local uiSystem = data.UISystem
 	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)

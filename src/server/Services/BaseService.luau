@@ -247,6 +247,21 @@ function BaseService.getBase(player: Player): string?
 	return playerBases[player]
 end
 
+--[[
+	The BasePart the player's base occupies, or nil if they hold none (same
+	condition as getBase -- this just hands back the instance instead of its
+	name, for callers that need to resolve base-relative children like
+	KeyCaps).
+]]
+function BaseService.getBasePart(player: Player): BasePart?
+	local baseName = playerBases[player]
+	if baseName == nil then
+		return nil
+	end
+	local record = bases[baseName]
+	return if record ~= nil then record.part else nil
+end
+
 --[[ The player currently occupying `baseName`, or nil if it is unclaimed. ]]
 function BaseService.getOwner(baseName: string): Player?
 	return assignments[baseName]

@@ -45,6 +45,50 @@ local MUTED_TEXT_COLOR = Color3.fromRGB(170, 170, 178)
 local OK_COLOR = Color3.fromRGB(90, 210, 130)
 local ERROR_COLOR = Color3.fromRGB(230, 90, 90)
 
+--[[
+	Every size/position below is Scale, never Offset (screen-UI convention --
+	see UI-AND-MOTION.md and the Scale-based UIStroke conversion this mirrors,
+	commit c03f3d7). The panel is a fraction of the viewport, clamped to a
+	sane absolute pixel range and pinned to its original near-square shape,
+	rather than a fixed 460x456px block.
+]]
+local ROOT_SCALE = UDim2.fromScale(0.24, 0.42)
+local ROOT_ASPECT_RATIO = 460 / 456
+local ROOT_MIN_SIZE = Vector2.new(320, 320)
+local ROOT_MAX_SIZE = Vector2.new(560, 600)
+
+-- Content inset (replaces the old 12px margin) and the vertical rhythm
+-- between stacked rows, both a fraction of Content's own size.
+local CONTENT_PADDING_SCALE = 0.028
+local CONTENT_GAP_SCALE = 0.01
+
+-- Each stacked row's height as a fraction of Content's height -- Body gets
+-- the lion's share, the rest match the old fixed-height action rows.
+local TITLE_ROW_SCALE = 0.07
+local ACTION_ROW_SCALE = 0.07
+local BODY_SCALE = 0.4
+local STATUS_ROW_SCALE = 0.045
+
+-- Per-row horizontal gap inside a row's own UIListLayout (path label vs.
+-- value box, path/value/set) and the height of one generic data-editor row
+-- or target-picker row, as a fraction of its scrolling parent's own height.
+local ROW_GAP_SCALE = 0.02
+local ROW_HEIGHT_SCALE = 0.12
+
+-- The target-picker overlay isn't part of Content's UIListLayout (it must
+-- float above the rows, not push them around), so its own position/size is
+-- expressed directly as a fraction of Root instead -- placed just under the
+-- target row, spanning down over the action rows it temporarily covers.
+local TARGET_LIST_TOP_SCALE = 0.17
+local TARGET_LIST_HEIGHT_SCALE = 0.3
+
+-- TextScaled floor/ceiling via UITextSizeConstraint (screen-UI convention):
+-- keeps labels legible on a tiny screen and sane on a huge one instead of
+-- scaling without bound.
+local TITLE_TEXT_MIN, TITLE_TEXT_MAX = 13, 22
+local BUTTON_TEXT_MIN, BUTTON_TEXT_MAX = 10, 18
+local SMALL_TEXT_MIN, SMALL_TEXT_MAX = 9, 15
+
 type SnapshotEntry = {
 	path: { string },
 	kind: string,
@@ -79,6 +123,48 @@ local currentTargetUserId = player.UserId
 local currentTargetName = player.Name
 local targetListVisible = false
 local refreshThread: thread? = nil
+
+-- Decorative corner rounding stays a fixed pixel radius on purpose -- a
+-- Scale-based radius would look inconsistent as the element's own size
+-- changes (a bigger button would get a fatter corner), whereas layout
+-- geometry (this whole file's actual concern) must scale with it.
+local function withCorner(instance: GuiObject, radius: number): GuiObject
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius)
+	corner.Parent = instance
+	return instance
+end
+
+--[[
+	TextScaled auto-fits a label's font to its GuiObject's current size;
+	UITextSizeConstraint keeps that auto-fit inside a legible floor/ceiling
+	instead of shrinking to unreadable on a tiny screen or ballooning past the
+	row's own bounds on a huge one (screen-UI convention).
+
+	TextLabel/TextButton/TextBox each declare TextScaled independently in
+	Roblox's own API (no shared "text object" base to type this against, the
+	way UIKitController.luau's MarketplaceAttrs handlers hit the same wall
+	for `.Text`) -- `:: any` at the two assignment sites only, not spread
+	through the signature, which stays the honest union.
+]]
+local function applyTextConstraint(textObject: TextLabel | TextButton | TextBox, minSize: number, maxSize: number)
+	(textObject :: any).TextScaled = true
+	local constraint = Instance.new("UITextSizeConstraint")
+	constraint.MinTextSize = minSize
+	constraint.MaxTextSize = maxSize
+	constraint.Parent = textObject
+end
+
+-- A fixed-aspect element (the close button) sized off its OWN row height
+-- rather than an offset pixel size -- DominantAxis = Height means its width
+-- is derived FROM whatever height Scale sizing gives its row, not hardcoded.
+local function withSquareAspect(instance: GuiObject): GuiObject
+	local constraint = Instance.new("UIAspectRatioConstraint")
+	constraint.AspectRatio = 1
+	constraint.DominantAxis = Enum.DominantAxis.Height
+	constraint.Parent = instance
+	return instance
+end
 
 local function dottedPath(path: { string }): string
 	return table.concat(path, ".")
@@ -148,31 +234,39 @@ local function createRow(entry: SnapshotEntry, layoutOrder: number, parent: Scro
 	local frame = Instance.new("Frame")
 	frame.Name = dottedPath(entry.path)
 	frame.BackgroundTransparency = 1
-	frame.Size = UDim2.new(1, 0, 0, 26)
+	frame.Size = UDim2.fromScale(1, ROW_HEIGHT_SCALE)
 	frame.LayoutOrder = layoutOrder
+
+	local rowLayout = Instance.new("UIListLayout")
+	rowLayout.FillDirection = Enum.FillDirection.Horizontal
+	rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	rowLayout.Padding = UDim.new(ROW_GAP_SCALE, 0)
+	rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	rowLayout.Parent = frame
 
 	local label = Instance.new("TextLabel")
 	label.Name = "PathLabel"
+	label.LayoutOrder = 1
 	label.BackgroundTransparency = 1
-	label.Size = UDim2.new(0.55, -4, 1, 0)
+	label.Size = UDim2.fromScale(0.55, 1)
 	label.Font = Enum.Font.Gotham
-	label.TextSize = 13
 	label.TextColor3 = MUTED_TEXT_COLOR
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.TextTruncate = Enum.TextTruncate.AtEnd
 	label.Text = dottedPath(entry.path)
+	applyTextConstraint(label, SMALL_TEXT_MIN, SMALL_TEXT_MAX)
 	label.Parent = frame
 
 	local box = Instance.new("TextBox")
 	box.Name = "ValueBox"
-	box.Position = UDim2.new(0.55, 4, 0, 0)
-	box.Size = UDim2.new(0.45, -4, 1, 0)
+	box.LayoutOrder = 2
+	box.Size = UDim2.fromScale(0.43, 1)
 	box.BackgroundColor3 = FIELD_COLOR
 	box.TextColor3 = TEXT_COLOR
 	box.Font = Enum.Font.Gotham
-	box.TextSize = 13
 	box.ClearTextOnFocus = false
 	box.Text = entry.value
+	applyTextConstraint(box, SMALL_TEXT_MIN, SMALL_TEXT_MAX)
 	box.Parent = frame
 
 	local corner = Instance.new("UICorner")
@@ -281,12 +375,12 @@ local function openTargetList()
 		local button = Instance.new("TextButton")
 		button.Name = candidate.Name
 		button.LayoutOrder = index
-		button.Size = UDim2.new(1, 0, 0, 26)
+		button.Size = UDim2.fromScale(1, ROW_HEIGHT_SCALE)
 		button.BackgroundColor3 = FIELD_COLOR
 		button.TextColor3 = TEXT_COLOR
 		button.Font = Enum.Font.Gotham
-		button.TextSize = 13
 		button.Text = candidate.Name
+		applyTextConstraint(button, SMALL_TEXT_MIN, SMALL_TEXT_MAX)
 		button.Parent = list
 
 		button.Activated:Connect(function()
@@ -335,6 +429,10 @@ local function onDamageSquishiesClicked()
 	Net.devDamageSquishies.send({ targetUserId = currentTargetUserId })
 end
 
+local function onGrantAllCosmeticsClicked()
+	Net.devGrantAllCosmetics.send({ targetUserId = currentTargetUserId })
+end
+
 local function updateRadiusDebugButton()
 	local button = radiusDebugButton
 	if button == nil then
@@ -363,21 +461,14 @@ local function cleanup()
 	end
 end
 
-local function withCorner(instance: GuiObject, radius: number): GuiObject
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, radius)
-	corner.Parent = instance
-	return instance
-end
-
 local function newButton(text: string, size: UDim2): TextButton
 	local button = Instance.new("TextButton")
 	button.Font = Enum.Font.Gotham
-	button.TextSize = 14
 	button.TextColor3 = TEXT_COLOR
 	button.BackgroundColor3 = FIELD_COLOR
 	button.Size = size
 	button.Text = text
+	applyTextConstraint(button, BUTTON_TEXT_MIN, BUTTON_TEXT_MAX)
 	withCorner(button, 6)
 	return button
 end
@@ -385,13 +476,13 @@ end
 local function newTextBox(placeholder: string, size: UDim2): TextBox
 	local box = Instance.new("TextBox")
 	box.Font = Enum.Font.Gotham
-	box.TextSize = 14
 	box.TextColor3 = TEXT_COLOR
 	box.BackgroundColor3 = FIELD_COLOR
 	box.ClearTextOnFocus = false
 	box.Size = size
 	box.PlaceholderText = placeholder
 	box.Text = ""
+	applyTextConstraint(box, SMALL_TEXT_MIN, SMALL_TEXT_MAX)
 	withCorner(box, 6)
 	return box
 end
@@ -415,44 +506,85 @@ local function buildUI()
 	root.Name = "Root"
 	root.AnchorPoint = Vector2.new(0.5, 0.5)
 	root.Position = UDim2.fromScale(0.5, 0.5)
-	root.Size = UDim2.fromOffset(460, 420)
+	root.Size = ROOT_SCALE
 	root.BackgroundColor3 = BACKGROUND_COLOR
 	root.BorderSizePixel = 0
 	root.Parent = gui
 	withCorner(root, 8)
 
+	-- Keeps Root's original near-square shape regardless of screen aspect
+	-- (Height derived from Width), then clamps the resulting absolute pixel
+	-- size so it neither shrinks to unusable on a small screen nor balloons
+	-- past a sane modal size on a huge one. The two constraints stacking on
+	-- one Instance is the standard Roblox pattern for a responsive
+	-- fixed-shape panel.
+	local rootAspect = Instance.new("UIAspectRatioConstraint")
+	rootAspect.AspectRatio = ROOT_ASPECT_RATIO
+	rootAspect.DominantAxis = Enum.DominantAxis.Width
+	rootAspect.Parent = root
+
+	local rootSizeConstraint = Instance.new("UISizeConstraint")
+	rootSizeConstraint.MinSize = ROOT_MIN_SIZE
+	rootSizeConstraint.MaxSize = ROOT_MAX_SIZE
+	rootSizeConstraint.Parent = root
+
+	--[[
+		Every row below is a child of Content, stacked top-to-bottom by
+		Content's own UIListLayout via LayoutOrder -- no hand-computed Y
+		positions anywhere. Content's UIPadding is the Scale-based
+		replacement for the old fixed 12px margin.
+	]]
+	local content = Instance.new("Frame")
+	content.Name = "Content"
+	content.BackgroundTransparency = 1
+	content.Size = UDim2.fromScale(1, 1)
+	content.Parent = root
+
+	local contentPadding = Instance.new("UIPadding")
+	contentPadding.PaddingTop = UDim.new(CONTENT_PADDING_SCALE, 0)
+	contentPadding.PaddingBottom = UDim.new(CONTENT_PADDING_SCALE, 0)
+	contentPadding.PaddingLeft = UDim.new(CONTENT_PADDING_SCALE, 0)
+	contentPadding.PaddingRight = UDim.new(CONTENT_PADDING_SCALE, 0)
+	contentPadding.Parent = content
+
+	local contentLayout = Instance.new("UIListLayout")
+	contentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	contentLayout.Padding = UDim.new(CONTENT_GAP_SCALE, 0)
+	contentLayout.Parent = content
+
 	-- Title row.
 	local titleRow = Instance.new("Frame")
 	titleRow.Name = "TitleRow"
+	titleRow.LayoutOrder = 1
 	titleRow.BackgroundTransparency = 1
-	titleRow.Position = UDim2.fromOffset(12, 10)
-	titleRow.Size = UDim2.new(1, -24, 0, 28)
-	titleRow.Parent = root
+	titleRow.Size = UDim2.fromScale(1, TITLE_ROW_SCALE)
+	titleRow.Parent = content
 
 	local title = Instance.new("TextLabel")
 	title.Name = "Title"
 	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1, -32, 1, 0)
+	title.Size = UDim2.fromScale(0.85, 1)
 	title.Font = Enum.Font.GothamBold
-	title.TextSize = 18
 	title.TextColor3 = TEXT_COLOR
 	title.TextXAlignment = Enum.TextXAlignment.Left
 	title.Text = "Developer Console"
+	applyTextConstraint(title, TITLE_TEXT_MIN, TITLE_TEXT_MAX)
 	title.Parent = titleRow
 
-	local closeButton = newButton("X", UDim2.fromOffset(28, 28))
+	local closeButton = newButton("X", UDim2.fromScale(0, 1))
 	closeButton.Name = "CloseButton"
-	closeButton.AnchorPoint = Vector2.new(1, 0)
-	closeButton.Position = UDim2.fromScale(1, 0)
+	closeButton.AnchorPoint = Vector2.new(1, 0.5)
+	closeButton.Position = UDim2.fromScale(1, 0.5)
+	withSquareAspect(closeButton)
 	closeButton.Parent = titleRow
 
 	-- Target row.
 	local targetRow = Instance.new("Frame")
 	targetRow.Name = "TargetRow"
+	targetRow.LayoutOrder = 2
 	targetRow.BackgroundTransparency = 1
-	targetRow.Position = UDim2.fromOffset(12, 46)
-	targetRow.Size = UDim2.new(1, -24, 0, 28)
-	targetRow.Parent = root
+	targetRow.Size = UDim2.fromScale(1, TITLE_ROW_SCALE)
+	targetRow.Parent = content
 
 	local targetBtn = newButton(`Target: {currentTargetName}`, UDim2.fromScale(1, 1))
 	targetBtn.Name = "TargetButton"
@@ -464,10 +596,10 @@ local function buildUI()
 	-- discoverable and cannot require a developer to hand-edit every array row.
 	local actionRow = Instance.new("Frame")
 	actionRow.Name = "ActionRow"
+	actionRow.LayoutOrder = 3
 	actionRow.BackgroundTransparency = 1
-	actionRow.Position = UDim2.fromOffset(12, 82)
-	actionRow.Size = UDim2.new(1, -24, 0, 28)
-	actionRow.Parent = root
+	actionRow.Size = UDim2.fromScale(1, ACTION_ROW_SCALE)
+	actionRow.Parent = content
 
 	local damageButton = newButton("Damage Squishies  -25% HP", UDim2.fromScale(1, 1))
 	damageButton.Name = "DamageSquishiesButton"
@@ -476,10 +608,10 @@ local function buildUI()
 
 	local radiusDebugRow = Instance.new("Frame")
 	radiusDebugRow.Name = "RadiusDebugRow"
+	radiusDebugRow.LayoutOrder = 4
 	radiusDebugRow.BackgroundTransparency = 1
-	radiusDebugRow.Position = UDim2.fromOffset(12, 118)
-	radiusDebugRow.Size = UDim2.new(1, -24, 0, 28)
-	radiusDebugRow.Parent = root
+	radiusDebugRow.Size = UDim2.fromScale(1, ACTION_ROW_SCALE)
+	radiusDebugRow.Parent = content
 
 	local radiusButton = newButton("", UDim2.fromScale(1, 1))
 	radiusButton.Name = "RadiusDebugButton"
@@ -487,11 +619,92 @@ local function buildUI()
 	radiusDebugButton = radiusButton
 	updateRadiusDebugButton()
 
-	-- Target picker overlay -- hidden until the target row is clicked.
+	local cosmeticsRow = Instance.new("Frame")
+	cosmeticsRow.Name = "CosmeticsRow"
+	cosmeticsRow.LayoutOrder = 5
+	cosmeticsRow.BackgroundTransparency = 1
+	cosmeticsRow.Size = UDim2.fromScale(1, ACTION_ROW_SCALE)
+	cosmeticsRow.Parent = content
+
+	local cosmeticsButton = newButton("Grant All Cosmetics", UDim2.fromScale(1, 1))
+	cosmeticsButton.Name = "GrantAllCosmeticsButton"
+	cosmeticsButton.BackgroundColor3 = Color3.fromRGB(88, 140, 196)
+	cosmeticsButton.Parent = cosmeticsRow
+
+	-- Body: one row per snapshot entry.
+	local body = Instance.new("ScrollingFrame")
+	body.Name = "Body"
+	body.LayoutOrder = 6
+	body.Size = UDim2.fromScale(1, BODY_SCALE)
+	body.BackgroundColor3 = FIELD_COLOR
+	body.BorderSizePixel = 0
+	body.ScrollBarThickness = 6
+	body.CanvasSize = UDim2.new()
+	body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	body.Parent = content
+	withCorner(body, 6)
+	bodyScroll = body
+
+	local bodyLayout = Instance.new("UIListLayout")
+	bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	bodyLayout.Padding = UDim.new(CONTENT_GAP_SCALE, 0)
+	bodyLayout.Parent = body
+
+	-- New-key row.
+	local newKeyRow = Instance.new("Frame")
+	newKeyRow.Name = "NewKeyRow"
+	newKeyRow.LayoutOrder = 7
+	newKeyRow.BackgroundTransparency = 1
+	newKeyRow.Size = UDim2.fromScale(1, ACTION_ROW_SCALE)
+	newKeyRow.Parent = content
+
+	local newKeyLayout = Instance.new("UIListLayout")
+	newKeyLayout.FillDirection = Enum.FillDirection.Horizontal
+	newKeyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	newKeyLayout.Padding = UDim.new(ROW_GAP_SCALE, 0)
+	newKeyLayout.Parent = newKeyRow
+
+	local pathBox = newTextBox("Inventory.Sword", UDim2.fromScale(0.38, 1))
+	pathBox.Name = "PathBox"
+	pathBox.LayoutOrder = 1
+	pathBox.Parent = newKeyRow
+	newKeyPathBox = pathBox
+
+	local valueBox = newTextBox("1", UDim2.fromScale(0.38, 1))
+	valueBox.Name = "ValueBox"
+	valueBox.LayoutOrder = 2
+	valueBox.Parent = newKeyRow
+	newKeyValueBox = valueBox
+
+	local setBtn = newButton("Set", UDim2.fromScale(0.2, 1))
+	setBtn.Name = "SetButton"
+	setBtn.LayoutOrder = 3
+	setBtn.Parent = newKeyRow
+
+	-- Status line.
+	local status = Instance.new("TextLabel")
+	status.Name = "StatusLabel"
+	status.LayoutOrder = 8
+	status.BackgroundTransparency = 1
+	status.Size = UDim2.fromScale(1, STATUS_ROW_SCALE)
+	status.Font = Enum.Font.Gotham
+	status.TextXAlignment = Enum.TextXAlignment.Left
+	status.TextColor3 = MUTED_TEXT_COLOR
+	status.Text = ""
+	applyTextConstraint(status, SMALL_TEXT_MIN, SMALL_TEXT_MAX)
+	status.Parent = content
+	statusLabel = status
+
+	--[[
+		Target picker overlay -- hidden until the target row is clicked. A
+		sibling of Content (not a child of it), so Content's UIListLayout
+		never touches its position -- it floats above the rows instead of
+		pushing them around, positioned as a Scale fraction of Root directly.
+	]]
 	local targetList = Instance.new("ScrollingFrame")
 	targetList.Name = "TargetList"
-	targetList.Position = UDim2.fromOffset(12, 76)
-	targetList.Size = UDim2.new(1, -24, 0, 140)
+	targetList.Position = UDim2.fromScale(CONTENT_PADDING_SCALE, TARGET_LIST_TOP_SCALE)
+	targetList.Size = UDim2.fromScale(1 - 2 * CONTENT_PADDING_SCALE, TARGET_LIST_HEIGHT_SCALE)
 	targetList.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
 	targetList.BorderSizePixel = 0
 	targetList.ZIndex = 10
@@ -507,63 +720,6 @@ local function buildUI()
 	targetListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	targetListLayout.Parent = targetList
 
-	-- Body: one row per snapshot entry.
-	local body = Instance.new("ScrollingFrame")
-	body.Name = "Body"
-	body.Position = UDim2.fromOffset(12, 154)
-	body.Size = UDim2.new(1, -24, 1, -236)
-	body.BackgroundColor3 = FIELD_COLOR
-	body.BorderSizePixel = 0
-	body.ScrollBarThickness = 6
-	body.CanvasSize = UDim2.new()
-	body.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	body.Parent = root
-	withCorner(body, 6)
-	bodyScroll = body
-
-	local bodyLayout = Instance.new("UIListLayout")
-	bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	bodyLayout.Padding = UDim.new(0, 2)
-	bodyLayout.Parent = body
-
-	-- New-key row.
-	local newKeyRow = Instance.new("Frame")
-	newKeyRow.Name = "NewKeyRow"
-	newKeyRow.BackgroundTransparency = 1
-	newKeyRow.Position = UDim2.new(0, 12, 1, -64)
-	newKeyRow.Size = UDim2.new(1, -24, 0, 28)
-	newKeyRow.Parent = root
-
-	local pathBox = newTextBox("Inventory.Sword", UDim2.new(0.4, -4, 1, 0))
-	pathBox.Name = "PathBox"
-	pathBox.Parent = newKeyRow
-	newKeyPathBox = pathBox
-
-	local valueBox = newTextBox("1", UDim2.new(0.4, -4, 1, 0))
-	valueBox.Name = "ValueBox"
-	valueBox.Position = UDim2.new(0.4, 4, 0, 0)
-	valueBox.Parent = newKeyRow
-	newKeyValueBox = valueBox
-
-	local setBtn = newButton("Set", UDim2.new(0.2, -8, 1, 0))
-	setBtn.Name = "SetButton"
-	setBtn.Position = UDim2.new(0.8, 8, 0, 0)
-	setBtn.Parent = newKeyRow
-
-	-- Status line.
-	local status = Instance.new("TextLabel")
-	status.Name = "StatusLabel"
-	status.BackgroundTransparency = 1
-	status.Position = UDim2.new(0, 12, 1, -28)
-	status.Size = UDim2.new(1, -24, 0, 20)
-	status.Font = Enum.Font.Gotham
-	status.TextSize = 13
-	status.TextXAlignment = Enum.TextXAlignment.Left
-	status.TextColor3 = MUTED_TEXT_COLOR
-	status.Text = ""
-	status.Parent = root
-	statusLabel = status
-
 	targetBtn.Activated:Connect(function()
 		if targetListVisible then
 			closeTargetList()
@@ -575,6 +731,7 @@ local function buildUI()
 	setBtn.Activated:Connect(onCreateClicked)
 	damageButton.Activated:Connect(onDamageSquishiesClicked)
 	radiusButton.Activated:Connect(onRadiusDebugClicked)
+	cosmeticsButton.Activated:Connect(onGrantAllCosmeticsClicked)
 
 	gui.Destroying:Connect(cleanup)
 

@@ -89,6 +89,14 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.struct({ targetUserId = ByteNet.float64 }),
 		}),
 
+		-- client -> server. Developer-only test action; grants every
+		-- CosmeticsCatalog entry (both slots) to the selected in-server player,
+		-- skipping ids they already own. Same shape as devDamageSquishies --
+		-- the only client input is which in-server player to target.
+		devGrantAllCosmetics = ByteNet.definePacket({
+			value = ByteNet.struct({ targetUserId = ByteNet.float64 }),
+		}),
+
 		-- server -> client
 		devResult = ByteNet.definePacket({
 			value = ByteNet.struct({ ok = ByteNet.bool, message = ByteNet.string }),
@@ -184,6 +192,26 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		-- popup in the same frame; persistent balance state does not travel here.
 		mergeIncomePulse = ByteNet.definePacket({
 			value = ByteNet.nothing,
+		}),
+
+		--[[
+			client -> server. Request to equip an owned cosmetic. `slot` is one
+			of CosmeticsCatalog.Slot ("KeycapThemes" | "SquishyTrails"); `id` is
+			a catalog id for that slot. CosmeticsService re-validates both
+			(known slot, known id, actually owned) before writing -- an unowned
+			or unknown id is silently dropped, same as every other "not in the
+			state this implies" packet in this file.
+
+			No result packet: the equip (or the rejection, which just leaves
+			the old value in place) is visible via the replicated
+			Cosmetics.KeycapThemeId / SquishyTrailId fields DataController.observe
+			already watches, so there is nothing else to tell the client.
+		]]
+		cosmeticEquip = ByteNet.definePacket({
+			value = ByteNet.struct({
+				slot = ByteNet.string,
+				id = ByteNet.string,
+			}),
 		}),
 	}
 end)

@@ -20,14 +20,16 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
+local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
+local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 
 local log = Log.new("LightUpKeysController")
 
-local KEY_TAG = "Key"
-local THEME_ATTRIBUTE = "Theme"
-local DEFAULT_THEME = "ChocolateBar"
+local KEY_TAG = CosmeticsCatalog.KEY_TAG
+local THEME_ATTRIBUTE = CosmeticsCatalog.THEME_ATTRIBUTE
+local DEFAULT_THEME = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
 
 local KEY_GUI_NAME = "KeyGui"
 local LETTER_LABEL_NAME = "LetterLabel"
@@ -1985,6 +1987,39 @@ local function updateKeys()
 	end
 end
 
+--[[
+	The dark-to-light Colors for `id`, or nil if it isn't a configured theme.
+	Exposed for CosmeticsController's cosmetics-menu card, which restyles each
+	owned theme's card gradient from these same colors (COSMETICS_PLAN.md) --
+	Material is a physical-key concern the card has no use for.
+]]
+function LightUpKeysController.getThemeColors(id: string): { Color3 }?
+	local theme = THEMES[id]
+	return if theme ~= nil then theme.Colors else nil
+end
+
+-- CosmeticsCatalog.KeycapThemes is meant to list every id in THEMES, and
+-- nothing else -- warn (don't error) if the two ever diverge, in either
+-- direction, so a forgotten catalog entry or a stale one is caught in the
+-- output instead of silently shipping.
+local function warnCosmeticsCatalogDrift()
+	for _, entry in CosmeticsCatalog.KeycapThemes do
+		if THEMES[entry.Id] == nil then
+			log.warn(`CosmeticsCatalog theme "{entry.Id}" has no entry in THEMES -- it can never render`)
+		end
+		if Images.ThemeIcons[entry.Id] == nil then
+			log.warn(
+				`CosmeticsCatalog theme "{entry.Id}" has no Images.ThemeIcons entry -- its card will use the template's default icon`
+			)
+		end
+	end
+	for themeName in THEMES do
+		if not CosmeticsCatalog.isKeycapTheme(themeName) then
+			log.warn(`THEMES theme "{themeName}" is missing from CosmeticsCatalog -- it can never be owned or equipped`)
+		end
+	end
+end
+
 function LightUpKeysController.Init()
 	CollectionService:GetInstanceAddedSignal(KEY_TAG):Connect(wireKey)
 	CollectionService:GetInstanceRemovedSignal(KEY_TAG):Connect(unwireKey)
@@ -1992,6 +2027,8 @@ function LightUpKeysController.Init()
 	for _, instance in CollectionService:GetTagged(KEY_TAG) do
 		wireKey(instance)
 	end
+
+	warnCosmeticsCatalogDrift()
 
 	RunService.Heartbeat:Connect(updateKeys)
 	log.info(`ready ({#CollectionService:GetTagged(KEY_TAG)} tagged instances)`)

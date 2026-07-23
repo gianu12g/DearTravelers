@@ -31,6 +31,8 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
+local CosmeticsService = require(script.Parent.CosmeticsService)
 local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeService = require(script.Parent.MergeService)
@@ -401,6 +403,54 @@ local function onDamageSquishies(data: { targetUserId: number }, player: Player)
 	sendSnapshot(target, player)
 end
 
+--[[
+	Grants every CosmeticsCatalog entry (both slots) to `target`.
+	CosmeticsService.grant is itself the no-op for an already-owned id, but
+	its return doesn't distinguish "newly granted" from "already owned" --
+	both are `true` (COSMETICS_PLAN.md) -- so the granted/skipped split for
+	the log line below is determined here, by checking ownership before each
+	call, not from grant()'s return value.
+]]
+local function onGrantAllCosmetics(data: { targetUserId: number }, player: Player)
+	if not checkAccess(player) then
+		return
+	end
+
+	local target = resolveTarget(data.targetUserId, player)
+	if target == nil then
+		return
+	end
+
+	local targetData = DataService.getData(target)
+	if targetData == nil then
+		Net.devResult.sendTo({ ok = false, message = "target has no loaded data" }, player)
+		return
+	end
+
+	local granted, skipped = 0, 0
+	local function grantCatalog(slot: CosmeticsCatalog.Slot, catalog: { CosmeticsCatalog.CatalogEntry })
+		for _, entry in catalog do
+			local owned = targetData.Cosmetics.Owned[slot]
+			if table.find(owned, entry.Id) ~= nil then
+				skipped += 1
+				continue
+			end
+			if CosmeticsService.grant(target, slot, entry.Id) then
+				granted += 1
+			else
+				skipped += 1
+			end
+		end
+	end
+
+	grantCatalog("KeycapThemes", CosmeticsCatalog.KeycapThemes)
+	grantCatalog("SquishyTrails", CosmeticsCatalog.SquishyTrails)
+
+	log.info(`{player.Name} granted all cosmetics to {target.Name}: {granted} granted, {skipped} skipped`)
+	Net.devResult.sendTo({ ok = true, message = `Granted {granted} cosmetics ({skipped} already owned)` }, player)
+	sendSnapshot(target, player)
+end
+
 local DevService = {}
 
 function DevService.Init()
@@ -419,6 +469,12 @@ function DevService.Init()
 	Net.devDamageSquishies.listen(function(data, player)
 		if player ~= nil then
 			onDamageSquishies(data, player)
+		end
+	end)
+
+	Net.devGrantAllCosmetics.listen(function(data, player)
+		if player ~= nil then
+			onGrantAllCosmetics(data, player)
 		end
 	end)
 
