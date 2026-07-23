@@ -61,6 +61,12 @@ end
 -- per-player table in this port).
 local spinning: { [Player]: true } = {}
 
+-- rewardIndex rolled but not yet paid out. Set when spinResult is sent,
+-- cleared by whichever of {the delayed grant in Init(), the PlayerRemoving
+-- best-effort grant} runs first -- the other sees it already gone and
+-- no-ops, so a disconnect mid-animation can't double-pay.
+local pendingReward: { [Player]: number } = {}
+
 local function waitForData(player: Player): DataService.PlayerData?
 	if not DataService.awaitData(player, 120) then
 		return nil
@@ -113,28 +119,40 @@ function WheelSpinService.Init()
 		DataService.set(player, { "UISystem", "Spins" }, data.UISystem.Spins - 1)
 
 		local rewardIndex = rollRewardIndex()
-		local rewardFunction = WheelSpinRewardFunctions[rewardIndex]
-		local rewarded, rewardError = Format.Retry(function()
-			if rewardFunction == nil or not rewardFunction(player) then
-				error("reward rejected the grant")
-			end
-			return true
-		end, REWARD_RETRIES)
-		if not rewarded then
-			spinning[player] = nil
-			WheelSpinService.AddSpins(player, 1)
-			log.warn(`spin reward {rewardIndex} failed for {player.Name}: {tostring(rewardError)}`)
-			UINotificationService.SendNotification(player, "Error", "The spin failed; your spin was refunded")
-			return
-		end
+		pendingReward[player] = rewardIndex
 
-		-- Grant before animating. A player who disconnects during the wheel
-		-- animation keeps the result instead of losing both the spin and reward.
+		-- Deduction, roll, and spinResult stay immediate -- the client needs
+		-- rewardIndex right away to drive the wheel animation. The actual
+		-- reward grant is delayed until the animation lands (below), so a
+		-- disconnect mid-spin can't be paid twice; see the PlayerRemoving
+		-- handler for the best-effort grant that keeps a leaving player from
+		-- losing both the spin and the reward instead.
 		Net.spinResult.sendTo({ rewardIndex = rewardIndex }, player)
+
 		task.delay(WheelSpinConfig.FullSpinDuration, function()
 			spinning[player] = nil
 
+			if pendingReward[player] == nil then
+				-- Already resolved by the PlayerRemoving best-effort grant.
+				return
+			end
+			pendingReward[player] = nil
+
 			if player.Parent ~= Players then
+				return
+			end
+
+			local rewardFunction = WheelSpinRewardFunctions[rewardIndex]
+			local rewarded, rewardError = Format.Retry(function()
+				if rewardFunction == nil or not rewardFunction(player) then
+					error("reward rejected the grant")
+				end
+				return true
+			end, REWARD_RETRIES)
+			if not rewarded then
+				WheelSpinService.AddSpins(player, 1)
+				log.warn(`spin reward {rewardIndex} failed for {player.Name}: {tostring(rewardError)}`)
+				UINotificationService.SendNotification(player, "Error", "The spin failed; your spin was refunded")
 				return
 			end
 
@@ -142,13 +160,52 @@ function WheelSpinService.Init()
 			UINotificationService.SendNotification(player, "Success", `You won {rewardText}`)
 		end)
 	end)
+
+	--[[
+		Connected here, not in Start(), so this registers during the Loader's
+		Init phase -- an invariant the Loader enforces for every module before
+		any Start() runs (src/shared/Loader.luau). DataService.Start()
+		(Priority 100, the highest in the codebase) connects its own
+		PlayerRemoving handler during ITS Start(), which is strictly later.
+		Since a signal fires its connections in the order they connected,
+		this handler is guaranteed to run -- and grant the pending reward --
+		before DataService's handler destroys the profile/replica. Relying on
+		Priority to order this against DataService's Start() would NOT be
+		safe: Loader.luau/ARCHITECTURE.md only guarantee Priority orders
+		Init; Start is unordered/parallel.
+	]]
+	Players.PlayerRemoving:Connect(function(player: Player)
+		spinning[player] = nil
+
+		local rewardIndex = pendingReward[player]
+		if rewardIndex == nil then
+			return
+		end
+		pendingReward[player] = nil
+
+		-- Single synchronous attempt -- not Format.Retry. Its task.wait(0.5)
+		-- between attempts would yield control back to the signal
+		-- dispatcher, letting DataService's handler run (and release the
+		-- profile) before we resume. A leaving player can't wait out a
+		-- multi-attempt retry anyway.
+		local rewardFunction = WheelSpinRewardFunctions[rewardIndex]
+		local grantedOk = false
+		if rewardFunction ~= nil then
+			local ok, result = pcall(rewardFunction, player)
+			grantedOk = ok and result == true
+		end
+
+		if not grantedOk then
+			WheelSpinService.AddSpins(player, 1)
+			log.warn(`spin reward {rewardIndex} failed for {player.Name} on disconnect -- spin refunded`)
+		end
+	end)
 end
 
 function WheelSpinService.Start()
-	Players.PlayerRemoving:Connect(function(player: Player)
-		spinning[player] = nil
-	end)
-
+	-- PlayerRemoving is connected in Init(), not here -- see the comment on
+	-- that connection for why it needs to beat DataService's Start()-phase
+	-- one.
 	SafePlayerAdded(function(player: Player)
 		local data = waitForData(player)
 		if data == nil then
