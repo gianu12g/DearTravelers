@@ -2,12 +2,19 @@
 --[[
 	Playtime-reward tuning: reset cadence and the per-slot required-duration
 	table. Ported 1:1 from the UISystem dump's
-	ReplicatedStorage.Configuration.PlaytimeRewards.
+	ReplicatedStorage.Configuration.PlaytimeRewards, then annotated with the
+	real payouts in Server/Modules/UISystem/PlaytimeRewardFunctions.luau --
+	keep the two in sync if the schedule ever changes.
 
 	A plain module (Loader ignores it, ARCHITECTURE.md Recipe 3).
 
 	Icon IDs now come from Shared.AssetIds.Images instead of being inlined
-	here.
+	here. PlaytimeRewardsController reads Icon during its static per-slot
+	setup in Start() (Decor.Icon.Image), same as DailyRewardsController does
+	for the Daily panel. PlaytimeRewardsController's updateUi still only
+	reads Duration and the replicated ClaimedRewards. It also has no
+	reward-text label to drive, so the reward description below is a
+	comment, not a new field.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -21,31 +28,31 @@ local PlaytimeRewards = {
 	Rewards = {
 		[1] = {
 			Duration = 5 * 60, -- Required time in order to unlock the reward (5 x 60 seconds = 5 minutes)
-			Icon = Images.PlaytimeReward, -- Icon ID for UI
+			Icon = Images.Cash, -- 50 coins
 		},
 		[2] = {
 			Duration = 15 * 60, -- Required time in order to unlock the reward (15 x 60 seconds = 15 minutes)
-			Icon = Images.PlaytimeReward,
+			Icon = Images.Cash, -- 150 coins
 		},
 		[3] = {
 			Duration = 30 * 60, -- Required time in order to unlock the reward (30 x 60 seconds = 30 minutes)
-			Icon = Images.PlaytimeReward,
+			Icon = Images.StarterPack, -- 300 coins + Slime Trail
 		},
 		[4] = {
 			Duration = 60 * 60, -- Required time in order to unlock the reward (60 x 60 seconds = 1 hour)
-			Icon = Images.PlaytimeReward,
+			Icon = Images.SecretPack, -- 400 coins + X Trail
 		},
 		[5] = {
 			Duration = 1.5 * 60 * 60, -- Required time in order to unlock the reward (1.5 x 60 x 60 seconds = 1.5 hours)
-			Icon = Images.PlaytimeReward,
+			Icon = Images.Cash, -- 750 coins
 		},
 		[6] = {
 			Duration = 2 * 60 * 60, -- Required time in order to unlock the reward (2 x 60 x 60 seconds = 2 hours)
-			Icon = Images.PlaytimeReward,
+			Icon = Images.ThemeIcons.RoyalVelvet, -- Royal Velvet Theme
 		},
 		[7] = {
 			Duration = 3 * 60 * 60, -- Required time in order to unlock the reward (3 x 60 x 60 seconds = 3 hours)
-			Icon = Images.PlaytimeReward,
+			Icon = Images.ThemeIcons.Frostfire, -- Frostfire Theme
 		},
 	},
 }

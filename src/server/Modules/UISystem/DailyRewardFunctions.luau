@@ -1,34 +1,62 @@
 --!strict
 --[[
-	Daily-reward payout stubs (PORT-SPEC.md §1, from source
+	Daily-reward payouts (PORT-SPEC.md §1, from source
 	DailyRewardsService.RewardFunctions -- print()-only placeholders in the
-	source, ported as clearly-marked stubs rather than invented grants
-	(PORT-SPEC.md §5.6): this game's economy never specified what these 7
-	slots should pay out.
+	source). This game's economy never specified what these 7 slots should
+	pay out, so the schedule below is a deliberate design choice, not a port:
+
+	Day 1: 100 coins
+	Day 2: KeycapThemes "Ultraviolet"        -- D1-retention driver
+	Day 3: 250 coins
+	Day 4: SquishyTrails "CoolLaunchTrail"
+	Day 5: 500 coins
+	Day 6: SquishyTrails "RedAndBlackLaunchTrail"
+	Day 7: KeycapThemes "ObsidianGold"        -- weekly capper, most premium
+
+	The daily track repeats every 7 days (DailyRewardsService's
+	STALE_SESSION_SECONDS reset), so the two theme days and two trail days
+	route through CosmeticRewardHelper.grantOrFallback: a repeat cycle grants
+	fallback coins instead of silently no-op'ing on an already-owned id.
+	Fallback amounts are roughly the cosmetic's value in coins (trail ~500,
+	theme ~1000), calibrated against WheelSpinRewardFunctions' ~100/slot cash
+	rewards and comfortably under EconomyConfig.MAX_GRANT.
 ]]
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
-local Log = require(ReplicatedStorage.Shared.Log)
+local CoinsService = require(ServerStorage.Services.CoinsService)
+local CosmeticRewardHelper = require(ServerStorage.Modules.UISystem.CosmeticRewardHelper)
 
-local log = Log.new("DailyRewardFunctions")
-
-local function stub(index: number): (Player) -> boolean
-	return function(player: Player)
-		-- STUB: replace with the real daily-reward payout for slot {index}.
-		log.debug(`daily reward stub {index} for {player.Name}`)
-		return false
-	end
-end
+local TRAIL_FALLBACK_COINS = 500
+local THEME_FALLBACK_COINS = 1000
 
 local DailyRewardFunctions: { [number]: (Player) -> boolean } = {
-	[1] = stub(1),
-	[2] = stub(2),
-	[3] = stub(3),
-	[4] = stub(4),
-	[5] = stub(5),
-	[6] = stub(6),
-	[7] = stub(7),
+	[1] = function(player: Player)
+		return CoinsService.add(player, 100)
+	end,
+	[2] = function(player: Player)
+		return CosmeticRewardHelper.grantOrFallback(player, "KeycapThemes", "Ultraviolet", THEME_FALLBACK_COINS)
+	end,
+	[3] = function(player: Player)
+		return CoinsService.add(player, 250)
+	end,
+	[4] = function(player: Player)
+		return CosmeticRewardHelper.grantOrFallback(player, "SquishyTrails", "CoolLaunchTrail", TRAIL_FALLBACK_COINS)
+	end,
+	[5] = function(player: Player)
+		return CoinsService.add(player, 500)
+	end,
+	[6] = function(player: Player)
+		return CosmeticRewardHelper.grantOrFallback(
+			player,
+			"SquishyTrails",
+			"RedAndBlackLaunchTrail",
+			TRAIL_FALLBACK_COINS
+		)
+	end,
+	[7] = function(player: Player)
+		return CosmeticRewardHelper.grantOrFallback(player, "KeycapThemes", "ObsidianGold", THEME_FALLBACK_COINS)
+	end,
 }
 
 return DailyRewardFunctions

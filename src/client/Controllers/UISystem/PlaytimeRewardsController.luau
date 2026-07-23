@@ -140,10 +140,17 @@ function PlaytimeRewardsController.Start()
 	local frame = Frames.get("PlaytimeRewards")
 	local container = frame:WaitForChild("Holder")
 
-	for index in PlaytimeRewardsConfig.Rewards do
+	for index, info in PlaytimeRewardsConfig.Rewards do
 		local ui = container:FindFirstChild(tostring(index))
 		if ui == nil then
 			continue
+		end
+		local decor = ui:FindFirstChild("Decor")
+		if decor ~= nil then
+			local icon = decor:FindFirstChild("Icon")
+			if icon ~= nil and icon:IsA("ImageLabel") then
+				icon.Image = `rbxassetid://{info.Icon}`
+			end
 		end
 		local redeem = ui:FindFirstChild("Redeem")
 		if redeem ~= nil and redeem:IsA("GuiButton") then
