@@ -64,6 +64,29 @@ local function iconOverridesForSlot(slot: CosmeticsCatalog.Slot): { [string]: nu
 	return TRAIL_ICON_OVERRIDES
 end
 
+-- The one place that decides EquipButton.PriceTag.Text -- shared by the full
+-- render() and the in-place equip update, so the two paths cannot drift
+-- apart on what a card should say.
+local function equipButtonLabel(id: string, equippedId: string, defaultId: string): string
+	if id ~= equippedId then
+		return "Equip"
+	elseif id == defaultId then
+		return "Equipped"
+	end
+	return "Unequip"
+end
+
+-- Purchase (and its ShineContainer descendant) carries Ui-Effect = Shine in
+-- the template, for the shop's future reuse of this same card. This menu
+-- hides Purchase, but UIKitController's DescendantAdded wiring still spawns
+-- the Shine clone + infinite tween for every card unless the attribute is
+-- stripped -- x131 idle tweens inside invisible buttons otherwise.
+local function clearEffectAttribute(instance: Instance)
+	if instance:GetAttribute("Ui-Effect") ~= nil then
+		instance:SetAttribute("Ui-Effect", nil)
+	end
+end
+
 local function toIdSet(ids: { string }): { [string]: true }
 	local set: { [string]: true } = {}
 	for _, id in ids do
@@ -103,7 +126,7 @@ function CosmeticsController.Start()
 	local top = frame:WaitForChild("Top")
 	local keysButton = top:WaitForChild("Keys") :: GuiButton
 	local trailsButton = top:WaitForChild("Trails") :: GuiButton
-	local scrollFrame = frame:WaitForChild("MainScrollingFrame")
+	local scrollFrame = frame:WaitForChild("MainScrollingFrame") :: ScrollingFrame
 	local holder = scrollFrame:WaitForChild("Holder") :: Frame
 	local template = holder:WaitForChild("ThemeTemplate1") :: Frame
 
@@ -135,6 +158,14 @@ function CosmeticsController.Start()
 	-- order. Never touches the template original (Parent stays Holder,
 	-- Visible stays false) or the Holder's own UIListLayout.
 	local function render()
+		-- Holder's ScrollingFrame uses AutomaticCanvasSize=Y, so destroying
+		-- every card collapses the canvas and clamps CanvasPosition to 0 --
+		-- save/restore across the rebuild so an open menu doesn't yank the
+		-- player back to the top. Restored next resumption cycle (task.defer),
+		-- once the new cards' layout has actually recomputed the canvas;
+		-- Roblox clamps the assignment to the valid range itself.
+		local savedCanvasPosition = scrollFrame.CanvasPosition
+
 		for _, child in holder:GetChildren() do
 			if child ~= template and child:IsA("Frame") then
 				child:Destroy()
@@ -165,6 +196,15 @@ function CosmeticsController.Start()
 			local purchase = card:FindFirstChild("Purchase")
 			if purchase ~= nil and purchase:IsA("GuiObject") then
 				purchase.Visible = false
+				-- Stripped before this card is ever parented (below), so
+				-- UIKitController's DescendantAdded wiring never sees the
+				-- attribute and never spawns Purchase's Shine effect inside
+				-- this hidden subtree -- race-free by construction, not by
+				-- timing. The card Icon's own Float effect is untouched.
+				clearEffectAttribute(purchase)
+				for _, descendant in purchase:GetDescendants() do
+					clearEffectAttribute(descendant)
+				end
 			end
 
 			-- Gradient restyle is THEME-ONLY -- trail card visuals beyond the
@@ -191,13 +231,7 @@ function CosmeticsController.Start()
 			if equipButton ~= nil and equipButton:IsA("GuiButton") then
 				local priceTag = equipButton:FindFirstChild("PriceTag")
 				if priceTag ~= nil and priceTag:IsA("TextLabel") then
-					if entry.Id ~= equippedId then
-						priceTag.Text = "Equip"
-					elseif entry.Id == defaultId then
-						priceTag.Text = "Equipped"
-					else
-						priceTag.Text = "Unequip"
-					end
+					priceTag.Text = equipButtonLabel(entry.Id, equippedId, defaultId)
 				end
 				equipButton.MouseButton1Click:Connect(function()
 					onEquipButtonClicked(slot, entry.Id)
@@ -206,6 +240,47 @@ function CosmeticsController.Start()
 
 			card.Parent = holder
 		end
+
+		task.defer(function()
+			scrollFrame.CanvasPosition = savedCanvasPosition
+		end)
+	end
+
+	-- Updates just `id`'s card (if the active slot even has one owned/rendered
+	-- for it -- the other tab, or an unowned id, means no-op) in place: same
+	-- label decision render() uses, no destroy/rebuild, no scroll disturbance.
+	local function updateEquipButtonLabel(id: string)
+		local card = holder:FindFirstChild(id)
+		if card == nil then
+			return
+		end
+		local equipButton = card:FindFirstChild("EquipButton")
+		if equipButton == nil or not equipButton:IsA("GuiButton") then
+			return
+		end
+		local priceTag = equipButton:FindFirstChild("PriceTag")
+		if priceTag == nil or not priceTag:IsA("TextLabel") then
+			return
+		end
+		local slot: CosmeticsCatalog.Slot = activeSlot
+		priceTag.Text = equipButtonLabel(id, equippedIds[slot], defaultIdForSlot(slot))
+	end
+
+	-- {"Cosmetics","Owned"} fires once per server tableInsert -- grant-all
+	-- does ~137 in one burst, which would otherwise mean ~137 full
+	-- render()s. Coalesce to one: set a dirty flag, defer a single render,
+	-- and let any observer fires arriving before that deferred call runs
+	-- just keep the flag set instead of scheduling a second one.
+	local ownedRenderPending = false
+	local function scheduleRender()
+		if ownedRenderPending then
+			return
+		end
+		ownedRenderPending = true
+		task.defer(function()
+			ownedRenderPending = false
+			render()
+		end)
 	end
 
 	keysButton.MouseButton1Click:Connect(function()
@@ -217,7 +292,8 @@ function CosmeticsController.Start()
 		render()
 	end)
 
-	-- Re-renders so a live grant() shows up while the menu is already open.
+	-- Re-renders (debounced -- see scheduleRender) so a live grant() shows up
+	-- while the menu is already open.
 	DataController.observe({ "Cosmetics", "Owned" }, function(value: any)
 		if type(value) ~= "table" then
 			return
@@ -226,23 +302,36 @@ function CosmeticsController.Start()
 		local squishyTrails = value.SquishyTrails
 		ownedIds.KeycapThemes = toIdSet(if type(keycapThemes) == "table" then keycapThemes else {})
 		ownedIds.SquishyTrails = toIdSet(if type(squishyTrails) == "table" then squishyTrails else {})
-		render()
+		scheduleRender()
 	end)
 
+	-- In place, NOT a re-render -- see updateEquipButtonLabel. At 131 cards a
+	-- full render() per equip (destroy + reclone + rebuild everything) is
+	-- wasted work for a change that only ever affects two cards.
 	DataController.observe({ "Cosmetics", "KeycapThemeId" }, function(value: any)
 		if type(value) ~= "string" then
 			return
 		end
+		local previousId = equippedIds.KeycapThemes
 		equippedIds.KeycapThemes = value
-		render()
+		if activeSlot ~= "KeycapThemes" then
+			return
+		end
+		updateEquipButtonLabel(previousId)
+		updateEquipButtonLabel(value)
 	end)
 
 	DataController.observe({ "Cosmetics", "SquishyTrailId" }, function(value: any)
 		if type(value) ~= "string" then
 			return
 		end
+		local previousId = equippedIds.SquishyTrails
 		equippedIds.SquishyTrails = value
-		render()
+		if activeSlot ~= "SquishyTrails" then
+			return
+		end
+		updateEquipButtonLabel(previousId)
+		updateEquipButtonLabel(value)
 	end)
 
 	log.info("ready")

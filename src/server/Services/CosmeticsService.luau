@@ -53,10 +53,13 @@ local function isValidIdForSlot(slot: CosmeticsCatalog.Slot, id: string): boolea
 end
 
 --[[
-	Stamps every Key-tagged MeshPart under `player`'s base KeyCaps folder with
-	the given theme id. KeyCapsController's own attribute-changed observer
-	(wireKey) renders the theme; re-stamping the same value is harmless (no
-	signal fires), so callers don't need to check "did this already change".
+	Stamps every Key-tagged MeshPart under `player`'s base KeyCaps folder, and
+	the base part itself, with the given theme id. KeyCapsController's own
+	attribute-changed observers (wireKey for keys, the base tracker for the
+	base part) render the theme -- keys pick a random Colors entry, the base
+	part is tinted with Colors[1] (the anchor/darkest color, THEMES tables are
+	ordered dark-to-light). Re-stamping the same value is harmless (no signal
+	fires), so callers don't need to check "did this already change".
 
 	No-ops quietly if the player has no base yet, or the base has no KeyCaps
 	folder -- both are BaseService/Studio-authoring concerns already logged
@@ -77,6 +80,8 @@ function CosmeticsService.applyKeycapTheme(player: Player, themeId: string)
 			instance:SetAttribute(CosmeticsCatalog.THEME_ATTRIBUTE, themeId)
 		end
 	end
+
+	basePart:SetAttribute(CosmeticsCatalog.THEME_ATTRIBUTE, themeId)
 end
 
 --[[

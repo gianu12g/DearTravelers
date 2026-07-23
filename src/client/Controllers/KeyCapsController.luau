@@ -7,6 +7,14 @@
 	normalized to ChocolateBar. Attribute changes are observed so themes can be
 	swapped while the game is running.
 
+	Each key's base part (key.Parent.Parent, the BasePart under KeyCaps) is
+	also tinted with the theme's Colors[1] (the anchor/darkest color) by
+	reading the same `Theme` attribute CosmeticsService stamps on the base --
+	this side is read-only on the client, since the server is the attribute's
+	only writer. Bases are tracked separately from keys so a base with many
+	keys gets exactly one attribute connection, torn down and its original
+	color restored once its last key is untagged.
+
 	Press detection follows the local player's HumanoidRootPart every frame. All
 	motion, UI, color selection, and audio are local-only. Sounds are created per
 	press and destroyed after playback, so keys need no child Sound instances and
@@ -1695,10 +1703,22 @@ type KeyState = {
 	themeConnection: RBXScriptConnection?,
 	pressed: boolean,
 	currentTween: Tween?,
+	basePart: BasePart?,
+}
+
+-- Per-base tracker so a base with many keys gets exactly one Theme attribute
+-- connection. keyCount is the number of currently-wired keys pointing at this
+-- base; the connection is torn down and originalColor restored once it hits
+-- zero (the base's last key was untagged/removed).
+type BaseState = {
+	connection: RBXScriptConnection,
+	originalColor: Color3,
+	keyCount: number,
 }
 
 local player = Players.LocalPlayer
 local trackedKeys: { [MeshPart]: KeyState } = {}
+local trackedBases: { [BasePart]: BaseState } = {}
 local pressedKeys: { [MeshPart]: boolean } = {}
 local keysUnderPlayer: { [MeshPart]: boolean } = {}
 local normalizingTheme: { [MeshPart]: boolean } = {}
@@ -1801,6 +1821,94 @@ local function applyTheme(key: MeshPart)
 	key.Material = theme.Material
 end
 
+-- Same resolution as applyTheme (invalid/missing attribute falls back to
+-- DEFAULT_THEME) but read-only: the base's Theme attribute has only one
+-- writer, CosmeticsService, so there's no self-triggered signal to guard
+-- against and nothing to normalize back onto the instance.
+local function applyBaseTheme(basePart: BasePart)
+	local attribute = basePart:GetAttribute(THEME_ATTRIBUTE)
+	local themeName = if typeof(attribute) == "string" and THEMES[attribute] ~= nil then attribute else DEFAULT_THEME
+
+	local theme = THEMES[themeName]
+	if theme == nil then
+		log.warn(`default keycap theme "{DEFAULT_THEME}" is not configured -- base appearance unchanged`)
+		return
+	end
+
+	local colors = theme.Colors
+	if #colors == 0 then
+		log.warn(`keycap theme "{themeName}" has no colors -- base appearance unchanged`)
+		return
+	end
+
+	-- THEMES tables are ordered dark-to-light -- index 1 is the theme's
+	-- anchor/darkest color, the one used for the base plate tint.
+	basePart.Color = colors[1]
+end
+
+-- The key's KeyCaps folder isn't always the key's direct parent -- the real
+-- Studio-authored tree groups keys under per-pack subfolders, e.g.
+-- Base1.KeyCaps.KeyPack.Key, not just Base1.KeyCaps.Key. Walk upward from the
+-- key until an ancestor named "KeyCaps" (a Folder) is found, then require
+-- that folder's own parent to be the base BasePart. Bounded at nil/workspace
+-- so a key tagged somewhere unrelated doesn't walk forever.
+local function getBaseFromKey(key: MeshPart): BasePart?
+	local ancestor: Instance? = key.Parent
+	while ancestor ~= nil and ancestor ~= workspace do
+		if ancestor.Name == "KeyCaps" and ancestor:IsA("Folder") then
+			local basePart = ancestor.Parent
+			if basePart ~= nil and basePart:IsA("BasePart") then
+				return basePart
+			end
+			return nil
+		end
+		ancestor = ancestor.Parent
+	end
+
+	return nil
+end
+
+-- Adds one key to `basePart`'s reference count, wiring its Theme connection
+-- and applying the current theme the first time any key reaches it.
+local function wireBase(basePart: BasePart)
+	local state = trackedBases[basePart]
+	if state ~= nil then
+		state.keyCount += 1
+		return
+	end
+
+	local newState: BaseState = {
+		connection = basePart:GetAttributeChangedSignal(THEME_ATTRIBUTE):Connect(function()
+			applyBaseTheme(basePart)
+		end),
+		originalColor = basePart.Color,
+		keyCount = 1,
+	}
+	trackedBases[basePart] = newState
+
+	applyBaseTheme(basePart)
+end
+
+-- Removes one key from `basePart`'s reference count; once the last key is
+-- gone, disconnects and restores the base's pre-theme color.
+local function unwireBase(basePart: BasePart)
+	local state = trackedBases[basePart]
+	if state == nil then
+		return
+	end
+
+	state.keyCount -= 1
+	if state.keyCount > 0 then
+		return
+	end
+	trackedBases[basePart] = nil
+
+	state.connection:Disconnect()
+	if basePart.Parent ~= nil then
+		basePart.Color = state.originalColor
+	end
+end
+
 -- One transient Sound per press allows rapid or overlapping presses to layer.
 -- Ended/Stopped handle the normal path; the timeout also cleans up a SoundId
 -- that never loads and therefore never emits either signal.
@@ -1896,6 +2004,8 @@ local function wireKey(instance: Instance)
 		return
 	end
 
+	local basePart = getBaseFromKey(instance)
+
 	local state: KeyState = {
 		originalCFrame = instance.CFrame,
 		originalColor = instance.Color,
@@ -1904,6 +2014,7 @@ local function wireKey(instance: Instance)
 		themeConnection = nil,
 		pressed = false,
 		currentTween = nil,
+		basePart = basePart,
 	}
 	trackedKeys[instance] = state
 
@@ -1914,6 +2025,10 @@ local function wireKey(instance: Instance)
 		end
 	end)
 	state.createdGui = createLetterGui(instance)
+
+	if basePart ~= nil then
+		wireBase(basePart)
+	end
 end
 
 local function unwireKey(instance: Instance)
@@ -1942,6 +2057,10 @@ local function unwireKey(instance: Instance)
 	local createdGui = state.createdGui
 	if createdGui ~= nil then
 		createdGui:Destroy()
+	end
+
+	if state.basePart ~= nil then
+		unwireBase(state.basePart)
 	end
 end
 
