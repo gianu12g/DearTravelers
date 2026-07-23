@@ -1,17 +1,10 @@
 --!strict
 --[[
-	Turns DropLaunchUI.CarryActions.C.Launch into a full-screen ViewportFrame
-	map. The live gameplay camera never moves: once a location is accepted, the
-	overview disappears and the player is already back in their normal view to
-	watch the squishy fly.
-
-	The viewport contains a reduced-detail clone of the authored map. Each 3x3
-	KeyPack is represented by one color/material-matched tile, reducing the live
-	map's 7,200 key meshes to 800 overview tiles without replacing it with generic
-	base rectangles. The camera keeps one world-aligned orientation for every
-	player, regardless of which base they own. Preview geometry stays in original
-	world coordinates, so screen clicks send the correct world X/Z point for
-	MergeService to validate.
+	Connects the launch button to the authored LaunchTargetingUI and
+	LaunchTargetMarkerUI instances in StarterGui. Map geometry and UI remain
+	entirely authored. Roblox does not replicate Camera instances, so the
+	controller creates only the ViewportFrame's local camera from authored
+	attributes; it never builds, resizes, replaces, or clears MapPreview.
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -21,7 +14,6 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Motion = require(script.Parent.Parent.UI.Motion)
@@ -32,16 +24,7 @@ local log = Log.new("LaunchController")
 local player = Players.LocalPlayer
 
 local WAIT_TIMEOUT = 10
-local TARGET_FOV = 25
-local MAP_PADDING = 35
 local RAY_DISTANCE = 5000
-local VIEWPORT_Z_INDEX = 40
--- Orders the selected-target icon above its developer-only radius box inside
--- the dedicated marker gui. Beating every other developer ScreenGui is the
--- display order's job, not this ZIndex.
-local TARGET_ICON_Z_INDEX = 1000
-local TARGET_MARKER_DISPLAY_ORDER = 10000
-local TARGET_ICON_ASSET = `rbxassetid://{Images.LaunchTarget}`
 local TARGET_ICON_WIDTH_SCALE = 0.056
 local TARGET_ICON_DROP_DISTANCE = 46
 local TARGET_ICON_START_SCALE = 0.3
@@ -53,28 +36,10 @@ local HINT_ERROR_COLOR = Color3.fromRGB(230, 0, 0)
 -- reject cue renders smoothly at render cadence.
 local HINT_REJECT_HOP_OFFSET = 7
 local HINT_REJECT_HOP = TweenInfo.new(0.13, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, 0, true)
--- The instruction and cancel controls live in this strip instead of covering
--- the map. Keep this in pixels because the controls themselves have a fixed
--- pixel height and should reserve the same amount at every resolution.
-local TARGETING_HEADER_HEIGHT = 88
 local LAUNCH_COOLDOWN_GRADIENT = ColorSequence.new({
 	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 95, 95)),
 	ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 25, 25)),
 })
-local SCENERY_ROOT_NAMES = {
-	Assets = true,
-	Baseplate = true,
-	Leaderboards = true,
-	["Nature Asset Pack - Studs Style"] = true,
-	SpawnLocation = true,
-	["Studded fountain"] = true,
-	StudParts = true,
-}
-
-type MapBounds = {
-	minimum: Vector3,
-	maximum: Vector3,
-}
 
 type TargetSelection = {
 	worldX: number,
@@ -83,11 +48,11 @@ type TargetSelection = {
 	radiusDiameter: number,
 }
 
-type MapLabel = {
-	position: Vector3,
-	text: string,
-	owner: Player?,
-	isLocalPlayerBase: boolean,
+type AuthoredMapUi = {
+	labels: { [string]: TextLabel },
+	ownerAvatar: ImageLabel,
+	ownerName: TextLabel,
+	ownerNameOffset: UDim2,
 }
 
 local LaunchController = {}
@@ -122,610 +87,8 @@ local hintText: TextLabel? = nil
 local hintRestPosition: UDim2? = nil
 local hintMotion: Motion.Handle? = nil
 
-local function getMapLayout(): Instance?
-	return Workspace:FindFirstChild("MapLayout")
-end
-
 local function radiusDebugEnabled(): boolean
 	return player:GetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE) == true
-end
-
-local function includePartBounds(minimum: Vector3, maximum: Vector3, part: BasePart): (Vector3, Vector3)
-	local half = part.Size / 2
-	for x = -1, 1, 2 do
-		for y = -1, 1, 2 do
-			for z = -1, 1, 2 do
-				local corner = part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
-				minimum = Vector3.new(
-					math.min(minimum.X, corner.X),
-					math.min(minimum.Y, corner.Y),
-					math.min(minimum.Z, corner.Z)
-				)
-				maximum = Vector3.new(
-					math.max(maximum.X, corner.X),
-					math.max(maximum.Y, corner.Y),
-					math.max(maximum.Z, corner.Z)
-				)
-			end
-		end
-	end
-	return minimum, maximum
-end
-
-local function calculateMapBounds(mapLayout: Instance): MapBounds?
-	local minimum = Vector3.new(math.huge, math.huge, math.huge)
-	local maximum = Vector3.new(-math.huge, -math.huge, -math.huge)
-	local found = false
-
-	local centerMap = mapLayout:FindFirstChild("CenterMap")
-	if centerMap ~= nil and centerMap:IsA("BasePart") then
-		found = true
-		minimum, maximum = includePartBounds(minimum, maximum, centerMap)
-	end
-
-	local basesFolder = mapLayout:FindFirstChild("Bases")
-	if basesFolder ~= nil then
-		for _, child in basesFolder:GetChildren() do
-			if child:IsA("BasePart") and string.match(child.Name, "^Base%d+$") ~= nil then
-				found = true
-				minimum, maximum = includePartBounds(minimum, maximum, child)
-			end
-		end
-	end
-
-	return if found then { minimum = minimum, maximum = maximum } else nil
-end
-
-local function createPreviewPart(source: BasePart, parent: Instance, name: string, transparency: number?): Part
-	local part = Instance.new("Part")
-	part.Name = name
-	part.Size = source.Size
-	part.CFrame = source.CFrame
-	part.Color = source.Color
-	part.Material = source.Material
-	part.Transparency = transparency or source.Transparency
-	part.Reflectance = source.Reflectance
-	if source:IsA("Part") then
-		part.Shape = source.Shape
-		part.TopSurface = source.TopSurface
-		part.BottomSurface = source.BottomSurface
-		part.LeftSurface = source.LeftSurface
-		part.RightSurface = source.RightSurface
-		part.FrontSurface = source.FrontSurface
-		part.BackSurface = source.BackSurface
-	else
-		part.Shape = Enum.PartType.Block
-	end
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanTouch = false
-	part.CanQuery = true
-	part.CastShadow = false
-	part.Parent = parent
-	return part
-end
-
-local function createMapLabel(
-	parent: ViewportFrame,
-	camera: Camera,
-	position: Vector3,
-	text: string,
-	owner: Player?,
-	isLocalPlayerBase: boolean
-)
-	local cameraPoint = camera.CFrame:PointToObjectSpace(position)
-	local depth = -cameraPoint.Z
-	if depth <= 0 then
-		return
-	end
-	local size = parent.AbsoluteSize
-	local aspect = if size.Y > 0 then size.X / size.Y else 16 / 9
-	local tangent = math.tan(math.rad(camera.FieldOfView) / 2)
-	local normalizedX = cameraPoint.X / (depth * tangent * aspect)
-	local normalizedY = cameraPoint.Y / (depth * tangent)
-	local xScale = (normalizedX + 1) / 2
-	local yScale = (1 - normalizedY) / 2
-
-	if owner ~= nil then
-		local avatar = Instance.new("ImageLabel")
-		avatar.Name = "BaseOwnerAvatar"
-		avatar.AnchorPoint = Vector2.new(0.5, 0.5)
-		avatar.Position = UDim2.fromScale(xScale, yScale)
-		avatar.Size = UDim2.fromOffset(62, 62)
-		avatar.BackgroundColor3 = Color3.fromRGB(53, 42, 67)
-		avatar.BackgroundTransparency = 0.04
-		avatar.Image = `rbxthumb://type=AvatarHeadShot&id={owner.UserId}&w=150&h=150`
-		avatar.ScaleType = Enum.ScaleType.Crop
-		avatar.ZIndex = VIEWPORT_Z_INDEX + 1
-		avatar.Parent = parent
-
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(1, 0)
-		corner.Parent = avatar
-
-		local stroke = Instance.new("UIStroke")
-		stroke.Color = if isLocalPlayerBase then Color3.fromRGB(255, 232, 92) else Color3.fromRGB(255, 244, 250)
-		stroke.Thickness = 3
-		stroke.Transparency = 0.04
-		stroke.Parent = avatar
-
-		local nameLabel = Instance.new("TextLabel")
-		nameLabel.Name = "BaseOwnerName"
-		nameLabel.AnchorPoint = Vector2.new(0.5, 0)
-		nameLabel.Position = UDim2.new(xScale, 0, yScale, 34)
-		nameLabel.Size = UDim2.fromOffset(116, 24)
-		nameLabel.BackgroundTransparency = 1
-		nameLabel.BorderSizePixel = 0
-		nameLabel.Font = Enum.Font.FredokaOne
-		nameLabel.Text = owner.DisplayName
-		nameLabel.TextColor3 = Color3.new(1, 1, 1)
-		nameLabel.TextScaled = true
-		nameLabel.TextStrokeTransparency = 1
-		nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
-		nameLabel.ZIndex = VIEWPORT_Z_INDEX + 2
-		nameLabel.Parent = parent
-
-		local nameStroke = Instance.new("UIStroke")
-		nameStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
-		nameStroke.Color = Color3.new(0, 0, 0)
-		nameStroke.Thickness = 2.5
-		nameStroke.Transparency = 0
-		nameStroke.Parent = nameLabel
-
-		local namePadding = Instance.new("UIPadding")
-		namePadding.PaddingLeft = UDim.new(0, 6)
-		namePadding.PaddingRight = UDim.new(0, 6)
-		namePadding.Parent = nameLabel
-
-		return
-	end
-
-	local label = Instance.new("TextLabel")
-	label.Name = text .. "Label"
-	label.AnchorPoint = Vector2.new(0.5, 0.5)
-	label.Position = UDim2.fromScale(xScale, yScale)
-	label.Size = UDim2.fromOffset(96, 26)
-	label.BackgroundColor3 = Color3.fromRGB(53, 42, 67)
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.FredokaOne
-	label.Text = text
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.TextScaled = true
-	label.TextStrokeColor3 = Color3.fromRGB(69, 42, 62)
-	label.TextStrokeTransparency = 0.2
-	label.ZIndex = VIEWPORT_Z_INDEX + 1
-	label.Parent = parent
-end
-
-local function averageKeyPackColor(parts: { BasePart }): Color3
-	local red = 0
-	local green = 0
-	local blue = 0
-	for _, part in parts do
-		red += part.Color.R
-		green += part.Color.G
-		blue += part.Color.B
-	end
-	local count = math.max(#parts, 1)
-	return Color3.new(red / count, green / count, blue / count)
-end
-
--- The authored bases use 100 KeyPack folders containing a 3x3 group each.
--- One overview tile per pack retains their real arrangement and average theme
--- color while keeping this transient viewport comfortably below 1,000 parts.
-local function addKeycapPackPreviews(base: BasePart, worldModel: WorldModel)
-	local keycaps = base:FindFirstChild("KeyCaps")
-	if keycaps == nil then
-		return
-	end
-
-	for _, pack in keycaps:GetChildren() do
-		local keys: { BasePart } = {}
-		for _, child in pack:GetChildren() do
-			if child:IsA("BasePart") then
-				table.insert(keys, child)
-			end
-		end
-		local reference = keys[1]
-		if reference == nil then
-			continue
-		end
-
-		local rotation = reference.CFrame.Rotation
-		local minimum = Vector3.new(math.huge, math.huge, math.huge)
-		local maximum = Vector3.new(-math.huge, -math.huge, -math.huge)
-		for _, key in keys do
-			local localPosition = rotation:PointToObjectSpace(key.Position)
-			local halfSize = key.Size / 2
-			minimum = Vector3.new(
-				math.min(minimum.X, localPosition.X - halfSize.X),
-				math.min(minimum.Y, localPosition.Y - halfSize.Y),
-				math.min(minimum.Z, localPosition.Z - halfSize.Z)
-			)
-			maximum = Vector3.new(
-				math.max(maximum.X, localPosition.X + halfSize.X),
-				math.max(maximum.Y, localPosition.Y + halfSize.Y),
-				math.max(maximum.Z, localPosition.Z + halfSize.Z)
-			)
-		end
-
-		local localCenter = (minimum + maximum) / 2
-		local preview = Instance.new("Part")
-		preview.Name = "KeyPackPreview"
-		preview.Size = maximum - minimum - Vector3.new(0.18, 0, 0.18)
-		preview.CFrame = CFrame.new(rotation:PointToWorldSpace(localCenter)) * rotation
-		preview.Color = averageKeyPackColor(keys)
-		preview.Material = reference.Material
-		preview.Transparency = reference.Transparency
-		preview.Reflectance = reference.Reflectance
-		preview.Anchored = true
-		preview.CanCollide = false
-		preview.CanTouch = false
-		-- The targeting ray must land on the visible keycap surface rather
-		-- than the lower base slab, or the cursor ring renders underneath it.
-		preview.CanQuery = true
-		preview.CastShadow = false
-		preview.TopSurface = Enum.SurfaceType.Smooth
-		preview.BottomSurface = Enum.SurfaceType.Smooth
-		preview.Parent = worldModel
-	end
-end
-
--- Condensing each 3x3 pack leaves tiny visual seams between overview tiles.
--- A ray that lands in one of those seams would otherwise hit the base slab
--- below keycap height and bury the wide target ring under adjacent tiles.
-local function addBaseTargetSurface(base: BasePart, worldModel: WorldModel)
-	local highestY = base.Position.Y + base.Size.Y / 2
-	local keycaps = base:FindFirstChild("KeyCaps")
-	if keycaps ~= nil then
-		for _, descendant in keycaps:GetDescendants() do
-			if not descendant:IsA("BasePart") then
-				continue
-			end
-			local cframe = descendant.CFrame
-			local size = descendant.Size
-			local verticalHalfExtent = math.abs(cframe.RightVector.Y) * size.X / 2
-				+ math.abs(cframe.UpVector.Y) * size.Y / 2
-				+ math.abs(cframe.LookVector.Y) * size.Z / 2
-			highestY = math.max(highestY, descendant.Position.Y + verticalHalfExtent)
-		end
-	end
-
-	local surface = Instance.new("Part")
-	surface.Name = base.Name .. "TargetSurface"
-	surface.Size = Vector3.new(base.Size.X, 0.08, base.Size.Z)
-	surface.CFrame = CFrame.new(base.Position.X, highestY + 0.05, base.Position.Z) * base.CFrame.Rotation
-	surface.Transparency = 1
-	surface.Anchored = true
-	surface.CanCollide = false
-	surface.CanTouch = false
-	surface.CanQuery = true
-	surface.CastShadow = false
-	surface.Parent = worldModel
-end
-
-local function cloneVisualPart(source: BasePart, parent: Instance, name: string, keepSurfaceGuis: boolean): BasePart
-	local clone = source:Clone()
-	for _, child in clone:GetChildren() do
-		local keep = child:IsA("DataModelMesh")
-			or child:IsA("SurfaceAppearance")
-			or child:IsA("Decal")
-			or child:IsA("Texture")
-			or (keepSurfaceGuis and child:IsA("SurfaceGui"))
-		if not keep then
-			child:Destroy()
-		end
-	end
-	clone.Name = name
-	clone.CFrame = source.CFrame
-	clone.Anchored = true
-	clone.CanCollide = false
-	clone.CanTouch = false
-	-- Visible scenery participates in preview-only raycasts so the cursor
-	-- always rides above what the player sees. Only X/Z is sent to the server.
-	clone.CanQuery = true
-	clone.CastShadow = false
-	clone.Parent = parent
-	return clone
-end
-
-local function cloneSquishyPreview(source: BasePart, worldModel: WorldModel)
-	cloneVisualPart(source, worldModel, "SquishyPreview", false)
-end
-
-local function addCurrentSquishyPreviews(basesFolder: Instance, worldModel: WorldModel)
-	for _, base in basesFolder:GetChildren() do
-		local objects = base:FindFirstChild("MergeObjects")
-		if objects == nil then
-			continue
-		end
-		for _, child in objects:GetChildren() do
-			if not child:IsA("BasePart") or child.Name ~= "MergeObject" then
-				continue
-			end
-			cloneSquishyPreview(child, worldModel)
-		end
-	end
-end
-
--- MapLayout contains the targeting geometry, while the playable place keeps
--- grass, trees, fountain, signs, and other authored scenery in neighboring
--- Workspace roots. Clone their visible parts individually so scripts,
--- constraints, prompts, and nested models cannot run inside the WorldModel.
-local function addWorldSceneryPreviews(bounds: MapBounds, worldModel: WorldModel)
-	local horizontalPadding = MAP_PADDING * 2
-	local function isInsideOverview(part: BasePart): boolean
-		return part.Position.X >= bounds.minimum.X - horizontalPadding
-			and part.Position.X <= bounds.maximum.X + horizontalPadding
-			and part.Position.Z >= bounds.minimum.Z - horizontalPadding
-			and part.Position.Z <= bounds.maximum.Z + horizontalPadding
-	end
-
-	for _, root in Workspace:GetChildren() do
-		if SCENERY_ROOT_NAMES[root.Name] ~= true then
-			continue
-		end
-
-		if root:IsA("BasePart") and root.Transparency < 1 and isInsideOverview(root) then
-			cloneVisualPart(root, worldModel, root.Name .. "Preview", true)
-		end
-		for _, descendant in root:GetDescendants() do
-			if descendant:IsA("BasePart") and descendant.Transparency < 1 and isInsideOverview(descendant) then
-				cloneVisualPart(descendant, worldModel, descendant.Name .. "Preview", true)
-			end
-		end
-	end
-end
-
-local function addPlayerBaseOutline(base: BasePart, worldModel: WorldModel)
-	local color = Color3.fromRGB(255, 232, 92)
-	local width = 1.5
-	local height = base.Size.Y / 2 + 3
-	local expandedX = base.Size.X + 8
-	local expandedZ = base.Size.Z + 8
-	local function edge(name: string, size: Vector3, offset: Vector3)
-		local part = Instance.new("Part")
-		part.Name = name
-		part.Size = size
-		part.CFrame = base.CFrame * CFrame.new(offset)
-		part.Color = color
-		part.Material = Enum.Material.Neon
-		part.Transparency = 0.1
-		part.Anchored = true
-		part.CanCollide = false
-		part.CanTouch = false
-		part.CanQuery = false
-		part.CastShadow = false
-		part.Parent = worldModel
-	end
-
-	edge("YourBaseTop", Vector3.new(expandedX, 0.35, width), Vector3.new(0, height, -expandedZ / 2))
-	edge("YourBaseBottom", Vector3.new(expandedX, 0.35, width), Vector3.new(0, height, expandedZ / 2))
-	edge("YourBaseLeft", Vector3.new(width, 0.35, expandedZ), Vector3.new(-expandedX / 2, height, 0))
-	edge("YourBaseRight", Vector3.new(width, 0.35, expandedZ), Vector3.new(expandedX / 2, height, 0))
-end
-
-local function setOverviewCamera(camera: Camera, bounds: MapBounds, mapCenter: Vector3)
-	-- Keep the authored map's north edge at the top for everyone. In particular,
-	-- do not derive this from AssignedBase: base assignment must only change the
-	-- ownership marker, never the player's view of the map.
-	local screenUp = Vector3.new(0, 0, -1)
-	local screenRight = screenUp:Cross(Vector3.yAxis).Unit
-	local halfWidth = 0
-	local halfDepth = 0
-	for x = -1, 1, 2 do
-		for z = -1, 1, 2 do
-			local corner = Vector3.new(
-				if x < 0 then bounds.minimum.X else bounds.maximum.X,
-				mapCenter.Y,
-				if z < 0 then bounds.minimum.Z else bounds.maximum.Z
-			)
-			local offset = corner - mapCenter
-			halfWidth = math.max(halfWidth, math.abs(offset:Dot(screenRight)))
-			halfDepth = math.max(halfDepth, math.abs(offset:Dot(screenUp)))
-		end
-	end
-	halfWidth += MAP_PADDING
-	halfDepth += MAP_PADDING
-	local liveCamera = Workspace.CurrentCamera
-	local viewportSize = if liveCamera ~= nil
-		then Vector2.new(liveCamera.ViewportSize.X, math.max(1, liveCamera.ViewportSize.Y - TARGETING_HEADER_HEIGHT))
-		else Vector2.new(16, 9)
-	local aspect = if viewportSize.Y > 0 then viewportSize.X / viewportSize.Y else 16 / 9
-	local verticalRadians = math.rad(TARGET_FOV)
-	local horizontalRadians = 2 * math.atan(math.tan(verticalRadians / 2) * aspect)
-	local heightForDepth = halfDepth / math.tan(verticalRadians / 2)
-	local heightForWidth = halfWidth / math.tan(horizontalRadians / 2)
-	local height = math.max(heightForDepth, heightForWidth, 80)
-	local lookAt = Vector3.new(mapCenter.X, bounds.maximum.Y, mapCenter.Z)
-
-	camera.FieldOfView = TARGET_FOV
-	camera.CFrame = CFrame.lookAt(lookAt + Vector3.new(0, height, 0), lookAt, screenUp)
-	camera.Focus = CFrame.new(lookAt)
-end
-
-local function createOverview(
-	viewport: ViewportFrame,
-	markerGui: ScreenGui,
-	mapLayout: Instance,
-	bounds: MapBounds
-): (ViewportFrame, WorldModel, Camera, Frame, ImageLabel, Frame)
-	viewport.CurrentCamera = nil
-	for _, child in viewport:GetChildren() do
-		child:Destroy()
-	end
-
-	local worldModel = Instance.new("WorldModel")
-	worldModel.Name = "MapPreview"
-	worldModel.Parent = viewport
-	local labels: { MapLabel } = {}
-	addWorldSceneryPreviews(bounds, worldModel)
-
-	local centerMap = mapLayout:FindFirstChild("CenterMap")
-	local mapCenter = (bounds.minimum + bounds.maximum) / 2
-	if centerMap ~= nil and centerMap:IsA("BasePart") then
-		createPreviewPart(centerMap, worldModel, "CenterMap")
-		mapCenter = centerMap.Position
-		table.insert(labels, {
-			position = centerMap.Position,
-			text = "CENTER",
-			owner = nil,
-			isLocalPlayerBase = false,
-		})
-	end
-
-	local basesFolder = mapLayout:FindFirstChild("Bases")
-	local playerBase: BasePart? = nil
-	if basesFolder ~= nil then
-		local assignedBase = player:GetAttribute("AssignedBase")
-		if typeof(assignedBase) == "string" then
-			local assigned = basesFolder:FindFirstChild(assignedBase)
-			if assigned ~= nil and assigned:IsA("BasePart") then
-				playerBase = assigned
-			end
-		end
-
-		for _, child in basesFolder:GetChildren() do
-			if not child:IsA("BasePart") or string.match(child.Name, "^Base%d+$") == nil then
-				continue
-			end
-			createPreviewPart(child, worldModel, child.Name)
-			addKeycapPackPreviews(child, worldModel)
-			addBaseTargetSurface(child, worldModel)
-			local isLocalPlayerBase = child == playerBase
-			local owner: Player? = nil
-			local ownerUserId = child:GetAttribute("OwnerUserId")
-			if typeof(ownerUserId) == "number" then
-				owner = Players:GetPlayerByUserId(ownerUserId)
-			end
-			-- AssignedBase reaches the local client independently from the base
-			-- attribute. Preserve the local portrait if those replications land on
-			-- adjacent frames while the targeting UI is being created.
-			if isLocalPlayerBase then
-				owner = player
-			end
-			table.insert(labels, {
-				position = child.Position,
-				text = string.upper(child.Name),
-				owner = owner,
-				isLocalPlayerBase = isLocalPlayerBase,
-			})
-		end
-		addCurrentSquishyPreviews(basesFolder, worldModel)
-		if playerBase ~= nil then
-			addPlayerBaseOutline(playerBase, worldModel)
-		end
-	end
-
-	-- This invisible floor is queryable but not rendered. It deliberately spans
-	-- gaps between authored map parts so every point in the overview can launch.
-	local targetPlane = Instance.new("Part")
-	targetPlane.Name = "TargetPlane"
-	targetPlane.Size = Vector3.new(bounds.maximum.X - bounds.minimum.X, 0.1, bounds.maximum.Z - bounds.minimum.Z)
-	targetPlane.CFrame = CFrame.new(
-		(bounds.minimum.X + bounds.maximum.X) / 2,
-		bounds.minimum.Y - 0.1,
-		(bounds.minimum.Z + bounds.maximum.Z) / 2
-	)
-	targetPlane.Transparency = 1
-	targetPlane.Anchored = true
-	targetPlane.CanCollide = false
-	targetPlane.CanTouch = false
-	targetPlane.CanQuery = true
-	targetPlane.Parent = worldModel
-
-	local camera = Instance.new("Camera")
-	camera.Name = "LaunchMapCamera"
-	camera.Parent = viewport
-	setOverviewCamera(camera, bounds, mapCenter)
-	viewport.CurrentCamera = camera
-	for _, label in labels do
-		createMapLabel(viewport, camera, label.position, label.text, label.owner, label.isLocalPlayerBase)
-	end
-
-	-- This marker is deliberately hidden until the player commits to a point.
-	-- Keeping it in a top-most ScreenGui lets the icon land at the selected map
-	-- position without clipping against the ViewportFrame's bounds.
-	local iconHolder = Instance.new("Frame")
-	iconHolder.Name = "LaunchTargetIconHolder"
-	iconHolder.AnchorPoint = Vector2.new(0.5, 0.5)
-	-- The aspect constraint derives the height from this width-relative box.
-	iconHolder.Size = UDim2.fromScale(TARGET_ICON_WIDTH_SCALE, 1)
-	iconHolder.BackgroundTransparency = 1
-	iconHolder.BorderSizePixel = 0
-	iconHolder.Visible = false
-	iconHolder.ZIndex = TARGET_ICON_Z_INDEX
-	iconHolder.Parent = markerGui
-
-	local iconAspect = Instance.new("UIAspectRatioConstraint")
-	iconAspect.Name = "SquareAspect"
-	iconAspect.AspectRatio = 1
-	iconAspect.DominantAxis = Enum.DominantAxis.Width
-	iconAspect.Parent = iconHolder
-
-	local icon = Instance.new("ImageLabel")
-	icon.Name = "Icon"
-	icon.AnchorPoint = Vector2.new(0.5, 0.5)
-	icon.Position = UDim2.fromScale(0.5, 0.5)
-	icon.Size = UDim2.fromScale(1, 1)
-	icon.BackgroundTransparency = 1
-	icon.BorderSizePixel = 0
-	icon.Image = TARGET_ICON_ASSET
-	icon.ScaleType = Enum.ScaleType.Fit
-	icon.ZIndex = TARGET_ICON_Z_INDEX
-	icon.Parent = iconHolder
-
-	-- A square centered on the committed point exposes the exact impact diameter.
-	-- This is developer-only presentation: the authenticated dev console owns the
-	-- toggle, while the shared radius remains server-owned gameplay configuration.
-	local debugBox = Instance.new("Frame")
-	debugBox.Name = "LaunchRadiusDebugBox"
-	debugBox.AnchorPoint = Vector2.new(0.5, 0.5)
-	debugBox.BackgroundTransparency = 1
-	debugBox.BorderSizePixel = 0
-	debugBox.Visible = false
-	debugBox.ZIndex = TARGET_ICON_Z_INDEX - 1
-	debugBox.Parent = markerGui
-
-	local debugStroke = Instance.new("UIStroke")
-	debugStroke.Color = Color3.fromRGB(88, 255, 238)
-	debugStroke.Thickness = 2
-	debugStroke.Transparency = 0.05
-	debugStroke.Parent = debugBox
-
-	local debugLabel = Instance.new("TextLabel")
-	debugLabel.Name = "RadiusLabel"
-	debugLabel.Position = UDim2.fromOffset(4, 4)
-	debugLabel.Size = UDim2.fromOffset(116, 20)
-	debugLabel.BackgroundColor3 = Color3.fromRGB(12, 27, 31)
-	debugLabel.BackgroundTransparency = 0.15
-	debugLabel.BorderSizePixel = 0
-	debugLabel.Font = Enum.Font.Code
-	debugLabel.Text = `RADIUS {MergeConfig.LAUNCH_IMPACT_RADIUS} STUDS`
-	debugLabel.TextColor3 = Color3.fromRGB(184, 255, 248)
-	debugLabel.TextSize = 12
-	debugLabel.TextXAlignment = Enum.TextXAlignment.Left
-	debugLabel.ZIndex = TARGET_ICON_Z_INDEX
-	debugLabel.Parent = debugBox
-
-	local debugLabelPadding = Instance.new("UIPadding")
-	debugLabelPadding.PaddingLeft = UDim.new(0, 4)
-	debugLabelPadding.Parent = debugLabel
-
-	return viewport, worldModel, camera, iconHolder, icon, debugBox
-end
-
-local function createTargetMarkerGui(): ScreenGui
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "LaunchTargetMarkerUI"
-	gui.DisplayOrder = TARGET_MARKER_DISPLAY_ORDER
-	-- selectionAt works in inset space because input.Position and the viewport's
-	-- AbsolutePosition both exclude the inset. This gui must use that same space.
-	gui.IgnoreGuiInset = false
-	gui.ResetOnSpawn = false
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = player:WaitForChild("PlayerGui")
-	return gui
 end
 
 local function cancelHintMotion()
@@ -741,18 +104,147 @@ local function cancelHintMotion()
 	end
 end
 
-local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?)
+local function resolveAuthoredMapUi(viewport: ViewportFrame): AuthoredMapUi?
+	local labels: { [string]: TextLabel } = {}
+	for _, text in { "CENTER", "BASE1", "BASE2", "BASE3", "BASE4", "BASE5", "BASE6", "BASE7", "BASE8" } do
+		local instance = viewport:FindFirstChild(text .. "Label")
+		if instance == nil or not instance:IsA("TextLabel") then
+			log.warn(`LaunchTargetingUI.LaunchMapViewport.{text}Label is missing`)
+			return nil
+		end
+		labels[text] = instance
+	end
+
+	local avatarInstance = viewport:FindFirstChild("BaseOwnerAvatar")
+	if avatarInstance == nil or not avatarInstance:IsA("ImageLabel") then
+		log.warn("LaunchTargetingUI.LaunchMapViewport.BaseOwnerAvatar is missing")
+		return nil
+	end
+	local nameInstance = viewport:FindFirstChild("BaseOwnerName")
+	if nameInstance == nil or not nameInstance:IsA("TextLabel") then
+		log.warn("LaunchTargetingUI.LaunchMapViewport.BaseOwnerName is missing")
+		return nil
+	end
+
+	return {
+		labels = labels,
+		ownerAvatar = avatarInstance,
+		ownerName = nameInstance,
+		ownerNameOffset = nameInstance.Position - avatarInstance.Position,
+	}
+end
+
+local function resolveAuthoredOverview(viewport: ViewportFrame): (WorldModel?, Camera?)
+	local worldInstance = viewport:FindFirstChild("MapPreview")
+	if worldInstance == nil or not worldInstance:IsA("WorldModel") then
+		log.warn("LaunchTargetingUI.LaunchMapViewport.MapPreview is missing")
+		return nil, nil
+	end
+
+	local camera: Camera? = nil
+	local cameraInstance = viewport:FindFirstChild("LaunchMapCamera")
+	if cameraInstance ~= nil and cameraInstance:IsA("Camera") then
+		camera = cameraInstance
+	else
+		local cameraCFrame = viewport:GetAttribute("LaunchCameraCFrame")
+		local cameraFocus = viewport:GetAttribute("LaunchCameraFocus")
+		local cameraFieldOfView = viewport:GetAttribute("LaunchCameraFieldOfView")
+		if
+			typeof(cameraCFrame) ~= "CFrame"
+			or typeof(cameraFocus) ~= "CFrame"
+			or typeof(cameraFieldOfView) ~= "number"
+		then
+			log.warn("LaunchTargetingUI.LaunchMapViewport camera attributes are missing")
+			return nil, nil
+		end
+
+		camera = Instance.new("Camera")
+		camera.Name = "LaunchMapCamera"
+		camera.CFrame = cameraCFrame
+		camera.Focus = cameraFocus
+		camera.FieldOfView = cameraFieldOfView
+		camera.Parent = viewport
+	end
+
+	viewport.CurrentCamera = camera
+	return worldInstance, camera
+end
+
+local function updateAuthoredOwnership(authoredUi: AuthoredMapUi)
+	authoredUi.ownerAvatar.Visible = false
+	authoredUi.ownerName.Visible = false
+	for text, label in authoredUi.labels do
+		label.Text = text
+		label.Visible = true
+	end
+
+	local assignedBase = player:GetAttribute("AssignedBase")
+	if typeof(assignedBase) ~= "string" then
+		return
+	end
+	local baseLabel = authoredUi.labels[string.upper(assignedBase)]
+	if baseLabel == nil then
+		log.warn(`LaunchTargetingUI has no authored label for {assignedBase}`)
+		return
+	end
+
+	baseLabel.Visible = false
+	authoredUi.ownerAvatar.Position = baseLabel.Position
+	authoredUi.ownerAvatar.Image = `rbxthumb://type=AvatarHeadShot&id={player.UserId}&w=150&h=150`
+	authoredUi.ownerAvatar.Visible = true
+	authoredUi.ownerName.Position = baseLabel.Position + authoredUi.ownerNameOffset
+	authoredUi.ownerName.Text = player.DisplayName
+	authoredUi.ownerName.Visible = true
+
+	local stroke = authoredUi.ownerAvatar:FindFirstChildOfClass("UIStroke")
+	if stroke ~= nil then
+		stroke.Color = Color3.fromRGB(255, 232, 92)
+	end
+end
+
+local function resolveTargetMarkerUi(): (ScreenGui?, Frame?, ImageLabel?, Frame?)
+	local playerGui = player:WaitForChild("PlayerGui")
+	local guiInstance = playerGui:WaitForChild("LaunchTargetMarkerUI", WAIT_TIMEOUT)
+	if guiInstance == nil or not guiInstance:IsA("ScreenGui") then
+		log.warn("PlayerGui.LaunchTargetMarkerUI did not appear -- launch targeting disabled")
+		return nil, nil, nil, nil
+	end
+
+	local iconHolderInstance = guiInstance:FindFirstChild("LaunchTargetIconHolder")
+	local iconInstance = if iconHolderInstance ~= nil then iconHolderInstance:FindFirstChild("Icon") else nil
+	local debugBoxInstance = guiInstance:FindFirstChild("LaunchRadiusDebugBox")
+	if iconHolderInstance == nil or not iconHolderInstance:IsA("Frame") then
+		log.warn("LaunchTargetMarkerUI.LaunchTargetIconHolder is missing")
+		return nil, nil, nil, nil
+	end
+	if iconInstance == nil or not iconInstance:IsA("ImageLabel") then
+		log.warn("LaunchTargetMarkerUI.LaunchTargetIconHolder.Icon is missing")
+		return nil, nil, nil, nil
+	end
+	if debugBoxInstance == nil or not debugBoxInstance:IsA("Frame") then
+		log.warn("LaunchTargetMarkerUI.LaunchRadiusDebugBox is missing")
+		return nil, nil, nil, nil
+	end
+
+	return guiInstance, iconHolderInstance, iconInstance, debugBoxInstance
+end
+
+local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?, AuthoredMapUi?)
 	local playerGui = player:WaitForChild("PlayerGui")
 	local uiInstance = playerGui:WaitForChild("LaunchTargetingUI", WAIT_TIMEOUT)
 	if uiInstance == nil or not uiInstance:IsA("ScreenGui") then
 		log.warn("PlayerGui.LaunchTargetingUI did not appear -- launch targeting disabled")
-		return nil, nil
+		return nil, nil, nil
 	end
 
 	local viewportInstance = uiInstance:FindFirstChild("LaunchMapViewport")
 	if viewportInstance == nil or not viewportInstance:IsA("ViewportFrame") then
 		log.warn("LaunchTargetingUI.LaunchMapViewport is missing")
-		return nil, nil
+		return nil, nil, nil
+	end
+	local authoredMapUi = resolveAuthoredMapUi(viewportInstance)
+	if authoredMapUi == nil then
+		return nil, nil, nil
 	end
 
 	local hintInstance = uiInstance:FindFirstChild("LaunchTargetingHint")
@@ -761,11 +253,11 @@ local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?)
 	local cancelInstance = if hintInstance ~= nil then hintInstance:FindFirstChild("Cancel") else nil
 	if labelInstance == nil or not labelInstance:IsA("TextLabel") then
 		log.warn("LaunchTargetingUI.LaunchTargetingHint.BG.TextLabel is missing")
-		return nil, nil
+		return nil, nil, nil
 	end
 	if cancelInstance == nil or not cancelInstance:IsA("TextButton") then
 		log.warn("LaunchTargetingUI.LaunchTargetingHint.Cancel is missing")
-		return nil, nil
+		return nil, nil, nil
 	end
 
 	if hintText ~= labelInstance then
@@ -790,7 +282,7 @@ local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?)
 			LaunchController.cancelTargeting()
 		end)
 	end
-	return uiInstance, viewportInstance
+	return uiInstance, viewportInstance, authoredMapUi
 end
 
 local function setHint(message: string, isError: boolean?)
@@ -843,16 +335,9 @@ local function destroyTargetingVisuals()
 	end
 	if gui ~= nil and gui.Parent ~= nil then
 		gui.Enabled = false
-		local viewport = gui:FindFirstChild("LaunchMapViewport")
-		if viewport ~= nil and viewport:IsA("ViewportFrame") then
-			viewport.CurrentCamera = nil
-			for _, child in viewport:GetChildren() do
-				child:Destroy()
-			end
-		end
 	end
-	if markerGui ~= nil then
-		markerGui:Destroy()
+	if markerGui ~= nil and markerGui.Parent ~= nil then
+		markerGui.Enabled = false
 	end
 end
 
@@ -1044,29 +529,33 @@ local function beginTargeting()
 		return
 	end
 
-	local mapLayout = getMapLayout()
 	local ui = dropLaunchUi
-	if mapLayout == nil or ui == nil or ui.Parent == nil then
-		log.warn("MapLayout or DropLaunchUI is unavailable -- launch targeting skipped")
-		return
-	end
-	local bounds = calculateMapBounds(mapLayout)
-	if bounds == nil then
-		log.warn("MapLayout has no usable overview parts -- launch targeting skipped")
+	if ui == nil or ui.Parent == nil then
+		log.warn("DropLaunchUI is unavailable -- launch targeting skipped")
 		return
 	end
 
-	local overlayGui, authoredViewport = resolveTargetingUi()
-	if overlayGui == nil or authoredViewport == nil then
+	local overlayGui, authoredViewport, authoredMapUi = resolveTargetingUi()
+	if overlayGui == nil or authoredViewport == nil or authoredMapUi == nil then
+		return
+	end
+	local markerGui, iconHolder, icon, debugBox = resolveTargetMarkerUi()
+	if markerGui == nil or iconHolder == nil or icon == nil or debugBox == nil then
 		return
 	end
 	overlayGui.Enabled = false
+	markerGui.Enabled = false
+	iconHolder.Visible = false
+	debugBox.Visible = false
 
-	local markerGui = createTargetMarkerGui()
+	local worldModel, camera = resolveAuthoredOverview(authoredViewport)
+	if worldModel == nil or camera == nil then
+		return
+	end
+	updateAuthoredOwnership(authoredMapUi)
+
 	targetMarkerGui = markerGui
-	local viewport, worldModel, camera, iconHolder, icon, debugBox =
-		createOverview(authoredViewport, markerGui, mapLayout, bounds)
-	overview = viewport
+	overview = authoredViewport
 	overviewWorld = worldModel
 	overviewCamera = camera
 	targetIconHolder = iconHolder
@@ -1077,6 +566,7 @@ local function beginTargeting()
 	playingAcceptedPlop = false
 	pendingSelection = nil
 	setHint("Choose anywhere on the map")
+	markerGui.Enabled = true
 	overlayGui.Enabled = true
 end
 
@@ -1166,6 +656,13 @@ local function watchPlayerGui()
 					authoredGui.Enabled = false
 				end
 			end)
+		elseif child.Name == "LaunchTargetMarkerUI" then
+			LaunchController.cancelTargeting()
+			targetMarkerGui = nil
+			targetIconHolder = nil
+			targetIcon = nil
+			targetDebugBox = nil
+			child.Enabled = false
 		end
 	end)
 
@@ -1173,6 +670,12 @@ local function watchPlayerGui()
 		local authoredGui = resolveTargetingUi()
 		if authoredGui ~= nil then
 			authoredGui.Enabled = false
+		end
+	end)
+	task.spawn(function()
+		local markerGui = resolveTargetMarkerUi()
+		if markerGui ~= nil then
+			markerGui.Enabled = false
 		end
 	end)
 	bindLaunchButton()

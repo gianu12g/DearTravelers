@@ -471,7 +471,9 @@ local function createHealthBar(part: BasePart, statusBillboard: BillboardGui, ti
 
 	local bubbleStroke = Instance.new("UIStroke")
 	bubbleStroke.Color = Color3.fromRGB(255, 139, 180)
-	bubbleStroke.Thickness = 2
+	bubbleStroke.StrokeSizingMode = Enum.StrokeSizingMode.ScaledSize
+	-- 2px on the billboard's 116x52 design grid; the bubble's shortest axis there is 22px.
+	bubbleStroke.Thickness = 2 / 22
 	bubbleStroke.Parent = bubble
 
 	local track = Instance.new("Frame")
@@ -571,7 +573,11 @@ local function createLaunchCooldownCounter(part: BasePart, statusBillboard: Bill
 	local stroke = Instance.new("UIStroke")
 	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 	stroke.Color = Color3.fromRGB(126, 48, 76)
-	stroke.Thickness = 1.5
+	stroke.StrokeSizingMode = Enum.StrokeSizingMode.ScaledSize
+	-- 1.5px at the status billboard's 116x52 design reference. The counter's
+	-- shortest axis is its height: counterHeight studs at (116 / statusWidth)
+	-- px-per-stud on that grid.
+	stroke.Thickness = 1.5 / (counterHeight * (116 / statusWidth))
 	stroke.Parent = counter
 end
 

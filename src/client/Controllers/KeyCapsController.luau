@@ -1754,7 +1754,10 @@ local function createLetterGui(key: MeshPart): SurfaceGui?
 
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = LETTER_STROKE_NAME
-	stroke.Thickness = 1.5
+	stroke.StrokeSizingMode = Enum.StrokeSizingMode.ScaledSize
+	-- Same 1.5px as before: the label spans the Top face, so its shortest
+	-- pixel axis is min(X, Z) studs at the gui's PixelsPerStud.
+	stroke.Thickness = 1.5 / (math.min(key.Size.X, key.Size.Z) * surfaceGui.PixelsPerStud)
 	stroke.Color = Color3.new(0, 0, 0)
 	stroke.Parent = textLabel
 
