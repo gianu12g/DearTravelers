@@ -214,10 +214,10 @@ local MIGRATIONS: { (data: any) -> () } = {
 	end,
 }
 
-local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.1"
+local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.2"
 -- Studio writes to a separate DataStore, so persistence can be tested across
 -- Play sessions without ever touching production player profiles.
-local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.1_Studio"
+local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.2_Studio"
 local PROFILE_STORE_NAME = if RunService:IsStudio() then STUDIO_PROFILE_STORE_NAME else LIVE_PROFILE_STORE_NAME
 
 local DataService = {

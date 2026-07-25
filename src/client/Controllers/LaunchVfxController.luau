@@ -12,6 +12,7 @@ local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
+local AuthoredVfx = require(ReplicatedStorage.Shared.AuthoredVfx)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -34,43 +35,6 @@ local function scaleLaunchVfx(root: Instance, effectMultiplier: number?)
 	VfxScaler.scale(root, multiplier, VFX_SCALE_OPTIONS)
 end
 
-local function emitAuthoredBurst(root: Instance): number
-	local longestLifetime = 0
-	for _, descendant in root:GetDescendants() do
-		if not descendant:IsA("ParticleEmitter") then
-			continue
-		end
-
-		local countAttribute = descendant:GetAttribute("EmitCount")
-		if type(countAttribute) ~= "number" or countAttribute ~= countAttribute then
-			continue
-		end
-		local count = math.max(0, math.floor(countAttribute))
-		if count == 0 then
-			continue
-		end
-
-		local delayAttribute = descendant:GetAttribute("EmitDelay")
-		local emitDelay = if type(delayAttribute) == "number" and delayAttribute == delayAttribute
-			then math.max(0, delayAttribute)
-			else 0
-		longestLifetime = math.max(longestLifetime, emitDelay + descendant.Lifetime.Max)
-
-		if emitDelay == 0 then
-			descendant:Emit(count)
-		else
-			local emitter = descendant
-			task.delay(emitDelay, function()
-				if emitter.Parent ~= nil then
-					emitter:Emit(count)
-				end
-			end)
-		end
-	end
-
-	return longestLifetime
-end
-
 local function playExplosion(template: Attachment, position: Vector3)
 	local anchor = Instance.new("Part")
 	anchor.Name = "LaunchImpactVfx"
@@ -90,7 +54,7 @@ local function playExplosion(template: Attachment, position: Vector3)
 	explosion.Parent = anchor
 	scaleLaunchVfx(explosion, MergeConfig.LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER)
 
-	Debris:AddItem(anchor, emitAuthoredBurst(explosion) + VFX_LINGER)
+	Debris:AddItem(anchor, AuthoredVfx.emitBurst(explosion) + VFX_LINGER)
 end
 
 local function playGroundHit(template: BasePart, position: Vector3)
@@ -107,7 +71,7 @@ local function playGroundHit(template: BasePart, position: Vector3)
 	hit.Parent = Workspace
 	scaleLaunchVfx(hit)
 
-	Debris:AddItem(hit, emitAuthoredBurst(hit) + VFX_LINGER)
+	Debris:AddItem(hit, AuthoredVfx.emitBurst(hit) + VFX_LINGER)
 end
 
 local function play(templateName: string, position: Vector3)

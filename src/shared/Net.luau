@@ -49,21 +49,32 @@ end
 	parseValue() there still bounds-checks the string, but the wire shape
 	already rules out the dangerous shape.
 
-	targetUserId is float64, not uint32 -- uint32 tops out around 4.3 billion,
-	which real Roblox UserIds have already exceeded for newer accounts. float64
-	represents every UserId Roblox can issue exactly.
+	Every dev packet names its subject as `targetPlayer` -- a ByteNet.inst
+	reference to the actual Player -- rather than as a UserId number. The console
+	already HOLDS the instance (it picked it out of Players:GetPlayers()), so
+	encoding it as a number purely so the server can look it back up with
+	Players:GetPlayerByUserId adds a mapping that can fail while looking
+	perfectly valid from the client: the reply for "no player has that id" and
+	the reply for a stale id are the same, and the client has no way to tell
+	which it hit. A reference has no such step.
+
+	That is NOT a trust change. `inst` decodes to `Instance?` -- nil if the
+	sender referenced something the server cannot see -- and a client may
+	reference any instance it likes, so DevService still validates what it
+	decoded (`IsA("Player")` plus a live `Players` parent) before treating it as
+	a target. The reference removes a lookup, not a check.
 ]]
 return ByteNet.defineNamespace(NAMESPACE, function()
 	return {
 		-- client -> server
 		devRequestSnapshot = ByteNet.definePacket({
-			value = ByteNet.struct({ targetUserId = ByteNet.float64 }),
+			value = ByteNet.struct({ targetPlayer = ByteNet.inst }),
 		}),
 
 		-- server -> client
 		devSnapshot = ByteNet.definePacket({
 			value = ByteNet.struct({
-				targetUserId = ByteNet.float64,
+				targetPlayer = ByteNet.inst,
 				entries = ByteNet.array(ByteNet.struct({
 					path = ByteNet.array(ByteNet.string),
 					kind = ByteNet.string,
@@ -75,10 +86,33 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		-- client -> server
 		devSet = ByteNet.definePacket({
 			value = ByteNet.struct({
-				targetUserId = ByteNet.float64,
+				targetPlayer = ByteNet.inst,
 				path = ByteNet.array(ByteNet.string),
 				kind = ByteNet.string,
 				value = ByteNet.string,
+			}),
+		}),
+
+		--[[
+			client -> server. Adds a SIGNED amount to one existing numeric field.
+
+			This is not sugar over devSet. The console's "+10K coins" affordance
+			has to know the current balance to send an absolute value, and the
+			only balance it has is a snapshot up to SNAPSHOT_INTERVAL seconds old
+			-- two quick clicks then both compute from the same stale number and
+			the second silently erases the first. Sending the DELTA instead moves
+			the read next to the write, on the server, where nothing can
+			interleave between them.
+
+			The path is validated exactly as devSet's is, and the field must
+			already hold a number: this packet cannot create a key, cannot
+			overwrite a container, and cannot change a field's type.
+		]]
+		devAdd = ByteNet.definePacket({
+			value = ByteNet.struct({
+				targetPlayer = ByteNet.inst,
+				path = ByteNet.array(ByteNet.string),
+				amount = ByteNet.float64,
 			}),
 		}),
 
@@ -86,7 +120,29 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		-- access and resolves the selected in-server player before damage is
 		-- applied. The amount is intentionally server-owned, not client input.
 		devDamageSquishies = ByteNet.definePacket({
-			value = ByteNet.struct({ targetUserId = ByteNet.float64 }),
+			value = ByteNet.struct({ targetPlayer = ByteNet.inst }),
+		}),
+
+		--[[
+			client -> server. Runs `count` immediate auto-spawn attempts on the
+			target's pad instead of waiting SPAWN_INTERVAL for each.
+
+			uint8 is not a size micro-optimisation: MAX_OBJECTS is 25, so the
+			wire type itself already rules out a count that could spin the
+			server's spawn loop, before DevService clamps it again.
+		]]
+		devSpawnSquishies = ByteNet.definePacket({
+			value = ByteNet.struct({
+				targetPlayer = ByteNet.inst,
+				count = ByteNet.uint8,
+			}),
+		}),
+
+		-- client -> server. Developer-only test action; removes every squishy the
+		-- target owns. Same shape as devDamageSquishies -- the only client input
+		-- is which in-server player to target.
+		devClearSquishies = ByteNet.definePacket({
+			value = ByteNet.struct({ targetPlayer = ByteNet.inst }),
 		}),
 
 		-- client -> server. Developer-only test action; grants every
@@ -94,7 +150,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		-- skipping ids they already own. Same shape as devDamageSquishies --
 		-- the only client input is which in-server player to target.
 		devGrantAllCosmetics = ByteNet.definePacket({
-			value = ByteNet.struct({ targetUserId = ByteNet.float64 }),
+			value = ByteNet.struct({ targetPlayer = ByteNet.inst }),
 		}),
 
 		-- server -> client
@@ -177,6 +233,24 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		mergeLaunchVfx = ByteNet.definePacket({
 			value = ByteNet.struct({
 				templateName = ByteNet.string,
+				worldX = ByteNet.float64,
+				worldY = ByteNet.float64,
+				worldZ = ByteNet.float64,
+			}),
+		}),
+
+		--[[
+			server -> every client. "Two squishies just merged here." Same
+			replication-race argument as mergeLaunchVfx: Emit() is transient, so
+			the server sends only the position and every client clones the
+			authored pack and emits it locally.
+
+			No template name on the wire. Unlike a launch landing, which picks
+			between two authored packs, a merge has exactly one, so the name
+			stays in MergeConfig.MERGE_VFX_TEMPLATE_NAME and never travels.
+		]]
+		mergeSquishyVfx = ByteNet.definePacket({
+			value = ByteNet.struct({
 				worldX = ByteNet.float64,
 				worldY = ByteNet.float64,
 				worldZ = ByteNet.float64,

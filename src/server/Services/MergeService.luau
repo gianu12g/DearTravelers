@@ -275,6 +275,7 @@ local defaultLaunchBeamTemplate: Model? = nil
 local launchBeamTemplates: { [string]: Model } = {}
 local launchExplosionTemplate: Attachment? = nil
 local launchGroundHitTemplate: BasePart? = nil
+local mergeSquishyVfxTemplate: BasePart? = nil
 
 local liveBases: { [Player]: LiveBase } = {}
 local attributeConnections: { [Player]: RBXScriptConnection } = {}
@@ -1135,6 +1136,24 @@ local function spawnGroundHitVfx(position: Vector3)
 end
 
 --[[
+	The authored merge burst, broadcast for the same reason as the launch packs
+	-- see sendLaunchVfx. Plays on top of spawnMergeVfx's procedural pop rather
+	than replacing it; the template lookup is checked at boot (Start) so a
+	missing pack costs one warn line, not one broadcast per merge.
+]]
+local function sendMergeSquishyVfx(position: Vector3)
+	if mergeSquishyVfxTemplate == nil then
+		return
+	end
+
+	Net.mergeSquishyVfx.sendToAll({
+		worldX = position.X,
+		worldY = position.Y,
+		worldZ = position.Z,
+	})
+end
+
+--[[
 	Attaches `part` (a resting object on `live`'s pad) to `player`'s torso,
 	floating in front of it, offset by the object's own half-size so bigger
 	tiers don't clip into the character.
@@ -1487,6 +1506,7 @@ local function commitMerge(player: Player, carry: CarryState, targetPart: BasePa
 	targetPart:Destroy()
 
 	spawnMergeVfx(live.objectsFolder, vfxPosition)
+	sendMergeSquishyVfx(vfxPosition)
 	-- The result appears wherever the target sat -- which the carrying
 	-- player was, by definition, standing right next to. Same instant-
 	-- re-grab problem as a drop, same fix.
@@ -2583,6 +2603,63 @@ function MergeService.damageSquishiesNear(
 end
 
 --[[
+	Developer console: run `count` auto-spawn attempts right now instead of
+	waiting SPAWN_INTERVAL for each one.
+
+	Deliberately a loop over trySpawnObject rather than its own placement code.
+	That function already owns every rule that makes a squishy legitimate -- the
+	MAX_OBJECTS cap, the SpawnLevel tier, rejection-sampled placement, the
+	incremental tableInsert that keeps the replicated array compact -- so a
+	dev-spawned squishy is indistinguishable from an auto-spawned one, and there
+	is no second spawn path to keep in sync with it. It does not yield, so the
+	whole batch lands in one frame.
+
+	Returns how many actually landed, which is NOT always `count`: a full pad
+	spawns none and a crowded one spawns some, because findOpenSpot gives up
+	rather than overlapping (the caller reports that difference). nil means
+	there is nothing to spawn onto at all -- no loaded data, or no active base.
+]]
+function MergeService.spawnSquishies(player: Player, count: number): number?
+	local live = liveBases[player]
+	if live == nil then
+		return nil
+	end
+
+	local data = DataService.getData(player)
+	if data == nil then
+		return nil
+	end
+
+	if not isFiniteNumber(count) then
+		return 0
+	end
+
+	local before = #data.Merge.Squishies
+	for _ = 1, math.clamp(math.floor(count), 1, MergeConfig.MAX_OBJECTS) do
+		trySpawnObject(player, live)
+	end
+
+	-- Re-read rather than counting successes inside the loop: `data` is the live
+	-- profile table, so this reflects exactly what was committed.
+	return #data.Merge.Squishies - before
+end
+
+--[[
+	Developer console: remove every squishy the player owns.
+
+	Routed through the shared damage transaction with lethal damage rather than a
+	bare DataService.set(..., {}), so a wipe performs exactly the bookkeeping a
+	real kill does -- the compact-array rewrite, dropping a carried or in-flight
+	entry, destroying live parts, the pop VFX -- with no second removal path to
+	keep in sync. Returns (nil, 0) only when the target has no loaded data.
+]]
+function MergeService.clearSquishies(player: Player): (number?, number)
+	return applySquishyDamage(player, function(_entry: MergeObjectEntry): number
+		return math.huge
+	end, nil)
+end
+
+--[[
 	Registered here, not Start(): NETWORKING-AND-DATA.md's rule for packet
 	listeners applies on the server the same as the client -- a listener that
 	doesn't exist yet cannot lose a packet that a fast Start() elsewhere
@@ -2668,6 +2745,20 @@ function MergeService.Start()
 		log.warn(
 			`Assets.VFX.LaunchExplosion.{MergeConfig.LAUNCH_GROUND_HIT_TEMPLATE_NAME} is missing or malformed --`
 				.. ` launch landings have no ground hit`
+		)
+	end
+
+	local mergeVfxTemplate = ReplicatedStorage.Assets.VFX.Merge:FindFirstChild(MergeConfig.MERGE_VFX_TEMPLATE_NAME)
+	if
+		mergeVfxTemplate ~= nil
+		and mergeVfxTemplate:IsA("BasePart")
+		and mergeVfxTemplate:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
+	then
+		mergeSquishyVfxTemplate = mergeVfxTemplate
+	else
+		log.warn(
+			`Assets.VFX.Merge.{MergeConfig.MERGE_VFX_TEMPLATE_NAME} is missing or malformed --`
+				.. ` merges have no authored burst`
 		)
 	end
 

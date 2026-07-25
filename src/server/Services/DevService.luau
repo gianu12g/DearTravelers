@@ -35,6 +35,7 @@ local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local CosmeticsService = require(script.Parent.CosmeticsService)
 local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeService = require(script.Parent.MergeService)
 local Net = require(ReplicatedStorage.Shared.Net)
 
@@ -73,6 +74,16 @@ local MAX_STRING_VALUE_LENGTH = 256
 local MIN_COMMAND_INTERVAL = 0.1
 local WARN_THROTTLE = 5
 local SQUISHY_TEST_DAMAGE_FRACTION = 0.25
+
+--[[
+	Ceiling on both a devAdd delta and the value it produces. 1e12 is
+	EconomyConfig.MAX_GRANT and three orders of magnitude under MAX_COINS, so a
+	console top-up lands inside the range CoinsService itself would accept rather
+	than parking a number in the profile that every other service treats as
+	impossible. It is a bound on the arithmetic, not a per-field policy: the
+	field's own ceiling belongs to the service that owns the field.
+]]
+local MAX_ADD_MAGNITUDE = 1e12
 
 type SnapshotEntry = {
 	path: { string },
@@ -273,7 +284,7 @@ local function sendSnapshot(target: Player, caller: Player)
 		return table.concat(a.path, ".") < table.concat(b.path, ".")
 	end)
 
-	Net.devSnapshot.sendTo({ targetUserId = target.UserId, entries = entries }, caller)
+	Net.devSnapshot.sendTo({ targetPlayer = target, entries = entries }, caller)
 end
 
 --[[
@@ -302,15 +313,25 @@ local function checkAccess(player: Player): boolean
 	return false
 end
 
--- Reading another player's data is privileged too, so this goes through the
--- same gate every other lookup does -- it just also has to resolve the
--- target from an untrusted UserId first.
-local function resolveTarget(targetUserId: number, caller: Player): Player?
-	local target = Players:GetPlayerByUserId(targetUserId)
-	if target == nil then
-		Net.devResult.sendTo({ ok = false, message = "target is not in this server" }, caller)
+--[[
+	Reading or writing another player's data is privileged too, so every packet
+	goes through checkAccess first -- this only decides WHICH player the packet
+	is about.
+
+	`target` arrives as a ByteNet instance reference (Net.luau's header explains
+	why), which means the untrusted part is no longer a number to look up but an
+	instance to vet. Both checks are load-bearing: the reference decodes to nil
+	when the sender pointed at something this server cannot see, and a client can
+	reference any instance it likes, so `IsA("Player")` rules out "a Model called
+	Player" and `Parent == Players` rules out a player who has already left (or a
+	Player instance the sender built locally and parented elsewhere).
+]]
+local function resolveTarget(target: Instance?, caller: Player): Player?
+	if target ~= nil and target:IsA("Player") and target.Parent == Players then
+		return target
 	end
-	return target
+	Net.devResult.sendTo({ ok = false, message = "target is not in this server" }, caller)
+	return nil
 end
 
 local function onPlayerRemoving(player: Player)
@@ -318,12 +339,12 @@ local function onPlayerRemoving(player: Player)
 	lastWarnAt[player] = nil
 end
 
-local function onRequestSnapshot(data: { targetUserId: number }, player: Player)
+local function onRequestSnapshot(data: { targetPlayer: Instance? }, player: Player)
 	if not checkAccess(player) then
 		return
 	end
 
-	local target = resolveTarget(data.targetUserId, player)
+	local target = resolveTarget(data.targetPlayer, player)
 	if target == nil then
 		return
 	end
@@ -331,12 +352,12 @@ local function onRequestSnapshot(data: { targetUserId: number }, player: Player)
 	sendSnapshot(target, player)
 end
 
-local function onSet(data: { targetUserId: number, path: { string }, kind: string, value: string }, player: Player)
+local function onSet(data: { targetPlayer: Instance?, path: { string }, kind: string, value: string }, player: Player)
 	if not checkAccess(player) then
 		return
 	end
 
-	local target = resolveTarget(data.targetUserId, player)
+	local target = resolveTarget(data.targetPlayer, player)
 	if target == nil then
 		return
 	end
@@ -376,12 +397,138 @@ local function onSet(data: { targetUserId: number, path: { string }, kind: strin
 	sendSnapshot(target, player)
 end
 
-local function onDamageSquishies(data: { targetUserId: number }, player: Player)
+--[[
+	Signed add to one existing numeric field. See Net.luau's devAdd comment for
+	why the console sends a delta rather than an absolute value.
+
+	The read and the write sit next to each other with nothing between them --
+	getData and set do not yield -- which is the whole guarantee, and the reason
+	this cannot be a client-side "read the snapshot, send the sum" helper.
+]]
+local function onAdd(data: { targetPlayer: Instance?, path: { string }, amount: number }, player: Player)
 	if not checkAccess(player) then
 		return
 	end
 
-	local target = resolveTarget(data.targetUserId, player)
+	local target = resolveTarget(data.targetPlayer, player)
+	if target == nil then
+		return
+	end
+
+	local targetData = DataService.getData(target)
+	if targetData == nil then
+		Net.devResult.sendTo({ ok = false, message = "target has no loaded data" }, player)
+		return
+	end
+
+	if not validatePath(targetData, data.path) then
+		Net.devResult.sendTo({ ok = false, message = "invalid path" }, player)
+		return
+	end
+
+	-- Same ladder parseValue uses, and in the same order: NaN before any
+	-- comparison that assumes a comparable number (quality-gate.md trap #8).
+	local amount = data.amount
+	if
+		type(amount) ~= "number"
+		or amount ~= amount
+		or amount == math.huge
+		or amount == -math.huge
+		or math.abs(amount) > MAX_ADD_MAGNITUDE
+	then
+		Net.devResult.sendTo({ ok = false, message = "invalid amount" }, player)
+		return
+	end
+
+	--[[
+		The existing value is not assumed sane either. This console can write any
+		number into any field, so a NaN or an infinity put there by an earlier
+		devSet would silently poison the sum -- and NaN, once saved, defeats every
+		range check the owning service performs on that field afterwards.
+	]]
+	local existing = readPath(targetData, data.path)
+	if typeof(existing) ~= "number" then
+		local message = if existing == nil then "nothing at that path to add to" else "that field is not a number"
+		Net.devResult.sendTo({ ok = false, message = message }, player)
+		return
+	end
+	if existing ~= existing or existing == math.huge or existing == -math.huge then
+		Net.devResult.sendTo({ ok = false, message = "current value is not a finite number -- set it first" }, player)
+		return
+	end
+
+	local newValue = math.clamp(existing + amount, -MAX_ADD_MAGNITUDE, MAX_ADD_MAGNITUDE)
+	DataService.set(target, data.path :: { string | number }, newValue)
+
+	local dotted = table.concat(data.path, ".")
+	log.info(`{player.Name} added {amount} to {target.Name}.{dotted} -> {newValue}`)
+
+	Net.devResult.sendTo({ ok = true, message = `{dotted} = {newValue}` }, player)
+	sendSnapshot(target, player)
+end
+
+local function onSpawnSquishies(data: { targetPlayer: Instance?, count: number }, player: Player)
+	if not checkAccess(player) then
+		return
+	end
+
+	local target = resolveTarget(data.targetPlayer, player)
+	if target == nil then
+		return
+	end
+
+	local requested = data.count
+	if type(requested) ~= "number" or requested ~= requested then
+		Net.devResult.sendTo({ ok = false, message = "invalid count" }, player)
+		return
+	end
+
+	local count = math.clamp(math.floor(requested), 1, MergeConfig.MAX_OBJECTS)
+	local spawned = MergeService.spawnSquishies(target, count)
+	if spawned == nil then
+		-- Distinct from "no data": the pad itself is what is missing, which for a
+		-- player still waiting in the base queue is the normal state.
+		Net.devResult.sendTo({ ok = false, message = "target has no active base" }, player)
+		return
+	end
+
+	log.info(`{player.Name} spawned {spawned} squishies on {target.Name}'s pad (asked for {count})`)
+	local message = if spawned == 0
+		then `Pad is full or too crowded -- nothing placed (cap {MergeConfig.MAX_OBJECTS})`
+		elseif spawned < count then `Spawned {spawned} of {count} -- pad ran out of room`
+		else `Spawned {spawned} squishies`
+	Net.devResult.sendTo({ ok = spawned > 0, message = message }, player)
+	sendSnapshot(target, player)
+end
+
+local function onClearSquishies(data: { targetPlayer: Instance? }, player: Player)
+	if not checkAccess(player) then
+		return
+	end
+
+	local target = resolveTarget(data.targetPlayer, player)
+	if target == nil then
+		return
+	end
+
+	local damagedCount, killedCount = MergeService.clearSquishies(target)
+	if damagedCount == nil then
+		Net.devResult.sendTo({ ok = false, message = "target has no loaded data" }, player)
+		return
+	end
+
+	log.info(`{player.Name} cleared {killedCount} of {target.Name}'s squishies`)
+	local message = if killedCount == 0 then "No squishies to clear" else `Cleared {killedCount} squishies`
+	Net.devResult.sendTo({ ok = true, message = message }, player)
+	sendSnapshot(target, player)
+end
+
+local function onDamageSquishies(data: { targetPlayer: Instance? }, player: Player)
+	if not checkAccess(player) then
+		return
+	end
+
+	local target = resolveTarget(data.targetPlayer, player)
 	if target == nil then
 		return
 	end
@@ -411,12 +558,12 @@ end
 	the log line below is determined here, by checking ownership before each
 	call, not from grant()'s return value.
 ]]
-local function onGrantAllCosmetics(data: { targetUserId: number }, player: Player)
+local function onGrantAllCosmetics(data: { targetPlayer: Instance? }, player: Player)
 	if not checkAccess(player) then
 		return
 	end
 
-	local target = resolveTarget(data.targetUserId, player)
+	local target = resolveTarget(data.targetPlayer, player)
 	if target == nil then
 		return
 	end
@@ -466,9 +613,27 @@ function DevService.Init()
 		end
 	end)
 
+	Net.devAdd.listen(function(data, player)
+		if player ~= nil then
+			onAdd(data, player)
+		end
+	end)
+
 	Net.devDamageSquishies.listen(function(data, player)
 		if player ~= nil then
 			onDamageSquishies(data, player)
+		end
+	end)
+
+	Net.devSpawnSquishies.listen(function(data, player)
+		if player ~= nil then
+			onSpawnSquishies(data, player)
+		end
+	end)
+
+	Net.devClearSquishies.listen(function(data, player)
+		if player ~= nil then
+			onClearSquishies(data, player)
 		end
 	end)
 

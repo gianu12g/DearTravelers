@@ -48,8 +48,12 @@ end
 --[[
 	targetUserId is float64, not uint32 -- uint32 tops out around 4.3 billion,
 	which real Roblox UserIds have already exceeded for newer accounts. float64
-	represents every UserId Roblox can issue exactly (same reasoning as
-	Shared/Net.luau's devSnapshot).
+	represents every UserId Roblox can issue exactly.
+
+	It is a UserId here and not a ByteNet.inst Player reference (which is what
+	Shared/Net.luau's dev packets use) because a gift target need not be in this
+	server -- MonetizationService resolves ownership and delivers through
+	DataService.messagePlayer by id. There is no instance to reference.
 
 	ByteNet is event-only, so the source's RemoteFunction-style invokes
 	(GroupReward.ClaimReward, WheelSpin.Spin, Codes.RedeemCode) become a

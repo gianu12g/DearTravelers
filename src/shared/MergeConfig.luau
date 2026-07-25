@@ -69,6 +69,22 @@ MergeConfig.REARM_CLEARANCE = 3
 -- genuinely walking away clears this window imperceptibly.
 MergeConfig.REARM_OUTSIDE_SECONDS = 0.5
 
+--[[
+	The authored burst that plays where two squishies merge: a Part in
+	Assets.VFX.Merge full of disabled ParticleEmitters told to Emit, same
+	authoring shape as the launch landing packs (EmitCount/EmitDelay attributes
+	per emitter). MergeService broadcasts the position; MergeVfxController
+	clones and emits it locally on every client.
+
+	This plays ON TOP of MergeService's own procedural pop, not instead of it --
+	dropping that one is a single call site if the two ever read as too busy.
+]]
+MergeConfig.MERGE_VFX_TEMPLATE_NAME = "MergeSquishyVFX"
+-- Runtime geometric scale applied to the clone through Shared.VfxScaler, so
+-- the burst can be resized without touching the source template. Same knob as
+-- LAUNCH_VFX_SCALE; 1 renders it exactly as authored.
+MergeConfig.MERGE_VFX_SCALE = 1
+
 -- Phase 3: passive income. Every owned object earns BASE_INCOME * 2^(tier-1)
 -- per pulse -- $1 at tier 1, doubling each tier up to $512 at MAX_TIER (10).
 -- The doubling is deliberate (spec): a merge visibly doubles that object's
