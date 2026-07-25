@@ -28,18 +28,13 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("CosmeticsController")
+local launchBeamsFolder = ReplicatedStorage.Assets.VFX.LaunchBeams
 
 --[[
-	Per-slot icon override lookup (Shared.AssetIds.Images' rbxassetid-number
-	convention -- every id here is preloaded at boot via
-	AssetIds/Preloader.luau, which recurses into nested groups). Keycap
-	themes are backed directly by Images.ThemeIcons -- one entry per catalog
-	id, added to Images.luau itself, no local duplicate needed here. Squishy
-	beams have no icon assets authored yet (COSMETICS_PLAN.md): an empty
-	local map until they exist, same two-step flow (an Images.luau entry,
-	then a line in BEAM_ICON_OVERRIDES) once art does.
+	Keycap-theme cards use Images.ThemeIcons (every id is preloaded at boot
+	via AssetIds/Preloader.luau). Beam cards intentionally have no icon: their
+	authored beam ColorSequence drives the card background gradient instead.
 ]]
-local BEAM_ICON_OVERRIDES: { [string]: number } = {}
 
 local CosmeticsController = {}
 
@@ -55,13 +50,6 @@ local function defaultIdForSlot(slot: CosmeticsCatalog.Slot): string
 		return CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
 	end
 	return CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
-end
-
-local function iconOverridesForSlot(slot: CosmeticsCatalog.Slot): { [string]: number }
-	if slot == "KeycapThemes" then
-		return Images.ThemeIcons
-	end
-	return BEAM_ICON_OVERRIDES
 end
 
 -- The one place that decides EquipButton.PriceTag.Text -- shared by the full
@@ -119,6 +107,12 @@ local function colorSequenceFromTheme(colors: { Color3 }): ColorSequence?
 		table.insert(keypoints, ColorSequenceKeypoint.new(time, colors[colorIndex]))
 	end
 	return ColorSequence.new(keypoints)
+end
+
+local function colorSequenceFromBeam(id: string): ColorSequence?
+	local template = launchBeamsFolder:FindFirstChild(id)
+	local beam = if template ~= nil then template:FindFirstChildWhichIsA("Beam", true) else nil
+	return if beam ~= nil and beam:IsA("Beam") then beam.Color else nil
 end
 
 function CosmeticsController.Start()
@@ -207,24 +201,37 @@ function CosmeticsController.Start()
 				end
 			end
 
-			-- Gradient restyle is THEME-ONLY -- beam card visuals beyond the
-			-- icon stay name-only for now, stubbed pending design
-			-- (COSMETICS_PLAN.md "Beams UI").
-			if slot == "KeycapThemes" then
-				local colors = KeyCapsController.getThemeColors(entry.Id)
-				local gradient = card:FindFirstChild("UIGradient")
-				if colors ~= nil and gradient ~= nil and gradient:IsA("UIGradient") then
-					local sequence = colorSequenceFromTheme(colors)
-					if sequence ~= nil then
-						gradient.Color = sequence
-					end
+			local gradient = card:FindFirstChild("UIGradient")
+			if gradient ~= nil and gradient:IsA("UIGradient") then
+				local sequence: ColorSequence?
+				if slot == "KeycapThemes" then
+					local colors = KeyCapsController.getThemeColors(entry.Id)
+					sequence = if colors ~= nil then colorSequenceFromTheme(colors) else nil
+				else
+					sequence = colorSequenceFromBeam(entry.Id)
+				end
+				if sequence ~= nil then
+					gradient.Color = sequence
 				end
 			end
 
-			local iconId = iconOverridesForSlot(slot)[entry.Id]
 			local icon = card:FindFirstChild("Icon")
-			if iconId ~= nil and icon ~= nil and icon:IsA("ImageLabel") then
-				icon.Image = `rbxassetid://{iconId}`
+			if icon ~= nil and icon:IsA("ImageLabel") then
+				if slot == "KeycapThemes" then
+					local iconId = Images.ThemeIcons[entry.Id]
+					if iconId ~= nil then
+						icon.Image = `rbxassetid://{iconId}`
+					end
+				else
+					icon.Visible = false
+					-- Beam cards are permanently gradient-only. Strip the
+					-- template's Float effect before parenting so UIKit never
+					-- starts an invisible infinite tween for this hidden icon.
+					clearEffectAttribute(icon)
+					for _, descendant in icon:GetDescendants() do
+						clearEffectAttribute(descendant)
+					end
+				end
 			end
 
 			local equipButton = card:FindFirstChild("EquipButton")

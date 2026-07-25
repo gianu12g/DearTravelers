@@ -115,8 +115,8 @@ MergeConfig.LAUNCH_IMPACT_PAUSE = 0.35
 -- value; raise this to 120 for the planned two-minute production cooldown.
 MergeConfig.LAUNCH_COOLDOWN_SECONDS = 5
 -- The beam cone that rises off a squishy while it falls -- the standalone
--- launch cosmetic. One physical model in Assets.VFX.LaunchBeams, anchored per
--- tier by the artwork's beam attachment (see
+-- launch cosmetic. Models in Assets.VFX.LaunchBeams are anchored per tier by
+-- the artwork's beam attachment (see
 -- MergeObjectVisuals.getBeamAnchorOffset) and rendered with its own authored
 -- Color/Texture, no external tinting.
 MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME = "FallingBeams"

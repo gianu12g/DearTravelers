@@ -133,8 +133,8 @@ local TEMPLATE = {
 		Owned + equipped cosmetics (COSMETICS_PLAN.md). New players own only the
 		defaults; equip = a plain field write here, applied client-side via
 		DataController.observe and server-side by CosmeticsService (theme
-		attribute stamp; the world-side beam resolution in MergeService is
-		planned but not yet implemented -- COSMETICS_PLAN.md step 6). No
+		attribute stamp; MergeService resolves SquishyBeamId to its matching
+		Assets.VFX.LaunchBeams model when a launch is accepted). No
 		version bump -- Reconcile() backfills this whole subtree onto existing
 		profiles, and repairProfileData below enforces the one invariant
 		Reconcile can't: equipped id must be owned.

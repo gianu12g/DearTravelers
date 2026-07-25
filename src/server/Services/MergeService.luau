@@ -140,6 +140,7 @@ local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local CoinsService = require(script.Parent.CoinsService)
+local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local DataService = require(script.Parent.DataService)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local LaunchBeamRuntime = require(ReplicatedStorage.Shared.LaunchBeamRuntime)
@@ -242,6 +243,10 @@ type LaunchState = {
 	live: LiveBase,
 	part: BasePart,
 	entry: MergeObjectEntry,
+	-- Resolved from the owner's persisted SquishyBeamId when the launch is
+	-- accepted. Holding the exact template keeps a mid-launch equip change
+	-- from swapping artwork between the spawn squash and descent.
+	beamTemplate: Model?,
 	-- Attached at the top of the fall, not at the drop teleport -- so nil for
 	-- the spawn-squish phase of every launch. See attachLaunchBeams.
 	beams: LaunchBeamRuntime.Handle?,
@@ -267,6 +272,7 @@ local launchMapLayout: Instance? = nil
 local launchMapBounds: LaunchMapBounds? = nil
 local launchFallbackSurfaceY = 0
 local defaultLaunchBeamTemplate: Model? = nil
+local launchBeamTemplates: { [string]: Model } = {}
 local launchExplosionTemplate: Attachment? = nil
 local launchGroundHitTemplate: BasePart? = nil
 
@@ -347,6 +353,14 @@ local function destroyLaunchBeams(launch: LaunchState)
 	LaunchBeamRuntime.destroy(handle)
 end
 
+local function equippedLaunchBeamTemplate(player: Player): Model?
+	local playerData = DataService.getData(player)
+	if playerData == nil then
+		return defaultLaunchBeamTemplate
+	end
+	return launchBeamTemplates[playerData.Cosmetics.SquishyBeamId] or defaultLaunchBeamTemplate
+end
+
 --[[
 	Attaches the falling-beam cone to a launch that is about to start
 	descending. This runs at the top of the fall rather than at the drop
@@ -369,7 +383,7 @@ end
 	declared further down this file and is not in scope here.
 ]]
 local function attachLaunchBeams(launch: LaunchState, tier: number)
-	local template = defaultLaunchBeamTemplate
+	local template = launch.beamTemplate
 	if template == nil or launch.part.Parent == nil then
 		return
 	end
@@ -2219,6 +2233,7 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 		live = carry.live,
 		part = carry.part,
 		entry = carry.entry,
+		beamTemplate = equippedLaunchBeamTemplate(player),
 		beams = nil,
 		scale = nil,
 		sizeMultiplier = sizeMultiplier,
@@ -2603,17 +2618,25 @@ function MergeService.Init()
 end
 
 function MergeService.Start()
-	local beamTemplate =
-		ReplicatedStorage.Assets.VFX.LaunchBeams:FindFirstChild(MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME)
-	if
-		beamTemplate ~= nil
-		and beamTemplate:IsA("Model")
-		and beamTemplate:FindFirstChildWhichIsA("Beam", true) ~= nil
-	then
-		defaultLaunchBeamTemplate = beamTemplate
-	else
+	table.clear(launchBeamTemplates)
+	local launchBeamsFolder = ReplicatedStorage.Assets.VFX.LaunchBeams
+	for _, entry in CosmeticsCatalog.SquishyBeams do
+		local candidate = launchBeamsFolder:FindFirstChild(entry.Id)
+		if
+			candidate ~= nil
+			and candidate:IsA("Model")
+			and candidate:FindFirstChildWhichIsA("Beam", true) ~= nil
+		then
+			launchBeamTemplates[entry.Id] = candidate
+		else
+			log.warn(`Assets.VFX.LaunchBeams.{entry.Id} is missing or malformed -- cosmetic unavailable`)
+		end
+	end
+
+	defaultLaunchBeamTemplate = launchBeamTemplates[MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME]
+	if defaultLaunchBeamTemplate == nil then
 		log.warn(
-			`Assets.VFX.LaunchBeams.{MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME} is missing or malformed -- falling`
+			`Assets.VFX.LaunchBeams.{MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME} is unavailable -- falling`
 				.. ` launches have no beams`
 		)
 	end

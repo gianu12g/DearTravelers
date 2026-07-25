@@ -1,8 +1,8 @@
 --!strict
 --[[
-	Clones the one physical Assets.VFX.LaunchBeams.FallingBeams model onto a
-	launched squishy for the duration of its fall, fading the beams up from
-	fully transparent to their authored Transparency.
+	Clones the selected Assets.VFX.LaunchBeams model onto a launched squishy
+	for the duration of its fall, fading the beams up from fully transparent
+	to their authored Transparency.
 
 	The authored model is a pure template: its Attachments sit under plain
 	Folders, where they have no world CFrame and draw nothing. This module
