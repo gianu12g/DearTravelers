@@ -123,11 +123,19 @@ MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME = "FallingBeams"
 -- Independent of LAUNCH_DROP_SECONDS: a shorter fade just finishes early, and
 -- a longer one is cut off when the launch cleans up on impact.
 MergeConfig.LAUNCH_BEAM_FADE_IN_SECONDS = 1.0
+-- Runtime geometric scale applied to both landing VFX clones through
+-- Shared.VfxScaler. This scales particle marks, travel, and authored attachment
+-- offsets without mutating the source templates in ReplicatedStorage.
+MergeConfig.LAUNCH_VFX_SCALE = 1.4
 -- The squishy's own burst when a launch lands: an authored Attachment in
 -- Assets.VFX.LaunchExplosion, full of disabled ParticleEmitters told to Emit.
 -- Pinned to a point on the SQUISHY (its explosionPosAtt), not the floor --
 -- see MergeService.spawnLaunchImpactVfx.
 MergeConfig.LAUNCH_EXPLOSION_TEMPLATE_NAME = "Explosion"
+-- Additional multiplier for Explosion only. Its effective scale is
+-- LAUNCH_VFX_SCALE * LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER, so this can be
+-- tuned independently without changing GroundHit.
+MergeConfig.LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER = 1
 -- The floor half of the same landing: an authored Part (with its own emitters)
 -- in Assets.VFX.LaunchExplosion, pinned to the ground contact point directly
 -- under the squishy -- see MergeService.spawnGroundHitVfx. Fires at touchdown;

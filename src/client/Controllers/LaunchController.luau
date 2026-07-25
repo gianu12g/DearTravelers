@@ -24,6 +24,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Motion = require(script.Parent.Parent.UI.Motion)
 local Net = require(ReplicatedStorage.Shared.Net)
+local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 
 local log = Log.new("LaunchController")
 
@@ -752,7 +753,7 @@ local function updateLaunchCooldownDisplay()
 	local coolingDown = player:GetAttribute("CarryingTier") ~= nil and remaining > 0
 	button.Active = not coolingDown
 	button.Selectable = not coolingDown
-	label.Text = if coolingDown then `{math.max(1, math.ceil(remaining))}` else readyLaunchText
+	label.Text = if coolingDown then Format.FormatCountdown(remaining) else readyLaunchText
 
 	local gradient = launchButtonGradient
 	local readyGradient = readyLaunchGradient

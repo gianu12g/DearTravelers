@@ -15,13 +15,24 @@ local Workspace = game:GetService("Workspace")
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
+local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 
 local log = Log.new("LaunchVfxController")
 local VFX_LINGER = 0.5
+local VFX_SCALE_OPTIONS: VfxScaler.Options = {
+	motion = true,
+	offsets = true,
+	lights = true,
+}
 
 local launchVfxFolder = ReplicatedStorage.Assets.VFX.LaunchExplosion
 
 local LaunchVfxController = {}
+
+local function scaleLaunchVfx(root: Instance, effectMultiplier: number?)
+	local multiplier = MergeConfig.LAUNCH_VFX_SCALE * (effectMultiplier or 1)
+	VfxScaler.scale(root, multiplier, VFX_SCALE_OPTIONS)
+end
 
 local function emitAuthoredBurst(root: Instance): number
 	local longestLifetime = 0
@@ -77,6 +88,7 @@ local function playExplosion(template: Attachment, position: Vector3)
 	-- Keep the authored orientation but discard its old scene-space offset.
 	explosion.CFrame = explosion.CFrame.Rotation
 	explosion.Parent = anchor
+	scaleLaunchVfx(explosion, MergeConfig.LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER)
 
 	Debris:AddItem(anchor, emitAuthoredBurst(explosion) + VFX_LINGER)
 end
@@ -93,6 +105,7 @@ local function playGroundHit(template: BasePart, position: Vector3)
 	hit.Transparency = 1
 	hit.CFrame = CFrame.new(position) * hit.CFrame.Rotation
 	hit.Parent = Workspace
+	scaleLaunchVfx(hit)
 
 	Debris:AddItem(hit, emitAuthoredBurst(hit) + VFX_LINGER)
 end

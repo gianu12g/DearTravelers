@@ -806,7 +806,7 @@ local function setLaunchCooldownCounter(part: BasePart, secondsRemaining: number
 	if counterBillboard:IsA("BillboardGui") then
 		counterBillboard.Enabled = wholeSeconds > 0
 	end
-	counter.Text = if wholeSeconds > 0 then `{wholeSeconds}s` else ""
+	counter.Text = if wholeSeconds > 0 then Format.FormatCountdown(secondsRemaining) else ""
 end
 
 local function startLaunchCooldown(player: Player, part: BasePart)

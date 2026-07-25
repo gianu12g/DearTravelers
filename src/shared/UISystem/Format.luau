@@ -39,6 +39,15 @@ function Format.FormatTime(seconds: number): string
 	end
 end
 
+-- Zero-padded cooldown clock ("00:05", "02:00"). Cooldowns round up so the
+-- display does not reach zero before the server considers them ready.
+function Format.FormatCountdown(seconds: number): string
+	local total = math.max(0, math.ceil(seconds))
+	local minutes = math.floor(total / 60)
+	local secs = total % 60
+	return string.format("%02d:%02d", minutes, secs)
+end
+
 local SUFFIXES = {
 	"",
 	"K",
