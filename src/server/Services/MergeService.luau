@@ -226,13 +226,16 @@ type LaunchVisualScale = {
 	weld: Weld,
 	size: Vector3,
 	c0: CFrame,
+	transparency: number,
 }
 
 type LaunchScale = {
 	rootSize: Vector3,
+	rootTransparency: number,
 	visuals: { LaunchVisualScale },
 	incomeLabel: BillboardGui?,
 	incomeLabelOffset: Vector3?,
+	incomeLabelEnabled: boolean?,
 }
 
 type LaunchState = {
@@ -414,7 +417,13 @@ local function applyLaunchScale(launch: LaunchState)
 			if weld == nil or not weld:IsA("Weld") then
 				continue
 			end
-			table.insert(visuals, { part = candidate, weld = weld, size = candidate.Size, c0 = weld.C0 })
+			table.insert(visuals, {
+				part = candidate,
+				weld = weld,
+				size = candidate.Size,
+				c0 = weld.C0,
+				transparency = candidate.Transparency,
+			})
 		end
 	end
 
@@ -423,12 +432,15 @@ local function applyLaunchScale(launch: LaunchState)
 		then rawIncomeLabel
 		else nil
 	local incomeLabelOffset: Vector3? = if incomeLabel ~= nil then incomeLabel.StudsOffset else nil
+	local incomeLabelEnabled: boolean? = if incomeLabel ~= nil then incomeLabel.Enabled else nil
 
 	launch.scale = {
 		rootSize = part.Size,
+		rootTransparency = part.Transparency,
 		visuals = visuals,
 		incomeLabel = incomeLabel,
 		incomeLabelOffset = incomeLabelOffset,
+		incomeLabelEnabled = incomeLabelEnabled,
 	}
 
 	part.Size = part.Size * multiplier
@@ -460,18 +472,53 @@ local function restoreLaunchScale(launch: LaunchState)
 	local part = launch.part
 	if part.Parent ~= nil then
 		part.Size = scale.rootSize
+		part.Transparency = scale.rootTransparency
 	end
 	for _, state in scale.visuals do
 		if state.part.Parent ~= nil and state.weld.Parent ~= nil then
 			state.part.Size = state.size
 			state.weld.C0 = state.c0
+			state.part.Transparency = state.transparency
 		end
 	end
 
 	local incomeLabel = scale.incomeLabel
 	local offset = scale.incomeLabelOffset
-	if incomeLabel ~= nil and incomeLabel.Parent ~= nil and offset ~= nil then
-		incomeLabel.StudsOffset = offset
+	local enabled = scale.incomeLabelEnabled
+	if incomeLabel ~= nil and incomeLabel.Parent ~= nil then
+		if offset ~= nil then
+			incomeLabel.StudsOffset = offset
+		end
+		if enabled ~= nil then
+			incomeLabel.Enabled = enabled
+		end
+	end
+end
+
+-- Hides only the launched object's presentation; its authoritative root,
+-- entry, and launch state stay alive until finishLaunch returns it to the pad.
+-- restoreLaunchScale owns the exact inverse using the values captured before
+-- launch, so transparent authored pieces and fallback cube tiers both restore
+-- correctly.
+local function hideLaunchVisual(launch: LaunchState)
+	local scale = launch.scale
+	if scale == nil then
+		return
+	end
+
+	local part = launch.part
+	if part.Parent ~= nil then
+		part.Transparency = 1
+	end
+	for _, state in scale.visuals do
+		if state.part.Parent ~= nil then
+			state.part.Transparency = 1
+		end
+	end
+
+	local incomeLabel = scale.incomeLabel
+	if incomeLabel ~= nil and incomeLabel.Parent ~= nil then
+		incomeLabel.Enabled = false
 	end
 end
 
@@ -2013,7 +2060,9 @@ end
 -- Explosion fires during the landing rebound at explosionPosAtt. GroundHit is
 -- sent separately at touchdown, before the landing squash begins.
 local function explodeDroppedSquishy(launch: LaunchState, position: Vector3)
-	spawnLaunchImpactVfx(launchVfxPoint(launch, LAUNCH_EXPLOSION_ATTACHMENT_NAME, position))
+	local explosionPosition = launchVfxPoint(launch, LAUNCH_EXPLOSION_ATTACHMENT_NAME, position)
+	hideLaunchVisual(launch)
+	spawnLaunchImpactVfx(explosionPosition)
 end
 
 local function finishLaunch(player: Player, launch: LaunchState, startCooldown: boolean)
