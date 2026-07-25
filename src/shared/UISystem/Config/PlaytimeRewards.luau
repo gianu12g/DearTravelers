@@ -36,11 +36,11 @@ local PlaytimeRewards = {
 		},
 		[3] = {
 			Duration = 30 * 60, -- Required time in order to unlock the reward (30 x 60 seconds = 30 minutes)
-			Icon = Images.StarterPack, -- 300 coins + Slime Trail
+			Icon = Images.Cash, -- 800 coins
 		},
 		[4] = {
 			Duration = 60 * 60, -- Required time in order to unlock the reward (60 x 60 seconds = 1 hour)
-			Icon = Images.SecretPack, -- 400 coins + X Trail
+			Icon = Images.Cash, -- 900 coins
 		},
 		[5] = {
 			Duration = 1.5 * 60 * 60, -- Required time in order to unlock the reward (1.5 x 60 x 60 seconds = 1.5 hours)

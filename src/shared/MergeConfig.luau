@@ -98,22 +98,41 @@ MergeConfig.LAUNCH_IMPACT_RADIUS = 35
 -- toggle exact square bounds around the circular launch radius. It grants no
 -- gameplay authority, so the local attribute is intentionally not networked.
 MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE = "LaunchRadiusDebugEnabled"
--- Flight tuning. Arc height grows with distance but remains bounded so nearby
--- launches still climb visibly and opposite-corner launches do not disappear.
-MergeConfig.LAUNCH_MIN_ARC_HEIGHT = 55
-MergeConfig.LAUNCH_MAX_ARC_HEIGHT = 170
-MergeConfig.LAUNCH_ARC_DISTANCE_SCALE = 0.45
-MergeConfig.LAUNCH_STUDS_PER_SECOND = 25
-MergeConfig.LAUNCH_MIN_FLIGHT_SECONDS = 6
-MergeConfig.LAUNCH_MAX_FLIGHT_SECONDS = 6
+-- Drop tuning. The carried squishy is scaled up and teleported directly
+-- above the resolved landing point rather than arcing across the map -- see
+-- MergeService's launchCarried/runLaunch for the full sequence (teleport +
+-- scale, spawn squish, fall, landing squash, explosion).
+MergeConfig.LAUNCH_DROP_HEIGHT = 300 -- studs above the resolved landing point where the giant squishy materializes; tall enough that the 6s quadratic ease-in fall visibly accelerates (and stays below the ~430-stud launch overview camera)
+MergeConfig.LAUNCH_DROP_SECONDS = 6 -- fall duration, quadratic ease-in
+-- The intimidation scale-up; restored on every launch exit path. This is only
+-- the fallback: each tier model may override it with its own finite, positive
+-- LaunchSize number attribute (see MergeObjectVisuals.getLaunchSizeMultiplier),
+-- so a bulky tier can drop smaller than a compact one. A model with no
+-- LaunchSize, or one left at 0, uses this value.
+MergeConfig.LAUNCH_DROP_SIZE_MULTIPLIER = 10
 MergeConfig.LAUNCH_IMPACT_PAUSE = 0.35
 -- Per-squishy relaunch lockout. Five seconds is intentionally a short testing
 -- value; raise this to 120 for the planned two-minute production cooldown.
 MergeConfig.LAUNCH_COOLDOWN_SECONDS = 5
--- One physical, Studio-editable model supplies the default launch cosmetic.
--- Expected hierarchy: Model > TrailEmitter > TopAttachment, BottomAttachment,
--- LaunchTrail. Instance names follow the Studio model naming convention.
-MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME = "DefaultLaunchTrail"
+-- The beam cone that rises off a squishy while it falls -- the standalone
+-- launch cosmetic. One physical model in Assets.VFX.LaunchBeams, anchored per
+-- tier by the artwork's beam attachment (see
+-- MergeObjectVisuals.getBeamAnchorOffset) and rendered with its own authored
+-- Color/Texture, no external tinting.
+MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME = "FallingBeams"
+-- Independent of LAUNCH_DROP_SECONDS: a shorter fade just finishes early, and
+-- a longer one is cut off when the launch cleans up on impact.
+MergeConfig.LAUNCH_BEAM_FADE_IN_SECONDS = 1.0
+-- The squishy's own burst when a launch lands: an authored Attachment in
+-- Assets.VFX.LaunchExplosion, full of disabled ParticleEmitters told to Emit.
+-- Pinned to a point on the SQUISHY (its explosionPosAtt), not the floor --
+-- see MergeService.spawnLaunchImpactVfx.
+MergeConfig.LAUNCH_EXPLOSION_TEMPLATE_NAME = "Explosion"
+-- The floor half of the same landing: an authored Part (with its own emitters)
+-- in Assets.VFX.LaunchExplosion, pinned to the ground contact point directly
+-- under the squishy -- see MergeService.spawnGroundHitVfx. Fires at touchdown;
+-- the Explosion above follows when the squishy rebounds.
+MergeConfig.LAUNCH_GROUND_HIT_TEMPLATE_NAME = "GroundHit"
 
 --[[
 	10 tiers, gray -> near-white. Size grows per tier; tier 10 stays at 9

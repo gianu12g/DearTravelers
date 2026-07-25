@@ -36,6 +36,13 @@ local CARRY_ROTATION_Z_ATTRIBUTE = "CarryRotationZ"
 local MUSH_SOUND_ID_ATTRIBUTE = "MushSoundId"
 local MUSH_SOUND_VOLUME_ATTRIBUTE = "MushSoundVolume"
 local MUSH_DIRECTION_ATTRIBUTE = "MushDirection"
+-- Per-tier override for the launch drop scale-up. Optional: see
+-- getLaunchSizeMultiplier.
+local LAUNCH_SIZE_ATTRIBUTE = "LaunchSize"
+-- Authored per tier model to mark where the falling-launch beam cone sits. The
+-- camelCase name is the one used in the Studio models; renaming it to
+-- PascalCase means changing both together.
+local BEAM_ANCHOR_ATTACHMENT_NAME = "beamModelPosAtt"
 
 local MUSH_DIRECTIONS: { [string]: string } = {
 	top = "Top",
@@ -236,6 +243,97 @@ function MergeObjectVisuals.attach(root: BasePart, tier: number): boolean
 
 	root:SetAttribute("VisualTemplate", template.Name)
 	return true
+end
+
+--[[
+	Offset from the bottom-center of a tier template's world-axis bounding box
+	to its authored beam anchor attachment, in template space.
+
+	Expressed against the bounding box rather than the model's pivot on purpose.
+	The pivot is whatever the artist happened to leave it at -- bottom-of-mesh
+	on one template, center-of-mesh on the next -- so `anchor.Position` alone
+	means something different per tier. Worse, it cannot be read off the live
+	clone either: attach fills in a missing PrimaryPart, and that silently
+	redefines Model:GetPivot(), and with it the attachment's WorldPosition.
+	Bottom-center is the one frame both sides agree on, because attach centers
+	the visual horizontally on the gameplay root and lands its lowest point on
+	the root's bottom plane.
+
+	Searched recursively: these attachments are authored directly under the
+	Model in the current artwork, not under its mesh part.
+
+	Returns nil when the template has no anchor attachment -- the normal state
+	for a tier whose artwork has not been given one yet.
+]]
+function MergeObjectVisuals.getBeamAnchorOffset(tier: number): Vector3?
+	local template = templateForTier(tier)
+	if template == nil then
+		return nil
+	end
+
+	local anchor = template:FindFirstChild(BEAM_ANCHOR_ATTACHMENT_NAME, true)
+	if anchor == nil or not anchor:IsA("Attachment") then
+		return nil
+	end
+
+	local parts = collectParts(template)
+	if #parts == 0 then
+		return nil
+	end
+
+	local minimum = Vector3.new(math.huge, math.huge, math.huge)
+	local maximum = Vector3.new(-math.huge, -math.huge, -math.huge)
+	for _, part in parts do
+		local half = part.Size / 2
+		for x = -1, 1, 2 do
+			for y = -1, 1, 2 do
+				for z = -1, 1, 2 do
+					local corner = part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+					minimum = minimum:Min(corner)
+					maximum = maximum:Max(corner)
+				end
+			end
+		end
+	end
+
+	local bottomCenter = Vector3.new((minimum.X + maximum.X) / 2, minimum.Y, (minimum.Z + maximum.Z) / 2)
+	return anchor.WorldPosition - bottomCenter
+end
+
+--[[
+	Per-tier override for how much a launched squishy is scaled up on its drop,
+	read off the template's LaunchSize number attribute.
+
+	Returns nil whenever the tier has no usable override, which the caller
+	answers with MergeConfig.LAUNCH_DROP_SIZE_MULTIPLIER. That covers three
+	cases: the attribute is absent, it is left at 0 (what Studio writes when the
+	attribute is first added, so it means "unset" rather than "shrink to
+	nothing"), or it is a value that cannot be a scale -- negative, NaN, or
+	infinite. Only the last of those is worth a warning; the first two are
+	normal states for artwork nobody has tuned yet.
+]]
+function MergeObjectVisuals.getLaunchSizeMultiplier(tier: number): number?
+	local template = templateForTier(tier)
+	if template == nil then
+		return nil
+	end
+
+	local raw = template:GetAttribute(LAUNCH_SIZE_ATTRIBUTE)
+	if raw == nil then
+		return nil
+	end
+	if type(raw) ~= "number" or raw ~= raw or raw == math.huge or raw == -math.huge or raw < 0 then
+		warnOnce(
+			template.Name .. ":" .. LAUNCH_SIZE_ATTRIBUTE,
+			`{template:GetFullName()}.{LAUNCH_SIZE_ATTRIBUTE} must be a finite positive number -- using the default launch scale`
+		)
+		return nil
+	end
+	if raw == 0 then
+		return nil
+	end
+
+	return raw
 end
 
 function MergeObjectVisuals.getCarryRotation(tier: number): CFrame

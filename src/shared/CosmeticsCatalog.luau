@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Single id authority for owned cosmetics (COSMETICS_PLAN.md). Two slots
-	today -- keycap Themes and squishy launch Trails -- each an ordered list of
+	today -- keycap Themes and squishy launch Beams -- each an ordered list of
 	{Id, DisplayName}. Future shop bundles grant ids through
 	CosmeticsService.grant and must reference the SAME ids listed here.
 
@@ -19,7 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 
-export type Slot = "KeycapThemes" | "SquishyTrails"
+export type Slot = "KeycapThemes" | "SquishyBeams"
 
 export type CatalogEntry = {
 	Id: string,
@@ -37,7 +37,7 @@ CosmeticsCatalog.THEME_ATTRIBUTE = "Theme"
 -- Unequip always reverts to these -- the equipped id is never empty
 -- (COSMETICS_PLAN.md "Decisions").
 CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID = "ChocolateBar"
-CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID = MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME
+CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID = MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME
 
 -- Every id in KeyCapsController's THEMES table, same top-to-bottom order.
 -- Keep in sync manually -- KeyCapsController.Init's drift guard warns (not
@@ -176,16 +176,11 @@ CosmeticsCatalog.KeycapThemes = {
 	{ Id = "StealthRubber", DisplayName = "Stealth Rubber" },
 } :: { CatalogEntry }
 
--- ReplicatedStorage.Assets.VFX.LaunchTrails children (Studio-authored, not
+-- ReplicatedStorage.Assets.VFX.LaunchBeams children (Studio-authored, not
 -- Rojo-mounted -- MergeService.Start reads them the same way it already
 -- reads the default). Id == the Model's Name.
-CosmeticsCatalog.SquishyTrails = {
-	{ Id = "DefaultLaunchTrail", DisplayName = "Default" },
-	{ Id = "SlimeLaunchTrail", DisplayName = "Slime" },
-	{ Id = "CoolLaunchTrail", DisplayName = "Cool" },
-	{ Id = "RedAndBlackLaunchTrail", DisplayName = "Red & Black" },
-	{ Id = "XLaunchTrail", DisplayName = "X" },
-	{ Id = "WaterDropLaunchTrail", DisplayName = "Water Drop" },
+CosmeticsCatalog.SquishyBeams = {
+	{ Id = "FallingBeams", DisplayName = "Default" },
 } :: { CatalogEntry }
 
 local keycapThemeIds: { [string]: true } = {}
@@ -193,17 +188,30 @@ for _, entry in CosmeticsCatalog.KeycapThemes do
 	keycapThemeIds[entry.Id] = true
 end
 
-local squishyTrailIds: { [string]: true } = {}
-for _, entry in CosmeticsCatalog.SquishyTrails do
-	squishyTrailIds[entry.Id] = true
+local squishyBeamIds: { [string]: true } = {}
+for _, entry in CosmeticsCatalog.SquishyBeams do
+	squishyBeamIds[entry.Id] = true
 end
 
 function CosmeticsCatalog.isKeycapTheme(id: string): boolean
 	return keycapThemeIds[id] == true
 end
 
-function CosmeticsCatalog.isSquishyTrail(id: string): boolean
-	return squishyTrailIds[id] == true
+function CosmeticsCatalog.isSquishyBeam(id: string): boolean
+	return squishyBeamIds[id] == true
 end
+
+-- Boot-time guard: the defaults are unequip targets (COSMETICS_PLAN.md
+-- "Decisions") and must always resolve to a real catalog entry. The squishy
+-- default is sourced from MergeConfig, owned elsewhere, so it can drift out
+-- of sync silently without this.
+assert(
+	CosmeticsCatalog.isKeycapTheme(CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID),
+	"default keycap theme id missing from KeycapThemes catalog"
+)
+assert(
+	CosmeticsCatalog.isSquishyBeam(CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID),
+	"default beam id missing from SquishyBeams catalog"
+)
 
 return CosmeticsCatalog

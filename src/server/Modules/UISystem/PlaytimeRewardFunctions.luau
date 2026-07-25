@@ -14,18 +14,25 @@
 
 	1 (5m):   50 coins
 	2 (15m):  150 coins
-	3 (30m):  300 coins + SquishyTrails "SlimeLaunchTrail"
-	4 (1h):   400 coins + SquishyTrails "XLaunchTrail"
+	3 (30m):  800 coins
+	4 (1h):   900 coins
 	5 (1.5h): 750 coins
 	6 (2h):   KeycapThemes "RoyalVelvet"
 	7 (3h):   KeycapThemes "Frostfire"  -- longest milestone, most premium
 
 	The playtime track resets every ResetDuration (24h,
-	PlaytimeRewardsService.luau), so the theme slots and the two trail
-	grants route through CosmeticRewardHelper.grantOrFallback the same way
-	DailyRewardFunctions does: a repeat cycle grants fallback coins instead
-	of silently no-op'ing on an already-owned id. Distinct ids from
-	DailyRewardFunctions's daily schedule -- no overlap.
+	PlaytimeRewardsService.luau), so the theme slots route through
+	CosmeticRewardHelper.grantOrFallback the same way DailyRewardFunctions
+	does: a repeat cycle grants fallback coins instead of silently no-op'ing
+	on an already-owned id.
+
+	Tiers 3 and 4 (2026-07-24: SquishyBeams ships exactly one beam, so there
+	is no longer a second/fourth cosmetic id in that slot to grant here) now
+	pay a flat coin amount unconditionally, at the same total a repeat-cycle
+	claim already paid via CosmeticRewardHelper.grantOrFallback's 500-coin
+	fallback plus that tier's own base coins: 300 + 500 = 800 for tier 3,
+	400 + 500 = 900 for tier 4. Payout parity with the prior schedule is
+	preserved exactly.
 ]]
 
 local ServerStorage = game:GetService("ServerStorage")
@@ -33,7 +40,6 @@ local ServerStorage = game:GetService("ServerStorage")
 local CoinsService = require(ServerStorage.Services.CoinsService)
 local CosmeticRewardHelper = require(ServerStorage.Modules.UISystem.CosmeticRewardHelper)
 
-local TRAIL_FALLBACK_COINS = 500
 local THEME_FALLBACK_COINS = 1000
 
 local PlaytimeRewardFunctions: { [number]: (Player) -> boolean } = {
@@ -44,20 +50,10 @@ local PlaytimeRewardFunctions: { [number]: (Player) -> boolean } = {
 		return CoinsService.add(player, 150)
 	end,
 	[3] = function(player: Player)
-		local trailGranted =
-			CosmeticRewardHelper.grantOrFallback(player, "SquishyTrails", "SlimeLaunchTrail", TRAIL_FALLBACK_COINS)
-		if not trailGranted then
-			return false
-		end
-		return CoinsService.add(player, 300)
+		return CoinsService.add(player, 800)
 	end,
 	[4] = function(player: Player)
-		local trailGranted =
-			CosmeticRewardHelper.grantOrFallback(player, "SquishyTrails", "XLaunchTrail", TRAIL_FALLBACK_COINS)
-		if not trailGranted then
-			return false
-		end
-		return CoinsService.add(player, 400)
+		return CoinsService.add(player, 900)
 	end,
 	[5] = function(player: Player)
 		return CoinsService.add(player, 750)

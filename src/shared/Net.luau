@@ -169,6 +169,20 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.struct({ ok = ByteNet.bool, message = ByteNet.string }),
 		}),
 
+		-- server -> every client. Tells each observer to clone and locally emit
+		-- one authored launch VFX pack. ParticleEmitter:Emit() is a transient
+		-- request, so firing it on a freshly-parented server clone can happen
+		-- before that clone reaches clients. The server still owns the timing
+		-- and position; clients own only the cosmetic particle rendering.
+		mergeLaunchVfx = ByteNet.definePacket({
+			value = ByteNet.struct({
+				templateName = ByteNet.string,
+				worldX = ByteNet.float64,
+				worldY = ByteNet.float64,
+				worldZ = ByteNet.float64,
+			}),
+		}),
+
 		-- client -> server. Request the carried object's Mush interaction.
 		-- MergeService verifies the sender is carrying and is not already
 		-- boosted; the client never chooses its tier, sound, or speed reward.
@@ -196,7 +210,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 
 		--[[
 			client -> server. Request to equip an owned cosmetic. `slot` is one
-			of CosmeticsCatalog.Slot ("KeycapThemes" | "SquishyTrails"); `id` is
+			of CosmeticsCatalog.Slot ("KeycapThemes" | "SquishyBeams"); `id` is
 			a catalog id for that slot. CosmeticsService re-validates both
 			(known slot, known id, actually owned) before writing -- an unowned
 			or unknown id is silently dropped, same as every other "not in the
@@ -204,7 +218,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 
 			No result packet: the equip (or the rejection, which just leaves
 			the old value in place) is visible via the replicated
-			Cosmetics.KeycapThemeId / SquishyTrailId fields DataController.observe
+			Cosmetics.KeycapThemeId / SquishyBeamId fields DataController.observe
 			already watches, so there is nothing else to tell the client.
 		]]
 		cosmeticEquip = ByteNet.definePacket({

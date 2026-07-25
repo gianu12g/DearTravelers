@@ -11,8 +11,8 @@
 	Icon IDs now come from Shared.AssetIds.Images instead of being inlined
 	here. Theme days use the exact per-theme card icon
 	(Images.ThemeIcons[id], same asset CosmeticsController shows on the
-	cosmetics menu); trail days have no dedicated trail icon yet
-	(COSMETICS_PLAN.md), so they reuse the existing pack-style placeholders.
+	cosmetics menu). Days 4 and 6 now pay flat coins (DailyRewardFunctions.luau,
+	2026-07-24), so they use the same Images.Cash icon as every other coin day.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -33,16 +33,16 @@ local DailyRewards = {
 		Text = "250 Coins", -- Text for Ui
 	},
 	[4] = {
-		Icon = Images.StarterPack, -- Icon ID for UI
-		Text = "Cool Trail", -- Text for Ui
+		Icon = Images.Cash, -- Icon ID for UI
+		Text = "500 Coins", -- Text for Ui
 	},
 	[5] = {
 		Icon = Images.Cash, -- Icon ID for UI
 		Text = "500 Coins", -- Text for Ui
 	},
 	[6] = {
-		Icon = Images.SecretPack, -- Icon ID for UI
-		Text = "Red & Black Trail", -- Text for Ui
+		Icon = Images.Cash, -- Icon ID for UI
+		Text = "500 Coins", -- Text for Ui
 	},
 	[7] = {
 		Icon = Images.ThemeIcons.ObsidianGold, -- Icon ID for UI

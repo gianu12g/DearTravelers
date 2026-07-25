@@ -1,9 +1,9 @@
 --!strict
 --[[
 	Binds the merge-gameplay carry mechanic to the Studio-authored controls in
-	PlayerGui.DropLaunchUI.CarryActions. Studio owns the GUI and its Ui-* motion
-	and sound attributes; this controller only owns carry-state visibility and
-	the A.Drop button's network request.
+	PlayerGui.Screens.DropLaunchUI.CarryActions. Studio owns the GUI and its
+	Ui-* motion and sound attributes; this controller only owns carry-state
+	visibility and the A.Drop button's network request.
 
 	DropLaunchUI resets with PlayerGui on respawn, so references are resolved
 	lazily and cached only while their ScreenGui clone is still parented. A new
@@ -36,6 +36,9 @@ local connectedButton: TextButton? = nil
 local activatedConnection: RBXScriptConnection? = nil
 local visibilityUpdate = 0
 
+local connectedScreensFolder: Instance? = nil
+local screensChildAddedConnection: RBXScriptConnection? = nil
+
 --[[
 	Yields only on a cold cache or after PlayerGui is wiped on respawn. Keep
 	this behind task.spawn/event handlers so Init can connect CarryingTier first.
@@ -56,7 +59,8 @@ local function resolveUi(): (Frame, TextButton)
 	end
 
 	local playerGui = player:WaitForChild("PlayerGui")
-	local ui = playerGui:WaitForChild("DropLaunchUI") :: ScreenGui
+	local screens = playerGui:WaitForChild("Screens") :: Folder
+	local ui = screens:WaitForChild("DropLaunchUI") :: ScreenGui
 	local actions = ui:WaitForChild("CarryActions") :: Frame
 	local button = actions:WaitForChild("A.Drop") :: TextButton
 
@@ -103,16 +107,47 @@ local function queueCarryingVisibility(tier: unknown)
 	end)
 end
 
+local function watchScreensFolder(folder: Instance)
+	if connectedScreensFolder == folder then
+		return
+	end
+	if screensChildAddedConnection ~= nil then
+		screensChildAddedConnection:Disconnect()
+	end
+	connectedScreensFolder = folder
+	screensChildAddedConnection = folder.ChildAdded:Connect(function(child)
+		if child.Name == "DropLaunchUI" and child:IsA("ScreenGui") then
+			queueCarryingVisibility(player:GetAttribute("CarryingTier"))
+		end
+	end)
+end
+
 local function watchPlayerGui()
 	local playerGui = player:WaitForChild("PlayerGui")
 
-	playerGui.ChildAdded:Connect(function(child)
-		if child.Name ~= "DropLaunchUI" or not child:IsA("ScreenGui") then
+	playerGui.ChildAdded:Connect(function(child: Instance)
+		if child.Name ~= "Screens" then
 			return
 		end
-
+		-- ResetPlayerGuiOnSpawn re-clones the whole PlayerGui at once, so
+		-- Screens arrives here as a single unit with DropLaunchUI already
+		-- parented inside it -- resolve directly instead of waiting for a
+		-- ChildAdded on the folder that already fired (if at all) before
+		-- watchScreensFolder below could connect.
 		queueCarryingVisibility(player:GetAttribute("CarryingTier"))
+		watchScreensFolder(child)
 	end)
+
+	-- Screens can already exist by the time this connects (the common case,
+	-- since resolveUi above already WaitForChild's it) or can still be on its
+	-- way in on a slow first boot -- the ChildAdded connection above catches
+	-- the late-arrival case, and this catches the already-there case, so
+	-- individual re-clones of DropLaunchUI inside it are watched from here on
+	-- regardless of which race won.
+	local existingScreens = playerGui:FindFirstChild("Screens")
+	if existingScreens ~= nil then
+		watchScreensFolder(existingScreens)
+	end
 end
 
 function CarryController.Init()

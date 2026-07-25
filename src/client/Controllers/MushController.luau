@@ -353,7 +353,8 @@ end
 
 local function resolveDisplay()
 	local playerGui = player:WaitForChild("PlayerGui")
-	local ui = playerGui:WaitForChild("DropLaunchUI")
+	local screens = playerGui:WaitForChild("Screens")
+	local ui = screens:WaitForChild("DropLaunchUI")
 	local actions = ui:WaitForChild("CarryActions")
 	if not actions:IsA("Frame") then
 		log.error(`{actions:GetFullName()} must be a Frame`)
@@ -460,11 +461,47 @@ function MushController.Init()
 	task.spawn(resolveDisplay)
 	task.spawn(function()
 		local playerGui = player:WaitForChild("PlayerGui")
-		playerGui.ChildAdded:Connect(function(child)
-			if child.Name == "DropLaunchUI" and child:IsA("ScreenGui") then
-				task.spawn(resolveDisplay)
+		local connectedScreensFolder: Instance? = nil
+		local screensChildAddedConnection: RBXScriptConnection? = nil
+
+		local function watchScreensFolder(folder: Instance)
+			if connectedScreensFolder == folder then
+				return
 			end
+			if screensChildAddedConnection ~= nil then
+				screensChildAddedConnection:Disconnect()
+			end
+			connectedScreensFolder = folder
+			screensChildAddedConnection = folder.ChildAdded:Connect(function(child)
+				if child.Name == "DropLaunchUI" and child:IsA("ScreenGui") then
+					task.spawn(resolveDisplay)
+				end
+			end)
+		end
+
+		playerGui.ChildAdded:Connect(function(child: Instance)
+			if child.Name ~= "Screens" then
+				return
+			end
+			-- ResetPlayerGuiOnSpawn re-clones the whole PlayerGui at once, so
+			-- Screens arrives here as a single unit with DropLaunchUI already
+			-- parented inside it -- resolve directly instead of waiting for a
+			-- ChildAdded on the folder that already fired (if at all) before
+			-- watchScreensFolder above could connect.
+			task.spawn(resolveDisplay)
+			watchScreensFolder(child)
 		end)
+
+		-- Screens can already exist by the time this connects (the common
+		-- case, since resolveDisplay above already WaitForChild's it) or can
+		-- still be on its way in on a slow first boot -- the ChildAdded
+		-- connection above catches the late-arrival case, and this catches
+		-- the already-there case, so individual re-clones of DropLaunchUI
+		-- inside it are watched from here on regardless of which race won.
+		local existingScreens = playerGui:FindFirstChild("Screens")
+		if existingScreens ~= nil then
+			watchScreensFolder(existingScreens)
+		end
 	end)
 end
 

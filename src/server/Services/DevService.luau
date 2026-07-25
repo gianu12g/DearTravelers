@@ -444,7 +444,7 @@ local function onGrantAllCosmetics(data: { targetUserId: number }, player: Playe
 	end
 
 	grantCatalog("KeycapThemes", CosmeticsCatalog.KeycapThemes)
-	grantCatalog("SquishyTrails", CosmeticsCatalog.SquishyTrails)
+	grantCatalog("SquishyBeams", CosmeticsCatalog.SquishyBeams)
 
 	log.info(`{player.Name} granted all cosmetics to {target.Name}: {granted} granted, {skipped} skipped`)
 	Net.devResult.sendTo({ ok = true, message = `Granted {granted} cosmetics ({skipped} already owned)` }, player)

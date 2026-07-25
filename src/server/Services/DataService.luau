@@ -133,17 +133,18 @@ local TEMPLATE = {
 		Owned + equipped cosmetics (COSMETICS_PLAN.md). New players own only the
 		defaults; equip = a plain field write here, applied client-side via
 		DataController.observe and server-side by CosmeticsService (theme
-		attribute stamp / MergeService trail resolution). No version bump --
-		Reconcile() backfills this whole subtree onto existing profiles, and
-		repairProfileData below enforces the one invariant Reconcile can't:
-		equipped id must be owned.
+		attribute stamp; the world-side beam resolution in MergeService is
+		planned but not yet implemented -- COSMETICS_PLAN.md step 6). No
+		version bump -- Reconcile() backfills this whole subtree onto existing
+		profiles, and repairProfileData below enforces the one invariant
+		Reconcile can't: equipped id must be owned.
 	]]
 	Cosmetics = {
 		KeycapThemeId = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID,
-		SquishyTrailId = CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID,
+		SquishyBeamId = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID,
 		Owned = {
 			KeycapThemes = { CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID } :: { string },
-			SquishyTrails = { CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID } :: { string },
+			SquishyBeams = { CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID } :: { string },
 		},
 	},
 }
@@ -389,10 +390,10 @@ local function repairProfileData(data: any)
 		CosmeticsCatalog.isKeycapTheme,
 		CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
 	)
-	cosmetics.Owned.SquishyTrails = repairOwnedCosmetics(
-		cosmetics.Owned.SquishyTrails,
-		CosmeticsCatalog.isSquishyTrail,
-		CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID
+	cosmetics.Owned.SquishyBeams = repairOwnedCosmetics(
+		cosmetics.Owned.SquishyBeams,
+		CosmeticsCatalog.isSquishyBeam,
+		CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
 	)
 	if
 		type(cosmetics.KeycapThemeId) ~= "string"
@@ -401,11 +402,16 @@ local function repairProfileData(data: any)
 		cosmetics.KeycapThemeId = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
 	end
 	if
-		type(cosmetics.SquishyTrailId) ~= "string"
-		or not table.find(cosmetics.Owned.SquishyTrails, cosmetics.SquishyTrailId)
+		type(cosmetics.SquishyBeamId) ~= "string"
+		or not table.find(cosmetics.Owned.SquishyBeams, cosmetics.SquishyBeamId)
 	then
-		cosmetics.SquishyTrailId = CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID
+		cosmetics.SquishyBeamId = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
 	end
+	-- 2026-07-24 trail->beam migration: Reconcile only ADDS missing keys, so a
+	-- profile saved before this rename still carries the old trail fields
+	-- alongside the new beam ones repaired above. Drop them once, here.
+	cosmetics.SquishyTrailId = nil
+	cosmetics.Owned.SquishyTrails = nil
 
 	local uiSystem = data.UISystem
 	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)

@@ -1,7 +1,7 @@
 --!strict
 --[[
-	Cosmetics menu (COSMETICS_PLAN.md): keycap Theme + squishy Trail catalog,
-	owned-only, equip/unequip. `Top.Keys` / `Top.Trails` pick the active slot;
+	Cosmetics menu (COSMETICS_PLAN.md): keycap Theme + squishy Beam catalog,
+	owned-only, equip/unequip. `Top.Keys` / `Top.Beams` pick the active slot;
 	`Top.Close` already has Ui-Close = true, handled globally by
 	UIKitController -- nothing to wire here.
 
@@ -35,11 +35,11 @@ local log = Log.new("CosmeticsController")
 	AssetIds/Preloader.luau, which recurses into nested groups). Keycap
 	themes are backed directly by Images.ThemeIcons -- one entry per catalog
 	id, added to Images.luau itself, no local duplicate needed here. Squishy
-	trails have no icon assets authored yet (COSMETICS_PLAN.md): an empty
+	beams have no icon assets authored yet (COSMETICS_PLAN.md): an empty
 	local map until they exist, same two-step flow (an Images.luau entry,
-	then a line in TRAIL_ICON_OVERRIDES) once art does.
+	then a line in BEAM_ICON_OVERRIDES) once art does.
 ]]
-local TRAIL_ICON_OVERRIDES: { [string]: number } = {}
+local BEAM_ICON_OVERRIDES: { [string]: number } = {}
 
 local CosmeticsController = {}
 
@@ -47,21 +47,21 @@ local function catalogForSlot(slot: CosmeticsCatalog.Slot): { CosmeticsCatalog.C
 	if slot == "KeycapThemes" then
 		return CosmeticsCatalog.KeycapThemes
 	end
-	return CosmeticsCatalog.SquishyTrails
+	return CosmeticsCatalog.SquishyBeams
 end
 
 local function defaultIdForSlot(slot: CosmeticsCatalog.Slot): string
 	if slot == "KeycapThemes" then
 		return CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
 	end
-	return CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID
+	return CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
 end
 
 local function iconOverridesForSlot(slot: CosmeticsCatalog.Slot): { [string]: number }
 	if slot == "KeycapThemes" then
 		return Images.ThemeIcons
 	end
-	return TRAIL_ICON_OVERRIDES
+	return BEAM_ICON_OVERRIDES
 end
 
 -- The one place that decides EquipButton.PriceTag.Text -- shared by the full
@@ -125,19 +125,19 @@ function CosmeticsController.Start()
 	local frame = Frames.get("Cosmetics")
 	local top = frame:WaitForChild("Top")
 	local keysButton = top:WaitForChild("Keys") :: GuiButton
-	local trailsButton = top:WaitForChild("Trails") :: GuiButton
+	local beamsButton = top:WaitForChild("Beams") :: GuiButton
 	local scrollFrame = frame:WaitForChild("MainScrollingFrame") :: ScrollingFrame
 	local holder = scrollFrame:WaitForChild("Holder") :: Frame
 	local template = holder:WaitForChild("ThemeTemplate1") :: Frame
 
 	local activeSlot: CosmeticsCatalog.Slot = "KeycapThemes"
-	local ownedIds: { KeycapThemes: { [string]: true }, SquishyTrails: { [string]: true } } = {
+	local ownedIds: { KeycapThemes: { [string]: true }, SquishyBeams: { [string]: true } } = {
 		KeycapThemes = {},
-		SquishyTrails = {},
+		SquishyBeams = {},
 	}
-	local equippedIds: { KeycapThemes: string, SquishyTrails: string } = {
+	local equippedIds: { KeycapThemes: string, SquishyBeams: string } = {
 		KeycapThemes = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID,
-		SquishyTrails = CosmeticsCatalog.DEFAULT_SQUISHY_TRAIL_ID,
+		SquishyBeams = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID,
 	}
 
 	-- Not equipped -> equip it. Equipped and already the default -> no-op
@@ -207,9 +207,9 @@ function CosmeticsController.Start()
 				end
 			end
 
-			-- Gradient restyle is THEME-ONLY -- trail card visuals beyond the
+			-- Gradient restyle is THEME-ONLY -- beam card visuals beyond the
 			-- icon stay name-only for now, stubbed pending design
-			-- (COSMETICS_PLAN.md "Trails UI").
+			-- (COSMETICS_PLAN.md "Beams UI").
 			if slot == "KeycapThemes" then
 				local colors = KeyCapsController.getThemeColors(entry.Id)
 				local gradient = card:FindFirstChild("UIGradient")
@@ -287,8 +287,8 @@ function CosmeticsController.Start()
 		activeSlot = "KeycapThemes"
 		render()
 	end)
-	trailsButton.MouseButton1Click:Connect(function()
-		activeSlot = "SquishyTrails"
+	beamsButton.MouseButton1Click:Connect(function()
+		activeSlot = "SquishyBeams"
 		render()
 	end)
 
@@ -299,9 +299,9 @@ function CosmeticsController.Start()
 			return
 		end
 		local keycapThemes = value.KeycapThemes
-		local squishyTrails = value.SquishyTrails
+		local squishyBeams = value.SquishyBeams
 		ownedIds.KeycapThemes = toIdSet(if type(keycapThemes) == "table" then keycapThemes else {})
-		ownedIds.SquishyTrails = toIdSet(if type(squishyTrails) == "table" then squishyTrails else {})
+		ownedIds.SquishyBeams = toIdSet(if type(squishyBeams) == "table" then squishyBeams else {})
 		scheduleRender()
 	end)
 
@@ -321,13 +321,13 @@ function CosmeticsController.Start()
 		updateEquipButtonLabel(value)
 	end)
 
-	DataController.observe({ "Cosmetics", "SquishyTrailId" }, function(value: any)
+	DataController.observe({ "Cosmetics", "SquishyBeamId" }, function(value: any)
 		if type(value) ~= "string" then
 			return
 		end
-		local previousId = equippedIds.SquishyTrails
-		equippedIds.SquishyTrails = value
-		if activeSlot ~= "SquishyTrails" then
+		local previousId = equippedIds.SquishyBeams
+		equippedIds.SquishyBeams = value
+		if activeSlot ~= "SquishyBeams" then
 			return
 		end
 		updateEquipButtonLabel(previousId)

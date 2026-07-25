@@ -17,15 +17,16 @@
 local Images = {
 	LaunchTarget = 72382621618473, -- LaunchController drop-target marker icon
 	TopbarSettings = 106769461169677, -- TopbarUIController topbar button that opens Settings
-	SecretPack = 88132060004695, -- DailyRewards day 2 + Promotion "Secret Pack"
-	StarterPack = 73167539394400, -- DailyRewards day 4 + Promotion "Starter Pack"
-	Cash = 110024503496390, -- DailyRewards day 5 + every WheelSpin cash reward
-	PlaytimeReward = 112943806732824, -- every PlaytimeRewards slot
+	SecretPack = 88132060004695, -- Promotion "Secret Pack" only (PlaytimeRewards tier 4 moved to Cash 2026-07-24)
+	StarterPack = 73167539394400, -- Promotion "Starter Pack" only (PlaytimeRewards tier 3 moved to Cash 2026-07-24)
+	Cash = 110024503496390, -- DailyRewards days 1/3/4/5/6 + PlaytimeRewards coin tiers 1-5 + every WheelSpin cash reward
+	PlaytimeReward = 112943806732824, -- currently unused (no consumers as of 2026-07-24; kept to avoid preloader/id ripple)
 	VipPass = 122420734012429, -- Promotion "VIP"
 	TeleporterPass = 113198463459379, -- Promotion "Teleporter"
 	SpeedPass = 130304640405359, -- Promotion "x2 Speed"
 	Cash100K = 72195296200818, -- Promotion "100K Cash"
 	Wheel = 101212300915466, -- Promotion "x5 Spins" (asset's real name is "Wheel")
+	dropPinIcon = 120414872863197, --The marker when we select a drop location for the merge game
 
 	--[[
 		Cosmetics keycap-theme card icons (COSMETICS_PLAN.md), keyed by

@@ -2,9 +2,15 @@
 --[[
 	Connects the launch button to the authored LaunchTargetingUI and
 	LaunchTargetMarkerUI instances in StarterGui. Map geometry and UI remain
-	entirely authored. Roblox does not replicate Camera instances, so the
-	controller creates only the ViewportFrame's local camera from authored
-	attributes; it never builds, resizes, replaces, or clears MapPreview.
+	entirely authored. Targeting takes over the real Workspace.CurrentCamera --
+	tweening it to an authored top-down overview pose while active, and back to
+	wherever the player's camera actually was on every exit path -- and resolves
+	the clicked world point with a real workspace raycast against
+	Workspace.MapLayout. LaunchMapViewport has no Camera of its own anymore --
+	it renders as a pure 2D label overlay, realigned to sit atop the
+	real-camera overview; its opaque "BG" backdrop stays hidden for the
+	duration, and the overlay itself stays hidden until the camera finishes
+	tweening into the overview pose (see takeOverCamera's onPositioned).
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -24,7 +30,20 @@ local log = Log.new("LaunchController")
 local player = Players.LocalPlayer
 
 local WAIT_TIMEOUT = 10
-local RAY_DISTANCE = 5000
+-- The overview camera height is computed to fit the map (see
+-- resolveOverviewPose), clamped to at least FALLBACK_OVERVIEW_HEIGHT and
+-- staying well under ~650 studs even on tall/portrait aspect ratios, so 2500
+-- reaches the map plane from any on-screen click with generous margin.
+local RAY_DISTANCE = 2500
+local CAMERA_TAKEOVER_TWEEN = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local CAMERA_RESTORE_TWEEN = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Floor (and fallback, if the AABB comes out empty/degenerate) for the
+-- computed overview height in resolveOverviewPose.
+local FALLBACK_OVERVIEW_HEIGHT = 350
+-- Fit margin applied to the computed overview height: 1.0 = map exactly
+-- fills the tighter screen axis; raise to zoom out further. Hand-tuned in
+-- Studio to put the camera at ~430 studs on a 16:9 screen at FOV 70.
+local OVERVIEW_FIT_MARGIN = 1.325
 local TARGET_ICON_WIDTH_SCALE = 0.056
 local TARGET_ICON_DROP_DISTANCE = 46
 local TARGET_ICON_START_SCALE = 0.3
@@ -69,6 +88,8 @@ local connectedButton: TextButton? = nil
 local activatedConnection: RBXScriptConnection? = nil
 local connectedCancelButton: TextButton? = nil
 local cancelActivatedConnection: RBXScriptConnection? = nil
+local connectedScreensFolder: Instance? = nil
+local screensChildAddedConnection: RBXScriptConnection? = nil
 
 local targeting = false
 local awaitingServer = false
@@ -76,9 +97,6 @@ local playingAcceptedPlop = false
 local pendingSelection: TargetSelection? = nil
 local targetingGui: ScreenGui? = nil
 local targetMarkerGui: ScreenGui? = nil
-local overview: ViewportFrame? = nil
-local overviewWorld: WorldModel? = nil
-local overviewCamera: Camera? = nil
 local targetIconHolder: Frame? = nil
 local targetIcon: ImageLabel? = nil
 local targetIconMotion: Motion.Handle? = nil
@@ -86,6 +104,27 @@ local targetDebugBox: Frame? = nil
 local hintText: TextLabel? = nil
 local hintRestPosition: UDim2? = nil
 local hintMotion: Motion.Handle? = nil
+
+-- Real-camera overview takeover (replaces the old ViewportFrame mini-map).
+-- cameraHeld stays true for the whole time Workspace.CurrentCamera is ours --
+-- from the moment takeOverCamera goes Scriptable until releaseCameraOverview's
+-- restore tween actually COMPLETES, not merely until `targeting` turns false.
+-- That gap is what lets a cancel-then-immediately-retarget re-take the camera
+-- mid-restore without capturing the in-flight (already-overview-ish) pose as
+-- "original".
+local cameraHeld = false
+local capturedCameraCFrame: CFrame? = nil
+local capturedCameraFieldOfView: number? = nil
+local capturedCameraType: Enum.CameraType? = nil
+local cameraMotion: Motion.Handle? = nil
+local overviewPoseWarned = false
+
+-- AABB half-extents of Workspace.MapLayout's BaseParts (~7,300 of them), used
+-- to fit the computed overview height in resolveOverviewPose. The map is
+-- static, so this is computed once on first use and cached for the rest of
+-- the client session.
+local cachedMapHalfExtentX: number? = nil
+local cachedMapHalfExtentZ: number? = nil
 
 local function radiusDebugEnabled(): boolean
 	return player:GetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE) == true
@@ -134,40 +173,249 @@ local function resolveAuthoredMapUi(viewport: ViewportFrame): AuthoredMapUi?
 	}
 end
 
-local function resolveAuthoredOverview(viewport: ViewportFrame): (WorldModel?, Camera?)
-	local worldInstance = viewport:FindFirstChild("MapPreview")
-	if worldInstance == nil or not worldInstance:IsA("WorldModel") then
-		log.warn("LaunchTargetingUI.LaunchMapViewport.MapPreview is missing")
+-- The 8 sign combinations for a box's local-space corners, used to build a
+-- world-space AABB out of arbitrarily rotated parts in computeMapHalfExtents.
+local CORNER_SIGNS = {
+	Vector3.new(-1, -1, -1),
+	Vector3.new(-1, -1, 1),
+	Vector3.new(-1, 1, -1),
+	Vector3.new(-1, 1, 1),
+	Vector3.new(1, -1, -1),
+	Vector3.new(1, -1, 1),
+	Vector3.new(1, 1, -1),
+	Vector3.new(1, 1, 1),
+}
+
+--[[
+	Computes (and caches) the X/Z half-extents of the AABB of every BasePart
+	descendant of mapLayout. The map (~7,300 parts) is static for the whole
+	client session, so this walks the tree once and every later call just
+	returns the cached values.
+]]
+local function computeMapHalfExtents(mapLayout: Instance): (number, number)
+	if cachedMapHalfExtentX ~= nil and cachedMapHalfExtentZ ~= nil then
+		return cachedMapHalfExtentX, cachedMapHalfExtentZ
+	end
+
+	local minX, maxX = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	local foundPart = false
+	for _, descendant in mapLayout:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			foundPart = true
+			local cframe = descendant.CFrame
+			local halfSize = descendant.Size * 0.5
+			for _, signs in CORNER_SIGNS do
+				local corner = cframe:PointToWorldSpace(halfSize * signs)
+				minX = math.min(minX, corner.X)
+				maxX = math.max(maxX, corner.X)
+				minZ = math.min(minZ, corner.Z)
+				maxZ = math.max(maxZ, corner.Z)
+			end
+		end
+	end
+
+	local halfExtentX = if foundPart then (maxX - minX) / 2 else 0
+	local halfExtentZ = if foundPart then (maxZ - minZ) / 2 else 0
+	cachedMapHalfExtentX = halfExtentX
+	cachedMapHalfExtentZ = halfExtentZ
+	return halfExtentX, halfExtentZ
+end
+
+--[[
+	Resolves the top-down overview camera pose WITHOUT mutating anything --
+	unlike the old resolveAuthoredOverview, this never creates or reparents a
+	Camera, because LaunchMapViewport no longer renders anything of its own
+	(it stays hidden until the camera finishes tweening into this pose; see
+	takeOverCamera below).
+
+	The old LaunchMapCamera Camera child and LaunchCameraCFrame/
+	LaunchCameraFieldOfView viewport attributes are gone: they were authored
+	against the old ViewportFrame mini-map, which ignores Lighting (no clouds
+	or atmosphere). Replayed on the real camera, that pose (Y=1185, FOV 25)
+	sits above the cloud layer -- confirmed live, the view is almost entirely
+	sky.
+
+	Precedence:
+	1. LaunchOverviewCFrame/LaunchOverviewFieldOfView viewport attributes --
+	   a manual override for future art direction. Neither attribute exists
+	   in the place today; that's intentional, this tier is an escape hatch.
+	2. A pose computed to fit Workspace.MapLayout under the live camera's
+	   current FOV and aspect ratio, using the live camera's current FOV as
+	   the returned FOV too (so the takeover tween never fights a menu
+	   controller's own FieldOfView tween).
+]]
+local function resolveOverviewPose(viewport: ViewportFrame?): (CFrame?, number?)
+	if viewport ~= nil then
+		local overrideCFrame = viewport:GetAttribute("LaunchOverviewCFrame")
+		local overrideFieldOfView = viewport:GetAttribute("LaunchOverviewFieldOfView")
+		if typeof(overrideCFrame) == "CFrame" and typeof(overrideFieldOfView) == "number" then
+			return overrideCFrame, overrideFieldOfView
+		end
+	end
+
+	local mapLayout = Workspace:FindFirstChild("MapLayout")
+	local centerMap = if mapLayout ~= nil then mapLayout:FindFirstChild("CenterMap") else nil
+	if mapLayout == nil or centerMap == nil or not centerMap:IsA("BasePart") then
 		return nil, nil
 	end
 
-	local camera: Camera? = nil
-	local cameraInstance = viewport:FindFirstChild("LaunchMapCamera")
-	if cameraInstance ~= nil and cameraInstance:IsA("Camera") then
-		camera = cameraInstance
-	else
-		local cameraCFrame = viewport:GetAttribute("LaunchCameraCFrame")
-		local cameraFocus = viewport:GetAttribute("LaunchCameraFocus")
-		local cameraFieldOfView = viewport:GetAttribute("LaunchCameraFieldOfView")
-		if
-			typeof(cameraCFrame) ~= "CFrame"
-			or typeof(cameraFocus) ~= "CFrame"
-			or typeof(cameraFieldOfView) ~= "number"
-		then
-			log.warn("LaunchTargetingUI.LaunchMapViewport camera attributes are missing")
-			return nil, nil
-		end
+	local liveCamera = Workspace.CurrentCamera
+	local fieldOfView = if liveCamera ~= nil then liveCamera.FieldOfView else 70
+	local center = centerMap.Position
 
-		camera = Instance.new("Camera")
-		camera.Name = "LaunchMapCamera"
-		camera.CFrame = cameraCFrame
-		camera.Focus = cameraFocus
-		camera.FieldOfView = cameraFieldOfView
-		camera.Parent = viewport
+	local height = FALLBACK_OVERVIEW_HEIGHT
+	if liveCamera ~= nil then
+		local halfExtentX, halfExtentZ = computeMapHalfExtents(mapLayout)
+		local halfTanV = math.tan(math.rad(fieldOfView) / 2)
+		local aspect = liveCamera.ViewportSize.X / math.max(1, liveCamera.ViewportSize.Y)
+		local halfTanH = halfTanV * aspect
+		if halfExtentX > 0 and halfExtentZ > 0 and halfTanV > 0 and halfTanH > 0 then
+			height = math.max(
+				FALLBACK_OVERVIEW_HEIGHT,
+				OVERVIEW_FIT_MARGIN * math.max(halfExtentZ / halfTanV, halfExtentX / halfTanH)
+			)
+		end
 	end
 
-	viewport.CurrentCamera = camera
-	return worldInstance, camera
+	-- The explicit up vector is required: with a straight-down look direction
+	-- the default up (0, 1, 0) is parallel to the look vector and produces a
+	-- degenerate CFrame. (0, 0, -1) reproduces the screen orientation of the
+	-- old authored pose (world -Z renders as screen up).
+	return CFrame.lookAt(center + Vector3.new(0, height, 0), center, Vector3.new(0, 0, -1)), fieldOfView
+end
+
+--[[
+	Takes Workspace.CurrentCamera over for the map overview. Capture-once: if
+	we already hold the camera (cameraHeld), a prior restore is still in
+	flight -- cancel it and re-tween from wherever the camera currently sits,
+	but never re-capture, or the in-flight overview-ish pose would get stored
+	as "original" and the real original would be lost for good.
+
+	onPositioned (if given) fires exactly once, when the camera is considered
+	"in position": on the takeover tween's onComplete along the normal path,
+	or IMMEDIATELY on either degenerate early-return below, so a caller hiding
+	something until the camera settles never strands it hidden forever. A
+	cancel of the in-flight tween (re-takeover, or the caller giving up)
+	suppresses onComplete via Motion's cancel -- callers must tolerate that.
+]]
+local function takeOverCamera(viewport: ViewportFrame?, onPositioned: (() -> ())?)
+	local currentCamera = Workspace.CurrentCamera
+	if currentCamera == nil then
+		if onPositioned ~= nil then
+			onPositioned()
+		end
+		return
+	end
+
+	local overviewCFrame, overviewFieldOfView = resolveOverviewPose(viewport)
+	if overviewCFrame == nil or overviewFieldOfView == nil then
+		if not overviewPoseWarned then
+			overviewPoseWarned = true
+			log.warn(
+				"no launch map overview pose available (LaunchOverview* attributes and MapLayout.CenterMap are"
+					.. " both missing) -- targeting will use the live camera as-is"
+			)
+		end
+		if onPositioned ~= nil then
+			onPositioned()
+		end
+		return
+	end
+
+	if cameraMotion ~= nil then
+		cameraMotion.cancel()
+		cameraMotion = nil
+	end
+	if not cameraHeld then
+		cameraHeld = true
+		capturedCameraCFrame = currentCamera.CFrame
+		capturedCameraFieldOfView = currentCamera.FieldOfView
+		capturedCameraType = currentCamera.CameraType
+	end
+
+	currentCamera.CameraType = Enum.CameraType.Scriptable
+
+	-- Driven through Motion.value (a proxy NumberValue tween) instead of
+	-- Motion.tween directly on the camera instance. TweenService cancels an
+	-- instance's ENTIRE previous tween the moment a new tween shares any
+	-- property with it -- so a menu/prompt tweening Camera.FieldOfView
+	-- (UIKitController, MonetizationController) would silently kill a
+	-- Motion.tween running here mid-flight, skip its onComplete, and strand
+	-- the camera Scriptable forever. The proxy never touches the real
+	-- camera's properties via TweenService, so it cannot collide.
+	local startCFrame = currentCamera.CFrame
+	local startFieldOfView = currentCamera.FieldOfView
+	cameraMotion = Motion.value(0, 1, CAMERA_TAKEOVER_TWEEN, function(alpha)
+		if currentCamera.Parent == nil then
+			return
+		end
+		currentCamera.CFrame = startCFrame:Lerp(overviewCFrame, alpha)
+		currentCamera.FieldOfView = startFieldOfView + (overviewFieldOfView - startFieldOfView) * alpha
+	end, onPositioned)
+end
+
+--[[
+	Tweens Workspace.CurrentCamera back to whatever it was before takeOverCamera
+	touched it. CameraType only flips back to the captured type -- and
+	cameraHeld only clears -- once the tween actually COMPLETES. Motion's
+	:cancel() (used when takeOverCamera re-takes the camera mid-restore)
+	suppresses onComplete, so an interrupted restore correctly leaves
+	cameraHeld true and the captured values intact instead of losing them or
+	leaving CameraType stuck Scriptable.
+]]
+local function releaseCameraOverview()
+	if not cameraHeld then
+		return
+	end
+	if cameraMotion ~= nil then
+		cameraMotion.cancel()
+		cameraMotion = nil
+	end
+
+	local currentCamera = Workspace.CurrentCamera
+	local restoreCFrame = capturedCameraCFrame
+	local restoreFieldOfView = capturedCameraFieldOfView
+	local restoreCameraType = capturedCameraType
+	if currentCamera == nil or restoreCFrame == nil or restoreFieldOfView == nil or restoreCameraType == nil then
+		-- Nothing sane to restore to (camera gone, or an incomplete capture --
+		-- should not happen since the three are always set together). Reset
+		-- CameraType if we still can, and drop the held state either way so a
+		-- future takeover captures fresh values instead of reusing stale ones.
+		if currentCamera ~= nil and restoreCameraType ~= nil then
+			currentCamera.CameraType = restoreCameraType
+		end
+		cameraHeld = false
+		capturedCameraCFrame = nil
+		capturedCameraFieldOfView = nil
+		capturedCameraType = nil
+		return
+	end
+
+	-- See takeOverCamera: driven through Motion.value's proxy NumberValue so a
+	-- menu/prompt tweening Camera.FieldOfView elsewhere cannot supersede this
+	-- restore and strand the camera Scriptable.
+	local startCFrame = currentCamera.CFrame
+	local startFieldOfView = currentCamera.FieldOfView
+
+	local motion: Motion.Handle?
+	motion = Motion.value(0, 1, CAMERA_RESTORE_TWEEN, function(alpha)
+		if currentCamera.Parent == nil then
+			return
+		end
+		currentCamera.CFrame = startCFrame:Lerp(restoreCFrame, alpha)
+		currentCamera.FieldOfView = startFieldOfView + (restoreFieldOfView - startFieldOfView) * alpha
+	end, function()
+		if cameraMotion == motion then
+			cameraMotion = nil
+		end
+		currentCamera.CameraType = restoreCameraType
+		cameraHeld = false
+		capturedCameraCFrame = nil
+		capturedCameraFieldOfView = nil
+		capturedCameraType = nil
+	end)
+	cameraMotion = motion
 end
 
 local function updateAuthoredOwnership(authoredUi: AuthoredMapUi)
@@ -203,6 +451,8 @@ local function updateAuthoredOwnership(authoredUi: AuthoredMapUi)
 end
 
 local function resolveTargetMarkerUi(): (ScreenGui?, Frame?, ImageLabel?, Frame?)
+	-- LaunchTargetMarkerUI stays a direct PlayerGui child -- unlike
+	-- LaunchTargetingUI/DropLaunchUI, it was never moved under Screens.
 	local playerGui = player:WaitForChild("PlayerGui")
 	local guiInstance = playerGui:WaitForChild("LaunchTargetMarkerUI", WAIT_TIMEOUT)
 	if guiInstance == nil or not guiInstance:IsA("ScreenGui") then
@@ -231,9 +481,14 @@ end
 
 local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?, AuthoredMapUi?)
 	local playerGui = player:WaitForChild("PlayerGui")
-	local uiInstance = playerGui:WaitForChild("LaunchTargetingUI", WAIT_TIMEOUT)
+	local screensInstance = playerGui:WaitForChild("Screens", WAIT_TIMEOUT)
+	if screensInstance == nil then
+		log.warn("PlayerGui.Screens did not appear -- launch targeting disabled")
+		return nil, nil, nil
+	end
+	local uiInstance = screensInstance:WaitForChild("LaunchTargetingUI", WAIT_TIMEOUT)
 	if uiInstance == nil or not uiInstance:IsA("ScreenGui") then
-		log.warn("PlayerGui.LaunchTargetingUI did not appear -- launch targeting disabled")
+		log.warn("PlayerGui.Screens.LaunchTargetingUI did not appear -- launch targeting disabled")
 		return nil, nil, nil
 	end
 
@@ -321,11 +576,9 @@ local function destroyTargetingVisuals()
 	local gui = targetingGui
 	local markerGui = targetMarkerGui
 	local iconMotion = targetIconMotion
+	local hudGui = dropLaunchUi
 	cancelHintMotion()
 	targetMarkerGui = nil
-	overview = nil
-	overviewWorld = nil
-	overviewCamera = nil
 	targetIconHolder = nil
 	targetIcon = nil
 	targetIconMotion = nil
@@ -339,6 +592,10 @@ local function destroyTargetingVisuals()
 	if markerGui ~= nil and markerGui.Parent ~= nil then
 		markerGui.Enabled = false
 	end
+	if hudGui ~= nil and hudGui.Parent ~= nil then
+		hudGui.Enabled = true
+	end
+	releaseCameraOverview()
 end
 
 function LaunchController.cancelTargeting()
@@ -353,29 +610,18 @@ function LaunchController.cancelTargeting()
 end
 
 local function selectionAt(screenPosition: Vector2): TargetSelection?
-	local viewport = overview
-	local worldModel = overviewWorld
-	local camera = overviewCamera
-	if viewport == nil or worldModel == nil or camera == nil then
+	local camera = Workspace.CurrentCamera
+	local mapLayout = Workspace:FindFirstChild("MapLayout")
+	if camera == nil or mapLayout == nil then
 		return nil
 	end
 
-	local absolutePosition = viewport.AbsolutePosition
-	local absoluteSize = viewport.AbsoluteSize
-	if absoluteSize.X <= 0 or absoluteSize.Y <= 0 then
-		return nil
-	end
-	local xScale = (screenPosition.X - absolutePosition.X) / absoluteSize.X
-	local yScale = (screenPosition.Y - absolutePosition.Y) / absoluteSize.Y
-	if xScale < 0 or xScale > 1 or yScale < 0 or yScale > 1 then
-		return nil
-	end
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Include
+	raycastParams.FilterDescendantsInstances = { mapLayout }
 
-	local aspect = absoluteSize.X / absoluteSize.Y
-	local tangent = math.tan(math.rad(camera.FieldOfView) / 2)
-	local cameraDirection = Vector3.new((xScale * 2 - 1) * aspect * tangent, (1 - yScale * 2) * tangent, -1).Unit
-	local worldDirection = camera.CFrame:VectorToWorldSpace(cameraDirection)
-	local result = worldModel:Raycast(camera.CFrame.Position, worldDirection * RAY_DISTANCE)
+	local unitRay = camera:ScreenPointToRay(screenPosition.X, screenPosition.Y)
+	local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * RAY_DISTANCE, raycastParams)
 	if result == nil then
 		return nil
 	end
@@ -384,7 +630,8 @@ local function selectionAt(screenPosition: Vector2): TargetSelection?
 	if resultDepth <= 0 then
 		return nil
 	end
-	local radiusDiameter = (MergeConfig.LAUNCH_IMPACT_RADIUS * absoluteSize.Y) / (resultDepth * tangent)
+	local tangent = math.tan(math.rad(camera.FieldOfView) / 2)
+	local radiusDiameter = (MergeConfig.LAUNCH_IMPACT_RADIUS * camera.ViewportSize.Y) / (resultDepth * tangent)
 
 	return {
 		worldX = result.Position.X,
@@ -547,17 +794,31 @@ local function beginTargeting()
 	markerGui.Enabled = false
 	iconHolder.Visible = false
 	debugBox.Visible = false
-
-	local worldModel, camera = resolveAuthoredOverview(authoredViewport)
-	if worldModel == nil or camera == nil then
-		return
+	-- The opaque "BG" backdrop is retired in favor of the real-camera overview
+	-- below and never comes back -- the authored default on a fresh clone
+	-- already starts Visible, which is all a future re-clone needs.
+	-- LaunchMapViewport itself starts hidden here and only turns back on once
+	-- takeOverCamera's onPositioned callback confirms the camera has actually
+	-- finished tweening into the overview pose (or fires immediately on a
+	-- degenerate path -- see takeOverCamera). Its labels still populate now,
+	-- while hidden, via updateAuthoredOwnership below. The hint and Cancel
+	-- button are siblings of the viewport in the same ScreenGui and keep
+	-- appearing immediately with it.
+	local overlayBackground = overlayGui:FindFirstChild("BG")
+	if overlayBackground ~= nil and overlayBackground:IsA("Frame") then
+		overlayBackground.Visible = false
 	end
+	authoredViewport.Visible = false
+
 	updateAuthoredOwnership(authoredMapUi)
+	takeOverCamera(authoredViewport, function()
+		if not targeting or authoredViewport.Parent == nil then
+			return
+		end
+		authoredViewport.Visible = true
+	end)
 
 	targetMarkerGui = markerGui
-	overview = authoredViewport
-	overviewWorld = worldModel
-	overviewCamera = camera
 	targetIconHolder = iconHolder
 	targetIcon = icon
 	targetDebugBox = debugBox
@@ -568,6 +829,19 @@ local function beginTargeting()
 	setHint("Choose anywhere on the map")
 	markerGui.Enabled = true
 	overlayGui.Enabled = true
+
+	-- Deferred one frame: this runs inside the launch button's own Activated
+	-- handler, and disabling its ScreenGui synchronously can strand
+	-- Buttons.luau's hover/press state machine (see src/client/UI/Buttons.luau
+	-- MouseEnter/MouseButton1Down handling -- MouseLeave never fires once the
+	-- gui is gone). Re-check targeting and ui.Parent after the defer -- a
+	-- same-frame cancel must not hide the HUD permanently.
+	task.defer(function()
+		if not targeting or ui.Parent == nil then
+			return
+		end
+		ui.Enabled = false
+	end)
 end
 
 local function resolveUi(): TextButton?
@@ -581,9 +855,14 @@ local function resolveUi(): TextButton?
 	end
 
 	local playerGui = player:WaitForChild("PlayerGui")
-	local uiInstance = playerGui:WaitForChild("DropLaunchUI", WAIT_TIMEOUT)
+	local screensInstance = playerGui:WaitForChild("Screens", WAIT_TIMEOUT)
+	if screensInstance == nil then
+		log.warn("PlayerGui.Screens did not appear -- launch control disabled")
+		return nil
+	end
+	local uiInstance = screensInstance:WaitForChild("DropLaunchUI", WAIT_TIMEOUT)
 	if uiInstance == nil or not uiInstance:IsA("ScreenGui") then
-		log.warn("PlayerGui.DropLaunchUI did not appear -- launch control disabled")
+		log.warn("PlayerGui.Screens.DropLaunchUI did not appear -- launch control disabled")
 		return nil
 	end
 	local actionsInstance = uiInstance:WaitForChild("CarryActions", WAIT_TIMEOUT)
@@ -624,39 +903,88 @@ local function bindLaunchButton()
 	updateLaunchCooldownDisplay()
 end
 
+local function resetDropLaunchUiState()
+	LaunchController.cancelTargeting()
+	dropLaunchUi = nil
+	launchButton = nil
+	launchButtonLabel = nil
+	launchButtonGradient = nil
+	launchButtonIcon = nil
+	readyLaunchGradient = nil
+	task.spawn(bindLaunchButton)
+end
+
+local function resetLaunchTargetingUiState(child: ScreenGui?)
+	LaunchController.cancelTargeting()
+	targetingGui = nil
+	hintText = nil
+	hintRestPosition = nil
+	connectedCancelButton = nil
+	if cancelActivatedConnection ~= nil then
+		cancelActivatedConnection:Disconnect()
+		cancelActivatedConnection = nil
+	end
+	if child ~= nil then
+		child.Enabled = false
+	end
+	task.spawn(function()
+		local authoredGui = resolveTargetingUi()
+		if authoredGui ~= nil then
+			authoredGui.Enabled = false
+		end
+	end)
+end
+
+-- Catches DropLaunchUI/LaunchTargetingUI being re-cloned directly inside an
+-- already-connected Screens folder without the whole PlayerGui resetting
+-- (e.g. some future system re-adding just one of them). The whole-PlayerGui
+-- respawn case is handled separately in watchPlayerGui below, since there
+-- Screens arrives with both ScreenGuis already parented -- their own
+-- ChildAdded on the folder fires (if it fires at all) before this connection
+-- could ever be made.
+local function onScreensChildAdded(child: Instance)
+	if not child:IsA("ScreenGui") then
+		return
+	end
+	if child.Name == "DropLaunchUI" then
+		resetDropLaunchUiState()
+	elseif child.Name == "LaunchTargetingUI" then
+		resetLaunchTargetingUiState(child)
+	end
+end
+
+local function watchScreensFolder(folder: Instance)
+	if connectedScreensFolder == folder then
+		return
+	end
+	if screensChildAddedConnection ~= nil then
+		screensChildAddedConnection:Disconnect()
+	end
+	connectedScreensFolder = folder
+	screensChildAddedConnection = folder.ChildAdded:Connect(onScreensChildAdded)
+end
+
 local function watchPlayerGui()
 	local playerGui = player:WaitForChild("PlayerGui")
-	playerGui.ChildAdded:Connect(function(child)
+	playerGui.ChildAdded:Connect(function(child: Instance)
+		if child.Name == "Screens" then
+			-- ResetPlayerGuiOnSpawn re-clones the whole PlayerGui at once, so
+			-- Screens arrives here as a single unit with LaunchTargetingUI and
+			-- DropLaunchUI already parented inside it -- reset both directly
+			-- instead of waiting for a ChildAdded on the folder that already
+			-- fired (if at all) before watchScreensFolder below could connect.
+			resetDropLaunchUiState()
+			local targetingUi = child:FindFirstChild("LaunchTargetingUI")
+			resetLaunchTargetingUiState(
+				if targetingUi ~= nil and targetingUi:IsA("ScreenGui") then targetingUi else nil
+			)
+			watchScreensFolder(child)
+			return
+		end
 		if not child:IsA("ScreenGui") then
 			return
 		end
-		if child.Name == "DropLaunchUI" then
-			LaunchController.cancelTargeting()
-			dropLaunchUi = nil
-			launchButton = nil
-			launchButtonLabel = nil
-			launchButtonGradient = nil
-			launchButtonIcon = nil
-			readyLaunchGradient = nil
-			task.spawn(bindLaunchButton)
-		elseif child.Name == "LaunchTargetingUI" then
-			LaunchController.cancelTargeting()
-			targetingGui = nil
-			hintText = nil
-			hintRestPosition = nil
-			connectedCancelButton = nil
-			if cancelActivatedConnection ~= nil then
-				cancelActivatedConnection:Disconnect()
-				cancelActivatedConnection = nil
-			end
-			child.Enabled = false
-			task.spawn(function()
-				local authoredGui = resolveTargetingUi()
-				if authoredGui ~= nil then
-					authoredGui.Enabled = false
-				end
-			end)
-		elseif child.Name == "LaunchTargetMarkerUI" then
+		if child.Name == "LaunchTargetMarkerUI" then
 			LaunchController.cancelTargeting()
 			targetMarkerGui = nil
 			targetIconHolder = nil
@@ -665,6 +993,17 @@ local function watchPlayerGui()
 			child.Enabled = false
 		end
 	end)
+
+	-- Screens can already exist by the time this connects (the common case,
+	-- since resolveTargetingUi/resolveUi below already WaitForChild it) or
+	-- can still be on its way in on a slow first boot -- the ChildAdded
+	-- connection above catches the late-arrival case, and this catches the
+	-- already-there case, so individual re-clones inside it are watched from
+	-- here on regardless of which race won.
+	local existingScreens = playerGui:FindFirstChild("Screens")
+	if existingScreens ~= nil then
+		watchScreensFolder(existingScreens)
+	end
 
 	task.spawn(function()
 		local authoredGui = resolveTargetingUi()
@@ -754,7 +1093,7 @@ function LaunchController.Init()
 	end)
 
 	task.spawn(watchPlayerGui)
-	log.info("ready (viewport launch targeting)")
+	log.info("ready (real-camera launch targeting)")
 end
 
 return LaunchController

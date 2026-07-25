@@ -8,18 +8,24 @@
 	Day 1: 100 coins
 	Day 2: KeycapThemes "Ultraviolet"        -- D1-retention driver
 	Day 3: 250 coins
-	Day 4: SquishyTrails "CoolLaunchTrail"
+	Day 4: 500 coins
 	Day 5: 500 coins
-	Day 6: SquishyTrails "RedAndBlackLaunchTrail"
+	Day 6: 500 coins
 	Day 7: KeycapThemes "ObsidianGold"        -- weekly capper, most premium
 
 	The daily track repeats every 7 days (DailyRewardsService's
-	STALE_SESSION_SECONDS reset), so the two theme days and two trail days
-	route through CosmeticRewardHelper.grantOrFallback: a repeat cycle grants
-	fallback coins instead of silently no-op'ing on an already-owned id.
-	Fallback amounts are roughly the cosmetic's value in coins (trail ~500,
-	theme ~1000), calibrated against WheelSpinRewardFunctions' ~100/slot cash
-	rewards and comfortably under EconomyConfig.MAX_GRANT.
+	STALE_SESSION_SECONDS reset), so the two theme days route through
+	CosmeticRewardHelper.grantOrFallback: a repeat cycle grants fallback
+	coins instead of silently no-op'ing on an already-owned id. Fallback
+	amount is roughly the theme's value in coins (~1000), calibrated against
+	WheelSpinRewardFunctions' ~100/slot cash rewards and comfortably under
+	EconomyConfig.MAX_GRANT.
+
+	Days 4 and 6 (2026-07-24: SquishyBeams ships exactly one beam, so there
+	is no longer a second/third cosmetic id in that slot to grant here) now
+	pay a flat 500 coins unconditionally -- the same amount a repeat-cycle
+	claim already paid via CosmeticRewardHelper.grantOrFallback's fallback,
+	so payout parity with the prior schedule is preserved exactly.
 ]]
 
 local ServerStorage = game:GetService("ServerStorage")
@@ -27,7 +33,6 @@ local ServerStorage = game:GetService("ServerStorage")
 local CoinsService = require(ServerStorage.Services.CoinsService)
 local CosmeticRewardHelper = require(ServerStorage.Modules.UISystem.CosmeticRewardHelper)
 
-local TRAIL_FALLBACK_COINS = 500
 local THEME_FALLBACK_COINS = 1000
 
 local DailyRewardFunctions: { [number]: (Player) -> boolean } = {
@@ -41,18 +46,13 @@ local DailyRewardFunctions: { [number]: (Player) -> boolean } = {
 		return CoinsService.add(player, 250)
 	end,
 	[4] = function(player: Player)
-		return CosmeticRewardHelper.grantOrFallback(player, "SquishyTrails", "CoolLaunchTrail", TRAIL_FALLBACK_COINS)
+		return CoinsService.add(player, 500)
 	end,
 	[5] = function(player: Player)
 		return CoinsService.add(player, 500)
 	end,
 	[6] = function(player: Player)
-		return CosmeticRewardHelper.grantOrFallback(
-			player,
-			"SquishyTrails",
-			"RedAndBlackLaunchTrail",
-			TRAIL_FALLBACK_COINS
-		)
+		return CoinsService.add(player, 500)
 	end,
 	[7] = function(player: Player)
 		return CosmeticRewardHelper.grantOrFallback(player, "KeycapThemes", "ObsidianGold", THEME_FALLBACK_COINS)

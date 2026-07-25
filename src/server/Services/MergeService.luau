@@ -89,7 +89,7 @@
 	(see Net.luau's mergeDropRequest comment) but "the player wants to drop
 	now" genuinely is client-originated input. Launching adds a bounded map
 	X/Z target request; the server still owns its source, surface height,
-	damage, radius, flight, and return state.
+	damage, radius, drop, and return state.
 
 	DISARM/RE-ARM (walk-off-to-re-arm, no grab cooldowns): a part placed by
 	dropCarried, cancelCarry, finishLaunch, or commitMerge's result lands at or right next
@@ -135,12 +135,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
+local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local CoinsService = require(script.Parent.CoinsService)
 local DataService = require(script.Parent.DataService)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
-local LaunchTrailRuntime = require(ReplicatedStorage.Shared.LaunchTrailRuntime)
+local LaunchBeamRuntime = require(ReplicatedStorage.Shared.LaunchBeamRuntime)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
@@ -215,12 +217,40 @@ type CarryState = {
 	weld: WeldConstraint,
 }
 
+-- Recorded once by applyLaunchScale so restoreLaunchScale can put a scaled
+-- launch's cosmetic children back exactly as MergeObjectVisuals.attach and
+-- materializeObject originally left them, regardless of what a squash
+-- animation was doing to these same values when the launch ended.
+type LaunchVisualScale = {
+	part: BasePart,
+	weld: Weld,
+	size: Vector3,
+	c0: CFrame,
+}
+
+type LaunchScale = {
+	rootSize: Vector3,
+	visuals: { LaunchVisualScale },
+	incomeLabel: BillboardGui?,
+	incomeLabelOffset: Vector3?,
+}
+
 type LaunchState = {
 	live: LiveBase,
 	part: BasePart,
 	entry: MergeObjectEntry,
-	trailAttachment0: Attachment?,
-	trailAttachment1: Attachment?,
+	-- Attached at the top of the fall, not at the drop teleport -- so nil for
+	-- the spawn-squish phase of every launch. See attachLaunchBeams.
+	beams: LaunchBeamRuntime.Handle?,
+	-- Set once by applyLaunchScale, right after the drop teleport; nil only in
+	-- the brief window before that runs. See restoreLaunchScale.
+	scale: LaunchScale?,
+	-- Resolved once by launchCarried (this tier's LaunchSize override, or the
+	-- MergeConfig default) and read by everything that has to agree on how big
+	-- this projectile is: the landing-height solve, applyLaunchScale, and the
+	-- beam anchor. Resolving it per launch rather than per call keeps those
+	-- three consistent even if the artwork's attribute is edited mid-flight.
+	sizeMultiplier: number,
 }
 
 type MushBoostState = {
@@ -233,9 +263,9 @@ local bases: { [string]: BaseRecord } = {}
 local launchMapLayout: Instance? = nil
 local launchMapBounds: LaunchMapBounds? = nil
 local launchFallbackSurfaceY = 0
--- Keyed by CosmeticsCatalog id (== the Model's Name under LaunchTrails).
--- Populated once during Start(); read-only afterwards, same as `bases` above.
-local trailTemplates: { [string]: Model } = {}
+local defaultLaunchBeamTemplate: Model? = nil
+local launchExplosionTemplate: Attachment? = nil
+local launchGroundHitTemplate: BasePart? = nil
 
 local liveBases: { [Player]: LiveBase } = {}
 local attributeConnections: { [Player]: RBXScriptConnection } = {}
@@ -266,6 +296,35 @@ local MUSH_BOOST_DURATION = 5
 local mergeInputLimiter = RateLimiter.new(8, 12)
 local launchInputLimiter = RateLimiter.new(2, 3)
 
+-- Drop spawn squish: the same press feel Mush gives a carried squishy
+-- (MushController's COMPRESS_SCALE/SPREAD_SCALE/SQUASH_IN/SQUASH_HOLD/
+-- SQUASH_OUT), replayed here so every observer sees the giant squishy press
+-- itself the instant it materializes above the landing point.
+local LAUNCH_SPAWN_SQUASH_COMPRESS_SCALE = 0.55
+local LAUNCH_SPAWN_SQUASH_SPREAD_SCALE = 1.12
+local LAUNCH_SPAWN_SQUASH_IN = TweenInfo.new(0.16, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+local LAUNCH_SPAWN_SQUASH_HOLD = 0.08
+local LAUNCH_SPAWN_SQUASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
+
+-- Landing impact squash: a harder, slower bottom-anchored flatten than the
+-- spawn squish, so the drop reads as a heavier hit. The flatten is slow and weighty,
+-- then it pops back with a quick, snappy bounce.
+local LAUNCH_IMPACT_SQUASH_COMPRESS_SCALE = 0.3
+local LAUNCH_IMPACT_SQUASH_SPREAD_SCALE = 1.4
+local LAUNCH_IMPACT_SQUASH_IN = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local LAUNCH_IMPACT_SQUASH_HOLD = 0.15
+local LAUNCH_IMPACT_SQUASH_OUT = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+-- How far through the rebound (LAUNCH_IMPACT_SQUASH_OUT) the impact burst
+-- fires. The explosion has to land just BEFORE the squishy finishes popping
+-- back up, not after it has already settled -- so this is a fraction of that
+-- phase's raw (un-eased) progress, not of the whole squash. Lower it to fire
+-- earlier in the rebound, raise it toward 1 to fire later.
+local LAUNCH_IMPACT_EXPLOSION_PROGRESS = 0.8
+-- Authored on the tier models to place the body-centered Explosion effect.
+-- GroundHit reuses MergeObjectVisuals.getBeamAnchorOffset instead of reading
+-- the live beamModelPosAtt; see launchGroundHitPoint.
+local LAUNCH_EXPLOSION_ATTACHMENT_NAME = "explosionPosAtt"
+
 local MergeService = {}
 
 local function clearCarryingAttributes(player: Player)
@@ -279,49 +338,140 @@ local function publishCarryingAttributes(player: Player, tier: number, part: Bas
 	player:SetAttribute("CarryingLaunchReadyAt", if typeof(readyAt) == "number" then readyAt else nil)
 end
 
-local function destroyLaunchTrail(launch: LaunchState)
-	local attachment0 = launch.trailAttachment0
-	local attachment1 = launch.trailAttachment1
-	launch.trailAttachment0 = nil
-	launch.trailAttachment1 = nil
-	LaunchTrailRuntime.destroy(attachment0, attachment1)
+local function destroyLaunchBeams(launch: LaunchState)
+	local handle = launch.beams
+	launch.beams = nil
+	LaunchBeamRuntime.destroy(handle)
 end
 
--- Player's equipped trail if its template loaded successfully, else the
--- default's -- an unknown/unloaded id must never leave a launch with no
--- cosmetic at all just because the profile has a stale id
--- (COSMETICS_PLAN.md verification: "unknown id falls back to default").
-local function resolveTrailTemplate(player: Player): Model?
-	local data = DataService.getData(player)
-	local trailId = if data ~= nil then data.Cosmetics.SquishyTrailId else nil
-	local equipped = if typeof(trailId) == "string" then trailTemplates[trailId] else nil
-	if equipped ~= nil then
-		return equipped
-	end
-	return trailTemplates[MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME]
-end
+--[[
+	Attaches the falling-beam cone to a launch that is about to start
+	descending. This runs at the top of the fall rather than at the drop
+	teleport, so the beams do not sit under the projectile through the spawn
+	squish.
 
--- Templates live once in ReplicatedStorage.Assets.VFX.LaunchTrails. Each
--- launch gets cloned attachments and visuals so projectiles never share
--- mutable state.
-local function attachLaunchTrail(player: Player, launch: LaunchState)
-	local template = resolveTrailTemplate(player)
+	The anchor is the artwork's own beam attachment, replayed against the
+	already-scaled projectile: MergeObjectVisuals hands back an offset from the
+	visual's bottom-center, and attach guarantees that bottom-center is the
+	root's bottom plane. The offset is scaled with the projectile because the
+	whole visual is -- the attachment marks a spot on the model, and that spot
+	is launch.sizeMultiplier further from center once the model is giant.
+	The beam geometry itself is left at its authored size: it is art-directed
+	against a launch-scaled squishy, not against the pad-sized one.
+
+	Silently does nothing for a tier whose artwork has no beam attachment yet --
+	that tier just launches without beams.
+
+	`tier` arrives already sanitized from runLaunch; sanitizeTier itself is
+	declared further down this file and is not in scope here.
+]]
+local function attachLaunchBeams(launch: LaunchState, tier: number)
+	local template = defaultLaunchBeamTemplate
 	if template == nil or launch.part.Parent == nil then
 		return
 	end
 
+	local anchorOffset = MergeObjectVisuals.getBeamAnchorOffset(tier)
+	if anchorOffset == nil then
+		return
+	end
+	local bottomCenter = Vector3.new(0, -launch.part.Size.Y / 2, 0)
+	local localAnchor = bottomCenter + anchorOffset * launch.sizeMultiplier
+
 	local ok, err = xpcall(function()
-		local attachment0, attachment1 = LaunchTrailRuntime.attach(launch.part, template)
-		if attachment0 == nil or attachment1 == nil then
-			return
-		end
-		launch.trailAttachment0 = attachment0
-		launch.trailAttachment1 = attachment1
+		launch.beams = LaunchBeamRuntime.attach(launch.part, template, localAnchor)
 	end, debug.traceback)
 
 	if not ok then
-		destroyLaunchTrail(launch)
-		log.warn(`launch trail could not be attached for {player.Name}: {err}`)
+		destroyLaunchBeams(launch)
+		log.warn(`launch beams could not be attached: {err}`)
+	end
+end
+
+--[[
+	Scales `launch.part` (already teleported to dropStart by launchCarried)
+	and every cosmetic child up by `launch.sizeMultiplier` -- this tier's own
+	LaunchSize override, or the MergeConfig default -- so the dropped squishy
+	reads as a looming threat over the landing base.
+	Records every original value on `launch.scale` first so restoreLaunchScale
+	can undo this exactly later, no matter what the spawn/impact squash
+	animations do to these same Size/C0/StudsOffset values while the launch
+	plays out.
+]]
+local function applyLaunchScale(launch: LaunchState)
+	local part = launch.part
+	local multiplier = launch.sizeMultiplier
+
+	local visuals: { LaunchVisualScale } = {}
+	local visualRoot = part:FindFirstChild("Visual")
+	if visualRoot ~= nil then
+		local candidates = if visualRoot:IsA("BasePart") then { visualRoot } else visualRoot:GetDescendants()
+		for _, candidate in candidates do
+			if not candidate:IsA("BasePart") then
+				continue
+			end
+			local weld = candidate:FindFirstChild("VisualWeld")
+			if weld == nil or not weld:IsA("Weld") then
+				continue
+			end
+			table.insert(visuals, { part = candidate, weld = weld, size = candidate.Size, c0 = weld.C0 })
+		end
+	end
+
+	local rawIncomeLabel = part:FindFirstChild("IncomeLabel")
+	local incomeLabel: BillboardGui? = if rawIncomeLabel ~= nil and rawIncomeLabel:IsA("BillboardGui")
+		then rawIncomeLabel
+		else nil
+	local incomeLabelOffset: Vector3? = if incomeLabel ~= nil then incomeLabel.StudsOffset else nil
+
+	launch.scale = {
+		rootSize = part.Size,
+		visuals = visuals,
+		incomeLabel = incomeLabel,
+		incomeLabelOffset = incomeLabelOffset,
+	}
+
+	part.Size = part.Size * multiplier
+	for _, state in visuals do
+		if state.part.Parent ~= nil and state.weld.Parent ~= nil then
+			state.part.Size = state.size * multiplier
+			state.weld.C0 = CFrame.new(state.c0.Position * multiplier) * state.c0.Rotation
+		end
+	end
+	if incomeLabel ~= nil and incomeLabelOffset ~= nil then
+		incomeLabel.StudsOffset = incomeLabelOffset * multiplier
+	end
+end
+
+--[[
+	Restores every value applyLaunchScale recorded, straight from that
+	baseline -- not from wherever a squash animation left things -- so this is
+	safe to call after a normal landing, a cancelled launch, or a squishy that
+	died mid-flight, regardless of which squash phase (if any) was running
+	when the launch ended. Every write is guarded by Parent ~= nil since the
+	part or its cosmetic children may already be gone by the time this runs.
+]]
+local function restoreLaunchScale(launch: LaunchState)
+	local scale = launch.scale
+	if scale == nil then
+		return
+	end
+
+	local part = launch.part
+	if part.Parent ~= nil then
+		part.Size = scale.rootSize
+	end
+	for _, state in scale.visuals do
+		if state.part.Parent ~= nil and state.weld.Parent ~= nil then
+			state.part.Size = state.size
+			state.weld.C0 = state.c0
+		end
+	end
+
+	local incomeLabel = scale.incomeLabel
+	local offset = scale.incomeLabelOffset
+	if incomeLabel ~= nil and incomeLabel.Parent ~= nil and offset ~= nil then
+		incomeLabel.StudsOffset = offset
 	end
 end
 
@@ -889,36 +1039,38 @@ local function spawnSquishyPopVfx(objectsFolder: Folder, position: Vector3, colo
 	Debris:AddItem(anchor, SQUISHY_POP_LIFETIME)
 end
 
-local function spawnLaunchImpactVfx(objectsFolder: Folder, position: Vector3, color: Color3)
-	local anchor = Instance.new("Part")
-	anchor.Name = "LaunchImpactVfx"
-	anchor.Anchored = true
-	anchor.CanCollide = false
-	anchor.CanTouch = false
-	anchor.CanQuery = false
-	anchor.Transparency = 1
-	anchor.Size = Vector3.one * 0.2
-	anchor.CFrame = CFrame.new(position)
-	anchor.Parent = objectsFolder
-
-	local emitter = Instance.new("ParticleEmitter")
-	emitter.Name = "ImpactBurst"
-	emitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
-	emitter.Rate = 0
-	emitter.Color = ColorSequence.new(color, Color3.new(1, 1, 1))
-	emitter.Lifetime = NumberRange.new(0.45, 0.8)
-	emitter.Speed = NumberRange.new(12, 24)
-	emitter.SpreadAngle = Vector2.new(180, 180)
-	emitter.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 1.1),
-		NumberSequenceKeypoint.new(0.7, 0.55),
-		NumberSequenceKeypoint.new(1, 0),
+--[[
+	ParticleEmitter:Emit() is a transient request. Calling it here immediately
+	after parenting a fresh server clone races replication: observers can receive
+	the clone after the burst already happened. Send only the server-owned effect
+	name, position, and timing; LaunchVfxController clones the authored template
+	and calls Emit locally after every emitter exists on that client.
+]]
+local function sendLaunchVfx(templateName: string, position: Vector3)
+	Net.mergeLaunchVfx.sendToAll({
+		templateName = templateName,
+		worldX = position.X,
+		worldY = position.Y,
+		worldZ = position.Z,
 	})
-	emitter.LightEmission = 0.75
-	emitter.Parent = anchor
-	emitter:Emit(EXPLOSION_PARTICLE_COUNT)
+end
 
-	Debris:AddItem(anchor, EXPLOSION_LIFETIME)
+-- The squishy's own Explosion burst, pinned to explosionPosAtt on its body.
+local function spawnLaunchImpactVfx(position: Vector3)
+	if launchExplosionTemplate == nil then
+		return
+	end
+
+	sendLaunchVfx(MergeConfig.LAUNCH_EXPLOSION_TEMPLATE_NAME, position)
+end
+
+-- The floor burst at the ground contact point directly under the squishy.
+local function spawnGroundHitVfx(position: Vector3)
+	if launchGroundHitTemplate == nil then
+		return
+	end
+
+	sendLaunchVfx(MergeConfig.LAUNCH_GROUND_HIT_TEMPLATE_NAME, position)
 end
 
 --[[
@@ -1120,7 +1272,11 @@ local function cancelLaunch(player: Player)
 		return
 	end
 	activeLaunches[player] = nil
-	destroyLaunchTrail(launch)
+	destroyLaunchBeams(launch)
+	-- Must run before reAnchorPart: that recomputes yOffset from tierDefFor's
+	-- ORIGINAL tier size, so a still-scaled root would settle at the wrong
+	-- height.
+	restoreLaunchScale(launch)
 
 	if liveBases[player] == launch.live and launch.part.Parent ~= nil then
 		reAnchorPart(launch.live, launch.part, launch.entry)
@@ -1565,22 +1721,252 @@ local function dropCarried(player: Player)
 	markDisarmed(live, carry.part)
 end
 
-local function animateLaunchArc(player: Player, launch: LaunchState, targetPosition: Vector3): boolean
+local LAUNCH_MUSH_SOUND_LIFETIME = 10
+
+-- Server-side mirror of MushController.playMushSound: the part is Anchored
+-- for the whole drop, so a Sound parented to it replicates and plays for
+-- every client the same way the projectile's own CFrame changes already do
+-- -- unlike Mush's player-triggered version, this needs no Net event.
+local function playLaunchMushSound(part: BasePart, soundId: string, volume: number)
+	if soundId == "" or part.Parent == nil then
+		return
+	end
+
+	local sound = Instance.new("Sound")
+	sound.Name = "MushSound"
+	sound.SoundId = soundId
+	sound.Volume = math.clamp(volume, 0, 10)
+	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+	sound.Parent = part
+	Debris:AddItem(sound, LAUNCH_MUSH_SOUND_LIFETIME)
+	sound:Play()
+end
+
+-- Same six-direction geometry as MushController.squashGeometry: `scale` is
+-- the per-axis Size multiplier, `anchor` is the local point (relative to
+-- `size`'s own center) that must not move while that scale is applied.
+local function launchSquashGeometry(
+	size: Vector3,
+	direction: string,
+	compressScale: number,
+	spreadScale: number
+): (Vector3, Vector3)
+	if direction == "Bottom" then
+		return Vector3.new(spreadScale, compressScale, spreadScale), Vector3.new(0, size.Y / 2, 0)
+	elseif direction == "Left" then
+		return Vector3.new(compressScale, spreadScale, spreadScale), Vector3.new(size.X / 2, 0, 0)
+	elseif direction == "Right" then
+		return Vector3.new(compressScale, spreadScale, spreadScale), Vector3.new(-size.X / 2, 0, 0)
+	elseif direction == "Front" then
+		return Vector3.new(spreadScale, spreadScale, compressScale), Vector3.new(0, 0, size.Z / 2)
+	elseif direction == "Back" then
+		return Vector3.new(spreadScale, spreadScale, compressScale), Vector3.new(0, 0, -size.Z / 2)
+	end
+
+	-- Top is both the default and the invalid-value fallback, same rule as
+	-- MushController.squashGeometry.
+	return Vector3.new(spreadScale, compressScale, spreadScale), Vector3.new(0, -size.Y / 2, 0)
+end
+
+type LaunchSquashVisualState = {
+	part: BasePart,
+	weld: Weld,
+	size: Vector3,
+	c0: CFrame,
+	targetSize: Vector3,
+	targetC0: CFrame,
+}
+
+-- Mirrors MushController.collectVisualStates -- same Visual/VisualWeld walk,
+-- same anchor-then-lerp technique -- just server-side, so the drop's spawn
+-- squish and landing squash replicate to every observer instead of only
+-- playing back locally for whoever triggers Mush.
+local function collectLaunchVisualStates(
+	root: BasePart,
+	direction: string,
+	compressScale: number,
+	spreadScale: number
+): { LaunchSquashVisualState }
+	local visual = root:FindFirstChild("Visual")
+	if visual == nil then
+		return {}
+	end
+
+	local scale, anchor = launchSquashGeometry(root.Size, direction, compressScale, spreadScale)
+	local states: { LaunchSquashVisualState } = {}
+	local candidates = if visual:IsA("BasePart") then { visual } else visual:GetDescendants()
+
+	for _, candidate in candidates do
+		if not candidate:IsA("BasePart") then
+			continue
+		end
+		local weld = candidate:FindFirstChild("VisualWeld")
+		if weld == nil or not weld:IsA("Weld") then
+			continue
+		end
+
+		local c0 = weld.C0
+		local targetPosition = anchor + (c0.Position - anchor) * scale
+		table.insert(states, {
+			part = candidate,
+			weld = weld,
+			size = candidate.Size,
+			c0 = c0,
+			targetSize = candidate.Size * scale,
+			targetC0 = CFrame.new(targetPosition) * c0.Rotation,
+		})
+	end
+
+	return states
+end
+
+type LaunchSquashRootState = {
+	size: Vector3,
+	position: Vector3,
+	targetSize: Vector3,
+	targetPosition: Vector3,
+}
+
+--[[
+	FALLBACK CUBE PATH: MergeObjectVisuals.attach returned false for this tier
+	(no Visual/VisualWeld children -- the colored root cube itself is what
+	players see), so the root has to squash directly. Computes a fixed world
+	anchor point from the root's own CURRENT (already drop-scaled) size and
+	position once, up front -- the same "anchor once, lerp toward it"
+	technique the weld path uses -- so the anchored plane never drifts across
+	the animation.
+]]
+local function collectLaunchRootState(
+	root: BasePart,
+	direction: string,
+	compressScale: number,
+	spreadScale: number
+): LaunchSquashRootState
+	local size = root.Size
+	local position = root.Position
+	local scale, anchor = launchSquashGeometry(size, direction, compressScale, spreadScale)
+	local targetSize = size * scale
+	local _, targetAnchor = launchSquashGeometry(targetSize, direction, compressScale, spreadScale)
+	local worldAnchor = position + anchor
+	local targetPosition = worldAnchor - targetAnchor
+
+	return {
+		size = size,
+		position = position,
+		targetSize = targetSize,
+		targetPosition = targetPosition,
+	}
+end
+
+--[[
+	One squash-and-settle beat (spawn squish or landing impact), run as a
+	Heartbeat loop in the same style as animateDropDescent: accumulate dt,
+	recheck every frame that this is still the active launch and the part
+	still exists. Prefers the Visual/VisualWeld cosmetic children
+	(MushController.squashVisual's own technique, replayed server-side);
+	falls back to squashing the root cube itself via collectLaunchRootState
+	for tiers with no attached artwork.
+
+	Returns false the instant an abort condition is hit -- callers use that to
+	skip the rest of the sequence. This function does NOT restore anything
+	itself on abort; restoreLaunchScale is the actual safety net and restores
+	true pre-launch values regardless of which phase was interrupted.
+]]
+local function runLaunchSquash(
+	player: Player,
+	launch: LaunchState,
+	direction: string,
+	compressScale: number,
+	spreadScale: number,
+	squashIn: TweenInfo,
+	hold: number,
+	squashOut: TweenInfo,
+	-- Fired once, mid-rebound, at LAUNCH_IMPACT_EXPLOSION_PROGRESS through the
+	-- squashOut phase. Driven off the animation's own progress rather than a
+	-- parallel task.delay so it stays pinned to the frame the squishy is
+	-- actually on, even if the server hitches. Must not yield -- it runs inside
+	-- the animation loop.
+	onRebound: (() -> ())?
+): boolean
 	local part = launch.part
-	local startPosition = part.Position
-	local horizontalDelta = Vector3.new(targetPosition.X - startPosition.X, 0, targetPosition.Z - startPosition.Z)
-	local distance = horizontalDelta.Magnitude
-	local duration = math.clamp(
-		distance / MergeConfig.LAUNCH_STUDS_PER_SECOND,
-		MergeConfig.LAUNCH_MIN_FLIGHT_SECONDS,
-		MergeConfig.LAUNCH_MAX_FLIGHT_SECONDS
-	)
-	local arcHeight = math.clamp(
-		distance * MergeConfig.LAUNCH_ARC_DISTANCE_SCALE,
-		MergeConfig.LAUNCH_MIN_ARC_HEIGHT,
-		MergeConfig.LAUNCH_MAX_ARC_HEIGHT
-	)
-	local startingRotation = part.CFrame.Rotation
+	local visualStates = collectLaunchVisualStates(part, direction, compressScale, spreadScale)
+	local rootState: LaunchSquashRootState? = if #visualStates == 0
+		then collectLaunchRootState(part, direction, compressScale, spreadScale)
+		else nil
+
+	local function apply(alpha: number)
+		for _, state in visualStates do
+			if state.part.Parent ~= nil and state.weld.Parent ~= nil then
+				state.part.Size = state.size:Lerp(state.targetSize, alpha)
+				state.weld.C0 = state.c0:Lerp(state.targetC0, alpha)
+			end
+		end
+		if rootState ~= nil then
+			part.Size = rootState.size:Lerp(rootState.targetSize, alpha)
+			part.CFrame = CFrame.new(rootState.position:Lerp(rootState.targetPosition, alpha))
+		end
+	end
+
+	local function runPhase(
+		tweenInfo: TweenInfo,
+		fromAlpha: number,
+		toAlpha: number,
+		onProgress: ((number) -> ())?
+	): boolean
+		local duration = tweenInfo.Time
+		local elapsed = 0
+		while elapsed < duration do
+			if activeLaunches[player] ~= launch or part.Parent == nil then
+				return false
+			end
+			elapsed += RunService.Heartbeat:Wait()
+			local rawAlpha = math.clamp(elapsed / duration, 0, 1)
+			local eased = TweenService:GetValue(rawAlpha, tweenInfo.EasingStyle, tweenInfo.EasingDirection)
+			apply(fromAlpha + (toAlpha - fromAlpha) * eased)
+			if onProgress ~= nil then
+				onProgress(rawAlpha)
+			end
+		end
+		apply(toAlpha)
+		return true
+	end
+
+	if not runPhase(squashIn, 0, 1) then
+		return false
+	end
+
+	local holdElapsed = 0
+	while holdElapsed < hold do
+		if activeLaunches[player] ~= launch or part.Parent == nil then
+			return false
+		end
+		holdElapsed += RunService.Heartbeat:Wait()
+	end
+
+	-- The final loop iteration always clamps rawAlpha to exactly 1 (elapsed has
+	-- reached duration by then), so the threshold below is guaranteed to be
+	-- crossed while the phase is still running -- onRebound cannot be skipped by
+	-- a long frame, only pulled earlier in the rebound.
+	local rebounded = false
+	return runPhase(squashOut, 1, 0, function(rawAlpha)
+		if rebounded or onRebound == nil or rawAlpha < LAUNCH_IMPACT_EXPLOSION_PROGRESS then
+			return
+		end
+		rebounded = true
+		onRebound()
+	end)
+end
+
+--[[
+	Vertical-only fall from dropStart (read straight off the part -- launchCarried
+	teleports it there before this ever runs) down to targetPosition,
+	quadratic ease-in so it accelerates like gravity. No rotation at all: the
+	giant squishy stays upright so it reads as a deliberate drop onto the target rather than a tumbling projectile.
+]]
+local function animateDropDescent(player: Player, launch: LaunchState, targetPosition: Vector3): boolean
+	local part = launch.part
+	local dropStart = part.Position
+	local duration = MergeConfig.LAUNCH_DROP_SECONDS
 	local elapsed = 0
 
 	while elapsed < duration do
@@ -1590,14 +1976,44 @@ local function animateLaunchArc(player: Player, launch: LaunchState, targetPosit
 
 		elapsed += RunService.Heartbeat:Wait()
 		local alpha = math.clamp(elapsed / duration, 0, 1)
-		local position = startPosition:Lerp(targetPosition, alpha)
-		position += Vector3.new(0, 4 * arcHeight * alpha * (1 - alpha), 0)
-		local spin = CFrame.Angles(alpha * math.pi * 4, alpha * math.pi * 2, alpha * math.pi * 3)
-		part.CFrame = CFrame.new(position) * spin * startingRotation
+		part.CFrame = CFrame.new(dropStart:Lerp(targetPosition, alpha * alpha * alpha))
 	end
 
-	part.CFrame = CFrame.new(targetPosition) * startingRotation
+	part.CFrame = CFrame.new(targetPosition)
 	return true
+end
+
+-- Uses the exact same template-space anchor calculation as attachLaunchBeams.
+-- Reading beamModelPosAtt.WorldPosition from the live clone is wrong after
+-- MergeObjectVisuals.attach assigns a PrimaryPart and the launch scales the
+-- welded visual: on Tier 2 it moves the nominal floor anchor toward the model
+-- center. The template offset remains stable, and scaling it alongside the
+-- projectile keeps GroundHit pinned where the falling beams actually ended.
+local function launchGroundHitPoint(launch: LaunchState, fallback: Vector3): Vector3
+	local anchorOffset = MergeObjectVisuals.getBeamAnchorOffset(sanitizeTier(launch.entry.Tier))
+	if anchorOffset == nil then
+		return fallback
+	end
+
+	local bottomCenter = Vector3.new(0, -launch.part.Size.Y / 2, 0)
+	local localAnchor = bottomCenter + anchorOffset * launch.sizeMultiplier
+	return launch.part.CFrame:PointToWorldSpace(localAnchor)
+end
+
+-- Explosion intentionally follows its live, body-centered attachment.
+local function launchVfxPoint(launch: LaunchState, attachmentName: string, fallback: Vector3): Vector3
+	local visual = launch.part:FindFirstChild("Visual")
+	local attachment = if visual ~= nil then visual:FindFirstChild(attachmentName, true) else nil
+	if attachment ~= nil and attachment:IsA("Attachment") then
+		return attachment.WorldPosition
+	end
+	return fallback
+end
+
+-- Explosion fires during the landing rebound at explosionPosAtt. GroundHit is
+-- sent separately at touchdown, before the landing squash begins.
+local function explodeDroppedSquishy(launch: LaunchState, position: Vector3)
+	spawnLaunchImpactVfx(launchVfxPoint(launch, LAUNCH_EXPLOSION_ATTACHMENT_NAME, position))
 end
 
 local function finishLaunch(player: Player, launch: LaunchState, startCooldown: boolean)
@@ -1605,7 +2021,11 @@ local function finishLaunch(player: Player, launch: LaunchState, startCooldown: 
 		return
 	end
 	activeLaunches[player] = nil
-	destroyLaunchTrail(launch)
+	destroyLaunchBeams(launch)
+	-- Must run before reAnchorPart: that recomputes yOffset from tierDefFor's
+	-- ORIGINAL tier size, so a still-scaled root would settle at the wrong
+	-- height.
+	restoreLaunchScale(launch)
 
 	if liveBases[player] == launch.live and launch.part.Parent ~= nil then
 		reAnchorPart(launch.live, launch.part, launch.entry)
@@ -1616,15 +2036,88 @@ local function finishLaunch(player: Player, launch: LaunchState, startCooldown: 
 	end
 end
 
+--[[
+	Runs after launchCarried has already teleported+scaled the projectile to
+	dropStart: spawn squish, the fall, the landing impact squash, then the
+	explosion/damage moment. Each phase's own
+	animation function returns false the instant activeLaunches[player] stops
+	being this exact launch (or the part is gone -- see applySquishyDamage's
+	mid-flight death branch), and runLaunch just stops there; finishLaunch and
+	restoreLaunchScale are what actually clean up on every other exit path.
+]]
 local function runLaunch(player: Player, launch: LaunchState, targetPosition: Vector3)
-	if not animateLaunchArc(player, launch, targetPosition) then
+	local tier = sanitizeTier(launch.entry.Tier)
+	local direction = MergeObjectVisuals.getMushDirection(tier)
+	local soundId, soundVolume = MergeObjectVisuals.getMushSound(tier)
+	playLaunchMushSound(launch.part, soundId, soundVolume)
+
+	local spawnSquishOk = runLaunchSquash(
+		player,
+		launch,
+		direction,
+		LAUNCH_SPAWN_SQUASH_COMPRESS_SCALE,
+		LAUNCH_SPAWN_SQUASH_SPREAD_SCALE,
+		LAUNCH_SPAWN_SQUASH_IN,
+		LAUNCH_SPAWN_SQUASH_HOLD,
+		LAUNCH_SPAWN_SQUASH_OUT
+	)
+	if not spawnSquishOk then
 		return
 	end
 
-	local tier = sanitizeTier(launch.entry.Tier)
+	-- Beams belong to the descent, so they go on here, once the spawn squish
+	-- has finished. The fade runs alongside animateDropDescent instead of
+	-- gating it: both are bounded by the same launch, and destroyLaunchBeams
+	-- stops the fade on every exit path, so this thread cannot outlive the
+	-- projectile.
+	attachLaunchBeams(launch, tier)
+	local beams = launch.beams
+	if beams ~= nil then
+		task.spawn(LaunchBeamRuntime.fadeIn, beams, MergeConfig.LAUNCH_BEAM_FADE_IN_SECONDS)
+	end
+
+	if not animateDropDescent(player, launch, targetPosition) then
+		return
+	end
+
+	-- The beams read as the descent itself, so they end with it: cut at
+	-- touchdown rather than waiting for finishLaunch, which only runs after the
+	-- impact squash, the explosion, and LAUNCH_IMPACT_PAUSE. This also cancels
+	-- the fade thread above, in case a very short fall left it still running.
+	-- finishLaunch still calls destroyLaunchBeams, which is a no-op once
+	-- launch.beams is nil.
+	destroyLaunchBeams(launch)
+
+	-- GroundHit marks the exact touchdown frame, before the squishy compresses.
+	local bottomCenter = targetPosition - Vector3.new(0, launch.part.Size.Y / 2, 0)
+	spawnGroundHitVfx(launchGroundHitPoint(launch, bottomCenter))
+
+	-- Landing impact is always bottom-anchored ("Top" -- see
+	-- launchSquashGeometry's fallback branch) so it flattens onto the ground,
+	-- regardless of which direction that tier's spawn squish used.
+	-- The burst fires from inside the rebound (see LAUNCH_IMPACT_EXPLOSION_PROGRESS)
+	-- rather than after this call returns: it has to hit just before the squishy
+	-- finishes popping back up, and waiting for the squash to finish put it a
+	-- full 0.18s late, after the pop had already settled.
+	local impactSquishOk = runLaunchSquash(
+		player,
+		launch,
+		"Top",
+		LAUNCH_IMPACT_SQUASH_COMPRESS_SCALE,
+		LAUNCH_IMPACT_SQUASH_SPREAD_SCALE,
+		LAUNCH_IMPACT_SQUASH_IN,
+		LAUNCH_IMPACT_SQUASH_HOLD,
+		LAUNCH_IMPACT_SQUASH_OUT,
+		function()
+			explodeDroppedSquishy(launch, targetPosition)
+		end
+	)
+	if not impactSquishOk then
+		return
+	end
+
 	local attackerLevel = MergeConfig.healthForTier(tier)
 	local damage = attackerLevel * MergeConfig.LAUNCH_DAMAGE_FRACTION
-	spawnLaunchImpactVfx(launch.live.objectsFolder, targetPosition, tierDefFor(tier).Color)
 
 	-- A launch is allowed to land anywhere, including empty and unclaimed map
 	-- space. Every other player's live squishies are checked spatially; an empty
@@ -1639,9 +2132,9 @@ local function runLaunch(player: Player, launch: LaunchState, targetPosition: Ve
 	finishLaunch(player, launch, true)
 end
 
--- Validates one overview selection and starts a server-owned flight. The
+-- Validates one overview selection and starts a server-owned drop. The
 -- client chooses only a bounded map X/Z point; it cannot choose the source
--- object, damage, radius, surface height, arc, or duration.
+-- object, damage, radius, surface height, drop scale, or fall duration.
 local function launchCarried(player: Player, worldX: number, worldZ: number): (boolean, string)
 	local carry = carries[player]
 	if carry == nil then
@@ -1659,8 +2152,16 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 		carry.part:SetAttribute("LaunchReadyAt", nil)
 		player:SetAttribute("CarryingLaunchReadyAt", nil)
 	end
-	local halfSize = tierDefFor(carry.entry.Tier).Size / 2
-	local targetPosition = resolveLaunchTarget(worldX, worldZ, halfSize)
+	local tier = sanitizeTier(carry.entry.Tier)
+	-- Resolved once here and carried on the LaunchState: the artwork may set its
+	-- own LaunchSize, and the landing solve below, applyLaunchScale, and the
+	-- beam anchor all have to use the same number.
+	local sizeMultiplier = MergeObjectVisuals.getLaunchSizeMultiplier(tier) or MergeConfig.LAUNCH_DROP_SIZE_MULTIPLIER
+	local halfSize = tierDefFor(tier).Size / 2
+	-- Resolved with the SCALED half-size (see applyLaunchScale below) so the
+	-- enlarged squishy actually rests ON the surface once it lands, instead of
+	-- floating or sinking by the difference between its real and drop sizes.
+	local targetPosition = resolveLaunchTarget(worldX, worldZ, halfSize * sizeMultiplier)
 	if targetPosition == nil then
 		return false, "Choose a point inside the map"
 	end
@@ -1669,8 +2170,9 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 		live = carry.live,
 		part = carry.part,
 		entry = carry.entry,
-		trailAttachment0 = nil,
-		trailAttachment1 = nil,
+		beams = nil,
+		scale = nil,
+		sizeMultiplier = sizeMultiplier,
 	}
 	activeLaunches[player] = launch
 	carries[player] = nil
@@ -1681,7 +2183,14 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 	carry.part.CanCollide = false
 	carry.part.CanTouch = false
 	carry.part.CanQuery = false
-	attachLaunchTrail(player, launch)
+
+	-- Teleport above the landing point and scale up here, before runLaunch's
+	-- spawn squish plays: applyLaunchScale must run before attachLaunchBeams
+	-- (beams read launch.part.Size to place their anchor, see its own header
+	-- note), which is why beams themselves attach later, in runLaunch.
+	local dropStart = targetPosition + Vector3.new(0, MergeConfig.LAUNCH_DROP_HEIGHT, 0)
+	carry.part.CFrame = CFrame.new(dropStart)
+	applyLaunchScale(launch)
 
 	task.spawn(function()
 		local ok, err = xpcall(function()
@@ -1903,7 +2412,11 @@ local function applySquishyDamage(
 			-- The live-part cleanup below destroys the projectile. Clear the
 			-- state now so its animation exits without permanently blocking pickup.
 			activeLaunches[player] = nil
-			destroyLaunchTrail(launch)
+			destroyLaunchBeams(launch)
+			-- Cheap and Parent-guarded even though the part is destroyed a few
+			-- lines below -- restoreLaunchScale is the safety net for every
+			-- launch exit path, this one included.
+			restoreLaunchScale(launch)
 		end
 	end
 
@@ -1981,9 +2494,13 @@ function MergeService.damageSquishiesNear(
 
 	local eligibleEntries: { [any]: true } = {}
 	local radiusSquared = radius * radius
+	local activeLaunch = activeLaunches[player]
 	for part, entry in live.parts do
 		if part.Parent == nil then
 			continue
+		end
+		if activeLaunch ~= nil and activeLaunch.part == part then
+			continue -- in flight; not a valid area-damage target, same exclusion pickUp applies
 		end
 		local dx = part.Position.X - worldPosition.X
 		local dz = part.Position.Z - worldPosition.Z
@@ -2037,22 +2554,48 @@ function MergeService.Init()
 end
 
 function MergeService.Start()
-	-- Every child is a candidate cosmetic trail (COSMETICS_PLAN.md) -- same
-	-- per-child validation the single default template used to get alone:
-	-- a Model with a descendant Trail. Id == the Model's Name, matching
-	-- CosmeticsCatalog.SquishyTrails.
-	for _, child in ReplicatedStorage.Assets.VFX.LaunchTrails:GetChildren() do
-		if child:IsA("Model") and child:FindFirstChildWhichIsA("Trail", true) ~= nil then
-			trailTemplates[child.Name] = child
-		else
-			log.warn(
-				`{child:GetFullName()} is not a valid launch trail (needs a Model with a descendant Trail) -- skipped`
-			)
-		end
-	end
-	if trailTemplates[MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME] == nil then
+	local beamTemplate =
+		ReplicatedStorage.Assets.VFX.LaunchBeams:FindFirstChild(MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME)
+	if
+		beamTemplate ~= nil
+		and beamTemplate:IsA("Model")
+		and beamTemplate:FindFirstChildWhichIsA("Beam", true) ~= nil
+	then
+		defaultLaunchBeamTemplate = beamTemplate
+	else
 		log.warn(
-			`Workspace.{MergeConfig.DEFAULT_LAUNCH_TRAIL_MODEL_NAME} is missing or malformed -- launches have no cosmetic`
+			`Assets.VFX.LaunchBeams.{MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME} is missing or malformed -- falling`
+				.. ` launches have no beams`
+		)
+	end
+
+	local explosionTemplate =
+		ReplicatedStorage.Assets.VFX.LaunchExplosion:FindFirstChild(MergeConfig.LAUNCH_EXPLOSION_TEMPLATE_NAME)
+	if
+		explosionTemplate ~= nil
+		and explosionTemplate:IsA("Attachment")
+		and explosionTemplate:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
+	then
+		launchExplosionTemplate = explosionTemplate
+	else
+		log.warn(
+			`Assets.VFX.LaunchExplosion.{MergeConfig.LAUNCH_EXPLOSION_TEMPLATE_NAME} is missing or malformed --`
+				.. ` launch landings have no impact burst`
+		)
+	end
+
+	local groundHitTemplate =
+		ReplicatedStorage.Assets.VFX.LaunchExplosion:FindFirstChild(MergeConfig.LAUNCH_GROUND_HIT_TEMPLATE_NAME)
+	if
+		groundHitTemplate ~= nil
+		and groundHitTemplate:IsA("BasePart")
+		and groundHitTemplate:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
+	then
+		launchGroundHitTemplate = groundHitTemplate
+	else
+		log.warn(
+			`Assets.VFX.LaunchExplosion.{MergeConfig.LAUNCH_GROUND_HIT_TEMPLATE_NAME} is missing or malformed --`
+				.. ` launch landings have no ground hit`
 		)
 	end
 
