@@ -1,8 +1,8 @@
 --!strict
 --[[
-	Single id authority for owned cosmetics (COSMETICS_PLAN.md). Two slots
-	today -- keycap Themes and squishy launch Beams -- each an ordered list of
-	{Id, DisplayName}. Future shop bundles grant ids through
+	Single id authority for owned cosmetics (COSMETICS_PLAN.md). Three slots
+	today -- keycap Themes, squishy launch Beams, and Merge Pops -- each an
+	ordered list of {Id, DisplayName}. Future shop bundles grant ids through
 	CosmeticsService.grant and must reference the SAME ids listed here.
 
 	Deliberately id + DisplayName ONLY: the ~1600-line visual THEMES table
@@ -19,7 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 
-export type Slot = "KeycapThemes" | "SquishyBeams"
+export type Slot = "KeycapThemes" | "SquishyBeams" | "MergePops"
 
 export type CatalogEntry = {
 	Id: string,
@@ -38,6 +38,7 @@ CosmeticsCatalog.THEME_ATTRIBUTE = "Theme"
 -- (COSMETICS_PLAN.md "Decisions").
 CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID = "ChocolateBar"
 CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID = MergeConfig.DEFAULT_LAUNCH_BEAM_MODEL_NAME
+CosmeticsCatalog.DEFAULT_MERGE_POP_ID = MergeConfig.MERGE_VFX_TEMPLATE_NAME
 
 -- Every id in KeyCapsController's THEMES table, same top-to-bottom order.
 -- Keep in sync manually -- KeyCapsController.Init's drift guard warns (not
@@ -213,6 +214,18 @@ CosmeticsCatalog.SquishyBeams = {
 	{ Id = "30_Sapphire", DisplayName = "Sapphire" },
 } :: { CatalogEntry }
 
+-- ReplicatedStorage.Assets.VFX.Merge children. The 30 gradient ids intentionally
+-- mirror SquishyBeams, because both authored studies use the same named
+-- palettes; only the unequip/default template differs.
+local mergePops: { CatalogEntry } = {
+	{ Id = CosmeticsCatalog.DEFAULT_MERGE_POP_ID, DisplayName = "Default" },
+}
+for index = 2, #CosmeticsCatalog.SquishyBeams do
+	local entry = CosmeticsCatalog.SquishyBeams[index]
+	table.insert(mergePops, { Id = entry.Id, DisplayName = entry.DisplayName })
+end
+CosmeticsCatalog.MergePops = mergePops
+
 local keycapThemeIds: { [string]: true } = {}
 for _, entry in CosmeticsCatalog.KeycapThemes do
 	keycapThemeIds[entry.Id] = true
@@ -223,12 +236,21 @@ for _, entry in CosmeticsCatalog.SquishyBeams do
 	squishyBeamIds[entry.Id] = true
 end
 
+local mergePopIds: { [string]: true } = {}
+for _, entry in CosmeticsCatalog.MergePops do
+	mergePopIds[entry.Id] = true
+end
+
 function CosmeticsCatalog.isKeycapTheme(id: string): boolean
 	return keycapThemeIds[id] == true
 end
 
 function CosmeticsCatalog.isSquishyBeam(id: string): boolean
 	return squishyBeamIds[id] == true
+end
+
+function CosmeticsCatalog.isMergePop(id: string): boolean
+	return mergePopIds[id] == true
 end
 
 -- Boot-time guard: the defaults are unequip targets (COSMETICS_PLAN.md
@@ -242,6 +264,10 @@ assert(
 assert(
 	CosmeticsCatalog.isSquishyBeam(CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID),
 	"default beam id missing from SquishyBeams catalog"
+)
+assert(
+	CosmeticsCatalog.isMergePop(CosmeticsCatalog.DEFAULT_MERGE_POP_ID),
+	"default merge pop id missing from MergePops catalog"
 )
 
 return CosmeticsCatalog

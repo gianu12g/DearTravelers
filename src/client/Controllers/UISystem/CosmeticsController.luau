@@ -1,8 +1,9 @@
 --!strict
 --[[
-	Cosmetics menu (COSMETICS_PLAN.md): keycap Theme + squishy Beam catalog,
-	owned-only, equip/unequip. `Top.Keys` / `Top.Beams` pick the active slot;
-	`Top.Close` already has Ui-Close = true, handled globally by
+	Cosmetics menu (COSMETICS_PLAN.md): keycap Theme, squishy Beam, and Merge
+	Pop catalogs, owned-only, equip/unequip. `Top.Keys`, `Top.Beams`, and
+	`Top.MergePop` pick the active slot; `Top.Close` already has Ui-Close = true,
+	handled globally by
 	UIKitController -- nothing to wire here.
 
 	Equip is fire-and-forget: Net.cosmeticEquip carries no result packet, and
@@ -29,11 +30,13 @@ local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("CosmeticsController")
 local launchBeamsFolder = ReplicatedStorage.Assets.VFX.LaunchBeams
+local mergeVfxFolder = ReplicatedStorage.Assets.VFX.Merge
 
 --[[
 	Keycap-theme cards use Images.ThemeIcons (every id is preloaded at boot
-	via AssetIds/Preloader.luau). Beam cards intentionally have no icon: their
-	authored beam ColorSequence drives the card background gradient instead.
+	via AssetIds/Preloader.luau). Beam and Merge Pop cards intentionally have
+	no icon: their authored ColorSequence drives the card background gradient
+	instead.
 ]]
 
 local CosmeticsController = {}
@@ -41,15 +44,19 @@ local CosmeticsController = {}
 local function catalogForSlot(slot: CosmeticsCatalog.Slot): { CosmeticsCatalog.CatalogEntry }
 	if slot == "KeycapThemes" then
 		return CosmeticsCatalog.KeycapThemes
+	elseif slot == "SquishyBeams" then
+		return CosmeticsCatalog.SquishyBeams
 	end
-	return CosmeticsCatalog.SquishyBeams
+	return CosmeticsCatalog.MergePops
 end
 
 local function defaultIdForSlot(slot: CosmeticsCatalog.Slot): string
 	if slot == "KeycapThemes" then
 		return CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
+	elseif slot == "SquishyBeams" then
+		return CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
 	end
-	return CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
+	return CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 end
 
 -- The one place that decides EquipButton.PriceTag.Text -- shared by the full
@@ -115,23 +122,37 @@ local function colorSequenceFromBeam(id: string): ColorSequence?
 	return if beam ~= nil and beam:IsA("Beam") then beam.Color else nil
 end
 
+local function colorSequenceFromMergePop(id: string): ColorSequence?
+	local template = mergeVfxFolder:FindFirstChild(id)
+	local emitter = if template ~= nil then template:FindFirstChildWhichIsA("ParticleEmitter", true) else nil
+	return if emitter ~= nil and emitter:IsA("ParticleEmitter") then emitter.Color else nil
+end
+
 function CosmeticsController.Start()
 	local frame = Frames.get("Cosmetics")
 	local top = frame:WaitForChild("Top")
 	local keysButton = top:WaitForChild("Keys") :: GuiButton
 	local beamsButton = top:WaitForChild("Beams") :: GuiButton
+	local mergePopButton = top:WaitForChild("MergePop") :: GuiButton
 	local scrollFrame = frame:WaitForChild("MainScrollingFrame") :: ScrollingFrame
 	local holder = scrollFrame:WaitForChild("Holder") :: Frame
 	local template = holder:WaitForChild("ThemeTemplate1") :: Frame
 
 	local activeSlot: CosmeticsCatalog.Slot = "KeycapThemes"
-	local ownedIds: { KeycapThemes: { [string]: true }, SquishyBeams: { [string]: true } } = {
-		KeycapThemes = {},
-		SquishyBeams = {},
-	}
-	local equippedIds: { KeycapThemes: string, SquishyBeams: string } = {
+	local ownedIds: {
+		KeycapThemes: { [string]: true },
+		SquishyBeams: { [string]: true },
+		MergePops: { [string]: true },
+	} =
+		{
+			KeycapThemes = {},
+			SquishyBeams = {},
+			MergePops = {},
+		}
+	local equippedIds: { KeycapThemes: string, SquishyBeams: string, MergePops: string } = {
 		KeycapThemes = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID,
 		SquishyBeams = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID,
+		MergePops = CosmeticsCatalog.DEFAULT_MERGE_POP_ID,
 	}
 
 	-- Not equipped -> equip it. Equipped and already the default -> no-op
@@ -207,8 +228,10 @@ function CosmeticsController.Start()
 				if slot == "KeycapThemes" then
 					local colors = KeyCapsController.getThemeColors(entry.Id)
 					sequence = if colors ~= nil then colorSequenceFromTheme(colors) else nil
-				else
+				elseif slot == "SquishyBeams" then
 					sequence = colorSequenceFromBeam(entry.Id)
+				else
+					sequence = colorSequenceFromMergePop(entry.Id)
 				end
 				if sequence ~= nil then
 					gradient.Color = sequence
@@ -224,7 +247,7 @@ function CosmeticsController.Start()
 					end
 				else
 					icon.Visible = false
-					-- Beam cards are permanently gradient-only. Strip the
+					-- VFX cards are permanently gradient-only. Strip the
 					-- template's Float effect before parenting so UIKit never
 					-- starts an invisible infinite tween for this hidden icon.
 					clearEffectAttribute(icon)
@@ -274,7 +297,7 @@ function CosmeticsController.Start()
 	end
 
 	-- {"Cosmetics","Owned"} fires once per server tableInsert -- grant-all
-	-- does ~137 in one burst, which would otherwise mean ~137 full
+	-- does hundreds in one burst, which would otherwise mean hundreds of full
 	-- render()s. Coalesce to one: set a dirty flag, defer a single render,
 	-- and let any observer fires arriving before that deferred call runs
 	-- just keep the flag set instead of scheduling a second one.
@@ -298,6 +321,10 @@ function CosmeticsController.Start()
 		activeSlot = "SquishyBeams"
 		render()
 	end)
+	mergePopButton.MouseButton1Click:Connect(function()
+		activeSlot = "MergePops"
+		render()
+	end)
 
 	-- Re-renders (debounced -- see scheduleRender) so a live grant() shows up
 	-- while the menu is already open.
@@ -307,8 +334,10 @@ function CosmeticsController.Start()
 		end
 		local keycapThemes = value.KeycapThemes
 		local squishyBeams = value.SquishyBeams
+		local mergePops = value.MergePops
 		ownedIds.KeycapThemes = toIdSet(if type(keycapThemes) == "table" then keycapThemes else {})
 		ownedIds.SquishyBeams = toIdSet(if type(squishyBeams) == "table" then squishyBeams else {})
+		ownedIds.MergePops = toIdSet(if type(mergePops) == "table" then mergePops else {})
 		scheduleRender()
 	end)
 
@@ -335,6 +364,19 @@ function CosmeticsController.Start()
 		local previousId = equippedIds.SquishyBeams
 		equippedIds.SquishyBeams = value
 		if activeSlot ~= "SquishyBeams" then
+			return
+		end
+		updateEquipButtonLabel(previousId)
+		updateEquipButtonLabel(value)
+	end)
+
+	DataController.observe({ "Cosmetics", "MergePopId" }, function(value: any)
+		if type(value) ~= "string" then
+			return
+		end
+		local previousId = equippedIds.MergePops
+		equippedIds.MergePops = value
+		if activeSlot ~= "MergePops" then
 			return
 		end
 		updateEquipButtonLabel(previousId)

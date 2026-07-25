@@ -275,7 +275,7 @@ local defaultLaunchBeamTemplate: Model? = nil
 local launchBeamTemplates: { [string]: Model } = {}
 local launchExplosionTemplate: Attachment? = nil
 local launchGroundHitTemplate: BasePart? = nil
-local mergeSquishyVfxTemplate: BasePart? = nil
+local mergePopTemplateIds: { [string]: true } = {}
 
 local liveBases: { [Player]: LiveBase } = {}
 local attributeConnections: { [Player]: RBXScriptConnection } = {}
@@ -360,6 +360,29 @@ local function equippedLaunchBeamTemplate(player: Player): Model?
 		return defaultLaunchBeamTemplate
 	end
 	return launchBeamTemplates[playerData.Cosmetics.SquishyBeamId] or defaultLaunchBeamTemplate
+end
+
+local function equippedMergePopTemplateName(player: Player): string?
+	local playerData = DataService.getData(player)
+	if playerData ~= nil then
+		local equippedId = playerData.Cosmetics.MergePopId
+		if mergePopTemplateIds[equippedId] then
+			return equippedId
+		end
+	end
+
+	local defaultId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
+	return if mergePopTemplateIds[defaultId] then defaultId else nil
+end
+
+local function isMergePopTemplate(template: Instance): boolean
+	if not template:IsA("BasePart") and not template:IsA("Model") then
+		return false
+	end
+	if not template:IsA("BasePart") and template:FindFirstChildWhichIsA("BasePart", true) == nil then
+		return false
+	end
+	return template:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
 end
 
 --[[
@@ -1141,12 +1164,14 @@ end
 	than replacing it; the template lookup is checked at boot (Start) so a
 	missing pack costs one warn line, not one broadcast per merge.
 ]]
-local function sendMergeSquishyVfx(position: Vector3)
-	if mergeSquishyVfxTemplate == nil then
+local function sendMergeSquishyVfx(player: Player, position: Vector3)
+	local templateName = equippedMergePopTemplateName(player)
+	if templateName == nil then
 		return
 	end
 
 	Net.mergeSquishyVfx.sendToAll({
+		templateName = templateName,
 		worldX = position.X,
 		worldY = position.Y,
 		worldZ = position.Z,
@@ -1506,7 +1531,7 @@ local function commitMerge(player: Player, carry: CarryState, targetPart: BasePa
 	targetPart:Destroy()
 
 	spawnMergeVfx(live.objectsFolder, vfxPosition)
-	sendMergeSquishyVfx(vfxPosition)
+	sendMergeSquishyVfx(player, vfxPosition)
 	-- The result appears wherever the target sat -- which the carrying
 	-- player was, by definition, standing right next to. Same instant-
 	-- re-grab problem as a drop, same fix.
@@ -2696,14 +2721,11 @@ end
 
 function MergeService.Start()
 	table.clear(launchBeamTemplates)
+	table.clear(mergePopTemplateIds)
 	local launchBeamsFolder = ReplicatedStorage.Assets.VFX.LaunchBeams
 	for _, entry in CosmeticsCatalog.SquishyBeams do
 		local candidate = launchBeamsFolder:FindFirstChild(entry.Id)
-		if
-			candidate ~= nil
-			and candidate:IsA("Model")
-			and candidate:FindFirstChildWhichIsA("Beam", true) ~= nil
-		then
+		if candidate ~= nil and candidate:IsA("Model") and candidate:FindFirstChildWhichIsA("Beam", true) ~= nil then
 			launchBeamTemplates[entry.Id] = candidate
 		else
 			log.warn(`Assets.VFX.LaunchBeams.{entry.Id} is missing or malformed -- cosmetic unavailable`)
@@ -2748,18 +2770,14 @@ function MergeService.Start()
 		)
 	end
 
-	local mergeVfxTemplate = ReplicatedStorage.Assets.VFX.Merge:FindFirstChild(MergeConfig.MERGE_VFX_TEMPLATE_NAME)
-	if
-		mergeVfxTemplate ~= nil
-		and mergeVfxTemplate:IsA("BasePart")
-		and mergeVfxTemplate:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
-	then
-		mergeSquishyVfxTemplate = mergeVfxTemplate
-	else
-		log.warn(
-			`Assets.VFX.Merge.{MergeConfig.MERGE_VFX_TEMPLATE_NAME} is missing or malformed --`
-				.. ` merges have no authored burst`
-		)
+	local mergeVfxFolder = ReplicatedStorage.Assets.VFX.Merge
+	for _, entry in CosmeticsCatalog.MergePops do
+		local candidate = mergeVfxFolder:FindFirstChild(entry.Id)
+		if candidate ~= nil and isMergePopTemplate(candidate) then
+			mergePopTemplateIds[entry.Id] = true
+		else
+			log.warn(`Assets.VFX.Merge.{entry.Id} is missing or malformed -- Merge Pop cosmetic unavailable`)
+		end
 	end
 
 	local mapLayout = Workspace:WaitForChild("MapLayout", WAIT_TIMEOUT)

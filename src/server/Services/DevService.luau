@@ -551,7 +551,7 @@ local function onDamageSquishies(data: { targetPlayer: Instance? }, player: Play
 end
 
 --[[
-	Grants every CosmeticsCatalog entry (both slots) to `target`.
+	Grants every CosmeticsCatalog entry (all slots) to `target`.
 	CosmeticsService.grant is itself the no-op for an already-owned id, but
 	its return doesn't distinguish "newly granted" from "already owned" --
 	both are `true` (COSMETICS_PLAN.md) -- so the granted/skipped split for
@@ -592,6 +592,7 @@ local function onGrantAllCosmetics(data: { targetPlayer: Instance? }, player: Pl
 
 	grantCatalog("KeycapThemes", CosmeticsCatalog.KeycapThemes)
 	grantCatalog("SquishyBeams", CosmeticsCatalog.SquishyBeams)
+	grantCatalog("MergePops", CosmeticsCatalog.MergePops)
 
 	log.info(`{player.Name} granted all cosmetics to {target.Name}: {granted} granted, {skipped} skipped`)
 	Net.devResult.sendTo({ ok = true, message = `Granted {granted} cosmetics ({skipped} already owned)` }, player)

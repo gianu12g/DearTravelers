@@ -18,6 +18,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local AuthoredVfx = require(ReplicatedStorage.Shared.AuthoredVfx)
+local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -37,27 +38,53 @@ local mergeVfxFolder = ReplicatedStorage.Assets.VFX.Merge
 
 local MergeVfxController = {}
 
--- Resolved once in Init rather than per merge: merges are frequent, and a
--- missing template should warn at boot, not spam a line per merge.
-local mergeVfxTemplate: BasePart? = nil
+-- Resolved once in Init rather than searching ReplicatedStorage per merge.
+-- Missing catalog assets warn at boot, not once per burst.
+local mergeVfxTemplates: { [string]: Instance } = {}
 
-local function play(position: Vector3)
-	local template = mergeVfxTemplate
+local function preparePart(part: BasePart)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	-- Authored holder parts are editor handles; only their particles render.
+	part.Transparency = 1
+end
+
+local function isMergePopTemplate(template: Instance): boolean
+	if not template:IsA("BasePart") and not template:IsA("Model") then
+		return false
+	end
+	if not template:IsA("BasePart") and template:FindFirstChildWhichIsA("BasePart", true) == nil then
+		return false
+	end
+	return template:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
+end
+
+local function play(templateName: string, position: Vector3)
+	local template = mergeVfxTemplates[templateName] or mergeVfxTemplates[CosmeticsCatalog.DEFAULT_MERGE_POP_ID]
 	if template == nil then
 		return
 	end
 
 	local burst = template:Clone()
 	burst.Name = "MergeSquishyVfx"
-	burst.Anchored = true
-	burst.CanCollide = false
-	burst.CanTouch = false
-	burst.CanQuery = false
-	burst.CastShadow = false
-	-- The authored ball is an editor handle; only its particles render.
-	burst.Transparency = 1
-	-- Keep the authored orientation, discard its old scene-space position.
-	burst.CFrame = CFrame.new(position) * burst.CFrame.Rotation
+	if burst:IsA("BasePart") then
+		preparePart(burst)
+		-- Keep the authored orientation, discard its old scene-space position.
+		burst.CFrame = CFrame.new(position) * burst.CFrame.Rotation
+	elseif burst:IsA("Model") then
+		for _, descendant in burst:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				preparePart(descendant)
+			end
+		end
+		burst:PivotTo(CFrame.new(position) * burst:GetPivot().Rotation)
+	else
+		burst:Destroy()
+		return
+	end
 	burst.Parent = Workspace
 	VfxScaler.scale(burst, MergeConfig.MERGE_VFX_SCALE, VFX_SCALE_OPTIONS)
 
@@ -65,26 +92,23 @@ local function play(position: Vector3)
 end
 
 function MergeVfxController.Init()
-	local template = mergeVfxFolder:FindFirstChild(MergeConfig.MERGE_VFX_TEMPLATE_NAME)
-	if
-		template ~= nil
-		and template:IsA("BasePart")
-		and template:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
-	then
-		mergeVfxTemplate = template
-	else
-		log.warn(
-			`Assets.VFX.Merge.{MergeConfig.MERGE_VFX_TEMPLATE_NAME} is missing or malformed -- merges have no burst`
-		)
+	table.clear(mergeVfxTemplates)
+	for _, entry in CosmeticsCatalog.MergePops do
+		local template = mergeVfxFolder:FindFirstChild(entry.Id)
+		if template ~= nil and isMergePopTemplate(template) then
+			mergeVfxTemplates[entry.Id] = template
+		else
+			log.warn(`Assets.VFX.Merge.{entry.Id} is missing or malformed -- Merge Pop cosmetic unavailable`)
+		end
 	end
 
 	Net.mergeSquishyVfx.listen(function(data)
-		play(Vector3.new(data.worldX, data.worldY, data.worldZ))
+		play(data.templateName, Vector3.new(data.worldX, data.worldY, data.worldZ))
 	end)
 end
 
 function MergeVfxController.Start()
-	log.info("ready (client-authored merge bursts)")
+	log.info("ready (client-authored cosmetic merge bursts)")
 end
 
 return MergeVfxController

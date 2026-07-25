@@ -298,12 +298,8 @@ local function newScrollList(parent: Instance, name: string, position: UDim2, si
 end
 
 local function addSectionHeader(page: ScrollingFrame, order: number, text: string)
-	local label = newLabel(
-		text,
-		UDim2.new(1, -SCROLL_ROW_INSET, 0, SECTION_HEADER_HEIGHT),
-		SMALL_TEXT_SIZE,
-		MUTED_TEXT_COLOR
-	)
+	local label =
+		newLabel(text, UDim2.new(1, -SCROLL_ROW_INSET, 0, SECTION_HEADER_HEIGHT), SMALL_TEXT_SIZE, MUTED_TEXT_COLOR)
 	label.Name = `Header{order}`
 	label.LayoutOrder = order
 	label.Font = Enum.Font.GothamBold
@@ -423,13 +419,11 @@ local function clampWindow()
 end
 
 local function isPointerPress(input: InputObject): boolean
-	return input.UserInputType == Enum.UserInputType.MouseButton1
-		or input.UserInputType == Enum.UserInputType.Touch
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
 end
 
 local function isPointerMove(input: InputObject): boolean
-	return input.UserInputType == Enum.UserInputType.MouseMovement
-		or input.UserInputType == Enum.UserInputType.Touch
+	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
 end
 
 local function beginDrag(mode: "Move" | "Resize", input: InputObject)
@@ -771,18 +765,15 @@ local function rebuildPlayerRows()
 			detail = `{detail}  (you)`
 		end
 
-		local subtitle = newLabel(
-			detail,
-			UDim2.new(1, -(PLAYER_ROW_HEIGHT + 90), 0, 13),
-			SMALL_TEXT_SIZE - 1,
-			MUTED_TEXT_COLOR
-		)
+		local subtitle =
+			newLabel(detail, UDim2.new(1, -(PLAYER_ROW_HEIGHT + 90), 0, 13), SMALL_TEXT_SIZE - 1, MUTED_TEXT_COLOR)
 		subtitle.Name = "PlayerDetail"
 		subtitle.Position = UDim2.fromOffset(PLAYER_ROW_HEIGHT, 17)
 		subtitle.Parent = row
 
 		if isTarget then
-			local badge = newLabel("TARGET", UDim2.fromOffset(80, PLAYER_ROW_HEIGHT), SMALL_TEXT_SIZE - 1, BRIGHT_TEXT_COLOR)
+			local badge =
+				newLabel("TARGET", UDim2.fromOffset(80, PLAYER_ROW_HEIGHT), SMALL_TEXT_SIZE - 1, BRIGHT_TEXT_COLOR)
 			badge.Name = "TargetBadge"
 			badge.AnchorPoint = Vector2.new(1, 0)
 			badge.Position = UDim2.fromScale(1, 0)
@@ -851,11 +842,12 @@ local function updateInfo()
 	setInfo("Spins", snapshotText("UISystem.Spins"))
 	setInfo("Keycap theme", snapshotText("Cosmetics.KeycapThemeId"))
 	setInfo("Squishy beam", snapshotText("Cosmetics.SquishyBeamId"))
+	setInfo("Merge pop", snapshotText("Cosmetics.MergePopId"))
 	setInfo(
 		"Cosmetics owned",
-		`{countArrayEntries("Cosmetics.Owned.KeycapThemes")} keycaps, {countArrayEntries(
-			"Cosmetics.Owned.SquishyBeams"
-		)} beams`
+		`{countArrayEntries("Cosmetics.Owned.KeycapThemes")} keycaps, {countArrayEntries("Cosmetics.Owned.SquishyBeams")} beams, {countArrayEntries(
+			"Cosmetics.Owned.MergePops"
+		)} merge pops`
 	)
 	setInfo("Data version", snapshotText("Version"))
 end
@@ -1298,53 +1290,89 @@ local function buildActionsPage(parent: Frame)
 
 	addSectionHeader(list, 1, "TARGET ECONOMY  (writes the target's profile)")
 	addButtonRow(list, 2, {
-		{ text = "+1K coins", onClick = function()
-			sendAdd({ "Coins" }, 1000)
-		end },
-		{ text = "+10K", onClick = function()
-			sendAdd({ "Coins" }, 10000)
-		end },
-		{ text = "+100K", onClick = function()
-			sendAdd({ "Coins" }, 100000)
-		end },
-		{ text = "+1M", onClick = function()
-			sendAdd({ "Coins" }, 1000000)
-		end },
+		{
+			text = "+1K coins",
+			onClick = function()
+				sendAdd({ "Coins" }, 1000)
+			end,
+		},
+		{
+			text = "+10K",
+			onClick = function()
+				sendAdd({ "Coins" }, 10000)
+			end,
+		},
+		{
+			text = "+100K",
+			onClick = function()
+				sendAdd({ "Coins" }, 100000)
+			end,
+		},
+		{
+			text = "+1M",
+			onClick = function()
+				sendAdd({ "Coins" }, 1000000)
+			end,
+		},
 	})
 	addButtonRow(list, 3, {
 		{ text = "Coins -> 0", color = DANGER_COLOR, onClick = onZeroCoinsClicked },
-		{ text = "+1 level", onClick = function()
-			sendAdd({ "Level" }, 1)
-		end },
-		{ text = "+1K XP", onClick = function()
-			sendAdd({ "Experience" }, 1000)
-		end },
-		{ text = "+5 spins", onClick = function()
-			sendAdd({ "UISystem", "Spins" }, 5)
-		end },
+		{
+			text = "+1 level",
+			onClick = function()
+				sendAdd({ "Level" }, 1)
+			end,
+		},
+		{
+			text = "+1K XP",
+			onClick = function()
+				sendAdd({ "Experience" }, 1000)
+			end,
+		},
+		{
+			text = "+5 spins",
+			onClick = function()
+				sendAdd({ "UISystem", "Spins" }, 5)
+			end,
+		},
 	})
 
 	addSectionHeader(list, 4, "TARGET SQUISHIES")
 	addButtonRow(list, 5, {
-		{ text = "Spawn 1", onClick = function()
-			onSpawnSquishiesClicked(1)
-		end },
-		{ text = "Spawn 5", onClick = function()
-			onSpawnSquishiesClicked(5)
-		end },
-		{ text = "Fill pad", onClick = function()
-			onSpawnSquishiesClicked(MergeConfig.MAX_OBJECTS)
-		end },
+		{
+			text = "Spawn 1",
+			onClick = function()
+				onSpawnSquishiesClicked(1)
+			end,
+		},
+		{
+			text = "Spawn 5",
+			onClick = function()
+				onSpawnSquishiesClicked(5)
+			end,
+		},
+		{
+			text = "Fill pad",
+			onClick = function()
+				onSpawnSquishiesClicked(MergeConfig.MAX_OBJECTS)
+			end,
+		},
 		{ text = "Clear all", color = DANGER_COLOR, onClick = onClearSquishiesClicked },
 	})
 	local tierRow = addButtonRow(list, 6, {
-		{ text = "- tier", onClick = function()
-			nudgeSpawnTier(-1)
-		end },
+		{
+			text = "- tier",
+			onClick = function()
+				nudgeSpawnTier(-1)
+			end,
+		},
 		{ text = "Spawn tier: --", onClick = refreshSpawnTierButton },
-		{ text = "+ tier", onClick = function()
-			nudgeSpawnTier(1)
-		end },
+		{
+			text = "+ tier",
+			onClick = function()
+				nudgeSpawnTier(1)
+			end,
+		},
 	})
 	spawnTierButton = tierRow[2]
 	refreshSpawnTierButton()
@@ -1444,10 +1472,13 @@ local function buildDataPage(parent: Frame)
 	-- Filter as you type. Rows are keyed by path and reused, so a keystroke
 	-- costs the rows that actually appeared or disappeared, not a full rebuild.
 	local searchChanged = search:GetPropertyChangedSignal("Text")
-	table.insert(connections, searchChanged:Connect(function()
-		searchText = string.lower(search.Text)
-		rebuildDataRows()
-	end))
+	table.insert(
+		connections,
+		searchChanged:Connect(function()
+			searchText = string.lower(search.Text)
+			rebuildDataRows()
+		end)
+	)
 end
 
 local function buildPlayersPage(parent: Frame)
@@ -1502,17 +1533,14 @@ local function buildInfoPage(parent: Frame)
 	field("Spins")
 	field("Keycap theme")
 	field("Squishy beam")
+	field("Merge pop")
 	field("Cosmetics owned")
 	field("Data version")
 end
 
 local function buildStatusBar(parent: Frame)
-	local status = newLabel(
-		"",
-		UDim2.new(1, -(2 * PADDING + GRIP_SIZE), 0, STATUS_BAR_HEIGHT),
-		SMALL_TEXT_SIZE,
-		MUTED_TEXT_COLOR
-	)
+	local status =
+		newLabel("", UDim2.new(1, -(2 * PADDING + GRIP_SIZE), 0, STATUS_BAR_HEIGHT), SMALL_TEXT_SIZE, MUTED_TEXT_COLOR)
 	status.Name = "StatusLabel"
 	status.AnchorPoint = Vector2.new(0, 1)
 	status.Position = UDim2.new(0, PADDING, 1, -3)
@@ -1576,12 +1604,8 @@ local function buildUI()
 	local pageArea = Instance.new("Frame")
 	pageArea.Name = "PageArea"
 	pageArea.Position = UDim2.fromOffset(PADDING, TITLE_BAR_HEIGHT + TAB_STRIP_HEIGHT + 2)
-	pageArea.Size = UDim2.new(
-		1,
-		-2 * PADDING,
-		1,
-		-(TITLE_BAR_HEIGHT + TAB_STRIP_HEIGHT + STATUS_BAR_HEIGHT + PADDING + 4)
-	)
+	pageArea.Size =
+		UDim2.new(1, -2 * PADDING, 1, -(TITLE_BAR_HEIGHT + TAB_STRIP_HEIGHT + STATUS_BAR_HEIGHT + PADDING + 4))
 	pageArea.BackgroundTransparency = 1
 	pageArea.Parent = frame
 
@@ -1596,14 +1620,9 @@ local function buildUI()
 	-- Opening rect: a fraction of the viewport (so it is proportionate on any
 	-- screen) rather than an authored pixel size, centred, then clamped.
 	local screen = viewportSize()
-	windowSize = Vector2.new(
-		math.round(screen.X * INITIAL_WINDOW_FRACTION.X),
-		math.round(screen.Y * INITIAL_WINDOW_FRACTION.Y)
-	)
-	windowPosition = Vector2.new(
-		math.round((screen.X - windowSize.X) / 2),
-		math.round((screen.Y - windowSize.Y) / 2)
-	)
+	windowSize =
+		Vector2.new(math.round(screen.X * INITIAL_WINDOW_FRACTION.X), math.round(screen.Y * INITIAL_WINDOW_FRACTION.Y))
+	windowPosition = Vector2.new(math.round((screen.X - windowSize.X) / 2), math.round((screen.Y - windowSize.Y) / 2))
 	clampWindow()
 
 	titleBar.InputBegan:Connect(function(input: InputObject)
@@ -1631,26 +1650,32 @@ local function buildUI()
 	local sizeChanged = gui:GetPropertyChangedSignal("AbsoluteSize")
 	table.insert(connections, sizeChanged:Connect(clampWindow))
 
-	table.insert(connections, Players.PlayerAdded:Connect(function()
-		rebuildPlayerRows()
-		updateInfo()
-	end))
+	table.insert(
+		connections,
+		Players.PlayerAdded:Connect(function()
+			rebuildPlayerRows()
+			updateInfo()
+		end)
+	)
 
-	table.insert(connections, Players.PlayerRemoving:Connect(function(leaving: Player)
-		if leaving == player then
-			return
-		end
-		if leaving == currentTarget then
-			-- Every packet this panel sends would be rejected from here on
-			-- ("target is not in this server"), so fall back to ourselves rather
-			-- than leaving a target that can only fail.
-			setTarget(player)
-			setStatus(false, `{leaving.Name} left -- target reset to you`)
-			return
-		end
-		rebuildPlayerRows()
-		updateInfo()
-	end))
+	table.insert(
+		connections,
+		Players.PlayerRemoving:Connect(function(leaving: Player)
+			if leaving == player then
+				return
+			end
+			if leaving == currentTarget then
+				-- Every packet this panel sends would be rejected from here on
+				-- ("target is not in this server"), so fall back to ourselves rather
+				-- than leaving a target that can only fail.
+				setTarget(player)
+				setStatus(false, `{leaving.Name} left -- target reset to you`)
+				return
+			end
+			rebuildPlayerRows()
+			updateInfo()
+		end)
+	)
 
 	refreshTargetButton()
 	selectTab("Actions")

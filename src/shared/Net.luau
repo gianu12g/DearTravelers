@@ -146,7 +146,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		}),
 
 		-- client -> server. Developer-only test action; grants every
-		-- CosmeticsCatalog entry (both slots) to the selected in-server player,
+		-- CosmeticsCatalog entry (all slots) to the selected in-server player,
 		-- skipping ids they already own. Same shape as devDamageSquishies --
 		-- the only client input is which in-server player to target.
 		devGrantAllCosmetics = ByteNet.definePacket({
@@ -245,12 +245,13 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			the server sends only the position and every client clones the
 			authored pack and emits it locally.
 
-			No template name on the wire. Unlike a launch landing, which picks
-			between two authored packs, a merge has exactly one, so the name
-			stays in MergeConfig.MERGE_VFX_TEMPLATE_NAME and never travels.
+			templateName is selected authoritatively from the merging player's
+			owned/equipped Merge Pop cosmetic. Clients only resolve that
+			server-selected name under Assets.VFX.Merge.
 		]]
 		mergeSquishyVfx = ByteNet.definePacket({
 			value = ByteNet.struct({
+				templateName = ByteNet.string,
 				worldX = ByteNet.float64,
 				worldY = ByteNet.float64,
 				worldZ = ByteNet.float64,
@@ -284,16 +285,18 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 
 		--[[
 			client -> server. Request to equip an owned cosmetic. `slot` is one
-			of CosmeticsCatalog.Slot ("KeycapThemes" | "SquishyBeams"); `id` is
-			a catalog id for that slot. CosmeticsService re-validates both
+			of CosmeticsCatalog.Slot ("KeycapThemes" | "SquishyBeams" |
+			"MergePops"); `id` is a catalog id for that slot.
+			CosmeticsService re-validates both
 			(known slot, known id, actually owned) before writing -- an unowned
 			or unknown id is silently dropped, same as every other "not in the
 			state this implies" packet in this file.
 
 			No result packet: the equip (or the rejection, which just leaves
 			the old value in place) is visible via the replicated
-			Cosmetics.KeycapThemeId / SquishyBeamId fields DataController.observe
-			already watches, so there is nothing else to tell the client.
+			Cosmetics.KeycapThemeId / SquishyBeamId / MergePopId fields
+			DataController.observe already watches, so there is nothing else to
+			tell the client.
 		]]
 		cosmeticEquip = ByteNet.definePacket({
 			value = ByteNet.struct({

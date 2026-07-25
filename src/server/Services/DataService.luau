@@ -45,7 +45,7 @@ local log = Log.new("DataService")
 ]]
 local DATA_VERSION = 4
 local MAX_PROCESSED_PURCHASE_IDS = 200
--- Comfortably above CosmeticsCatalog's current id count for either slot --
+-- Comfortably above CosmeticsCatalog's current id count for any slot --
 -- a bound exists only to keep a corrupted profile from growing unbounded,
 -- not because owning every cosmetic is a real limit.
 local MAX_OWNED_COSMETICS = 512
@@ -134,7 +134,8 @@ local TEMPLATE = {
 		defaults; equip = a plain field write here, applied client-side via
 		DataController.observe and server-side by CosmeticsService (theme
 		attribute stamp; MergeService resolves SquishyBeamId to its matching
-		Assets.VFX.LaunchBeams model when a launch is accepted). No
+		Assets.VFX.LaunchBeams model when a launch is accepted, and MergePopId
+		to its Assets.VFX.Merge burst when a merge commits). No
 		version bump -- Reconcile() backfills this whole subtree onto existing
 		profiles, and repairProfileData below enforces the one invariant
 		Reconcile can't: equipped id must be owned.
@@ -142,9 +143,11 @@ local TEMPLATE = {
 	Cosmetics = {
 		KeycapThemeId = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID,
 		SquishyBeamId = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID,
+		MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID,
 		Owned = {
 			KeycapThemes = { CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID } :: { string },
 			SquishyBeams = { CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID } :: { string },
+			MergePops = { CosmeticsCatalog.DEFAULT_MERGE_POP_ID } :: { string },
 		},
 	},
 }
@@ -395,6 +398,11 @@ local function repairProfileData(data: any)
 		CosmeticsCatalog.isSquishyBeam,
 		CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
 	)
+	cosmetics.Owned.MergePops = repairOwnedCosmetics(
+		cosmetics.Owned.MergePops,
+		CosmeticsCatalog.isMergePop,
+		CosmeticsCatalog.DEFAULT_MERGE_POP_ID
+	)
 	if
 		type(cosmetics.KeycapThemeId) ~= "string"
 		or not table.find(cosmetics.Owned.KeycapThemes, cosmetics.KeycapThemeId)
@@ -406,6 +414,9 @@ local function repairProfileData(data: any)
 		or not table.find(cosmetics.Owned.SquishyBeams, cosmetics.SquishyBeamId)
 	then
 		cosmetics.SquishyBeamId = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
+	end
+	if type(cosmetics.MergePopId) ~= "string" or not table.find(cosmetics.Owned.MergePops, cosmetics.MergePopId) then
+		cosmetics.MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 	end
 	-- 2026-07-24 trail->beam migration: Reconcile only ADDS missing keys, so a
 	-- profile saved before this rename still carries the old trail fields

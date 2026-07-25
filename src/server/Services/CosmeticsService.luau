@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Ownership + equip backbone for cosmetics (COSMETICS_PLAN.md): keycap
-	Themes and squishy launch Beams. Equip is a plain DataService.set write;
+	Themes, squishy launch Beams, and Merge Pops. Equip is a plain
+	DataService.set write;
 	DataController.observe on the replicated value drives the client menu,
 	and world visuals follow from there -- this service's own job is only to
 	validate the write and, for themes, apply the world-visible side effect
@@ -48,8 +49,10 @@ local assignedBaseConnections: { [Player]: RBXScriptConnection } = {}
 local function isValidIdForSlot(slot: CosmeticsCatalog.Slot, id: string): boolean
 	if slot == "KeycapThemes" then
 		return CosmeticsCatalog.isKeycapTheme(id)
+	elseif slot == "SquishyBeams" then
+		return CosmeticsCatalog.isSquishyBeam(id)
 	end
-	return CosmeticsCatalog.isSquishyBeam(id)
+	return CosmeticsCatalog.isMergePop(id)
 end
 
 --[[
@@ -173,7 +176,7 @@ function CosmeticsService.Init()
 		if typeof(slotValue) ~= "string" or typeof(id) ~= "string" then
 			return
 		end
-		if slotValue ~= "KeycapThemes" and slotValue ~= "SquishyBeams" then
+		if slotValue ~= "KeycapThemes" and slotValue ~= "SquishyBeams" and slotValue ~= "MergePops" then
 			return
 		end
 		if #id == 0 or #id > MAX_ID_LENGTH then
@@ -200,7 +203,10 @@ function CosmeticsService.Init()
 			return
 		end
 
-		local equippedField = if slot == "KeycapThemes" then "KeycapThemeId" else "SquishyBeamId"
+		local equippedField = if slot == "KeycapThemes"
+			then "KeycapThemeId"
+			elseif slot == "SquishyBeams" then "SquishyBeamId"
+			else "MergePopId"
 		DataService.set(player, { "Cosmetics", equippedField }, id)
 
 		if slot == "KeycapThemes" then
