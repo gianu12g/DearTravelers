@@ -193,6 +193,24 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.nothing,
 		}),
 
+		-- client -> server. Toggles only the sender's assigned base forcefield.
+		-- No base name or desired state crosses the wire: BaseService resolves
+		-- both from its authoritative assignment/current-state tables.
+		baseLockRequest = ByteNet.definePacket({
+			value = ByteNet.nothing,
+		}),
+
+		-- server -> requesting client. Clears the button's pending state and
+		-- surfaces validation/rate-limit failures without trusting the client to
+		-- infer whether the authoritative toggle committed.
+		baseLockResult = ByteNet.definePacket({
+			value = ByteNet.struct({
+				ok = ByteNet.bool,
+				locked = ByteNet.bool,
+				message = ByteNet.string,
+			}),
+		}),
+
 		--[[
 			client -> server. "Drop whatever I'm carrying." No payload -- the
 			packet carries no position on purpose. MergeService computes the

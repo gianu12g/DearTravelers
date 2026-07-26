@@ -139,6 +139,7 @@ local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
+local BaseService = require(script.Parent.BaseService)
 local CoinsService = require(script.Parent.CoinsService)
 local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local DataService = require(script.Parent.DataService)
@@ -151,6 +152,7 @@ local Net = require(ReplicatedStorage.Shared.Net)
 local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
+local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
 
 local log = Log.new("MergeService")
 
@@ -259,6 +261,10 @@ type LaunchState = {
 	-- beam anchor. Resolving it per launch rather than per call keeps those
 	-- three consistent even if the artwork's attribute is edited mid-flight.
 	sizeMultiplier: number,
+	-- Set at the exact descent frame where an active dome intercepts this
+	-- projectile. Damage immunity follows this physical collision rather than
+	-- merely checking whether a shield happens to be active later.
+	blockedByForcefield: Player?,
 }
 
 type MushBoostState = {
@@ -2065,11 +2071,22 @@ end
 
 --[[
 	Vertical-only fall from dropStart (read straight off the part -- launchCarried
-	teleports it there before this ever runs) down to targetPosition,
-	quadratic ease-in so it accelerates like gravity. No rotation at all: the
-	giant squishy stays upright so it reads as a deliberate drop onto the target rather than a tumbling projectile.
+	teleports it there before this ever runs) down to the map surface. Every
+	server Heartbeat re-resolves the forcefield at this X/Z and checks the whole
+	frame's movement segment, so a dome activated during the fall catches the
+	projectile as long as its bottom has not already crossed the dome surface.
+
+	The resolved impact position and owner are returned to runLaunch so the
+	GroundHit, explosion, and damage decision all use the same physical contact.
+	No rotation at all: the giant squishy stays upright so it reads as a
+	deliberate drop onto the target rather than a tumbling projectile.
 ]]
-local function animateDropDescent(player: Player, launch: LaunchState, targetPosition: Vector3): boolean
+local function animateDropDescent(
+	player: Player,
+	launch: LaunchState,
+	groundTargetPosition: Vector3,
+	projectileHalfHeight: number
+): (boolean, Vector3, Player?)
 	local part = launch.part
 	local dropStart = part.Position
 	local duration = MergeConfig.LAUNCH_DROP_SECONDS
@@ -2077,16 +2094,24 @@ local function animateDropDescent(player: Player, launch: LaunchState, targetPos
 
 	while elapsed < duration do
 		if activeLaunches[player] ~= launch or part.Parent == nil then
-			return false
+			return false, groundTargetPosition, nil
 		end
 
+		local previousPosition = part.Position
 		elapsed += RunService.Heartbeat:Wait()
 		local alpha = math.clamp(elapsed / duration, 0, 1)
-		part.CFrame = CFrame.new(dropStart:Lerp(targetPosition, alpha * alpha * alpha))
+		local nextPosition = dropStart:Lerp(groundTargetPosition, alpha * alpha * alpha)
+		local shieldImpact, shieldOwner =
+			BaseService.resolveForcefieldImpact(groundTargetPosition.X, groundTargetPosition.Z, projectileHalfHeight)
+		if shieldImpact ~= nil and previousPosition.Y >= shieldImpact.Y and nextPosition.Y <= shieldImpact.Y then
+			part.CFrame = CFrame.new(shieldImpact)
+			return true, shieldImpact, shieldOwner
+		end
+		part.CFrame = CFrame.new(nextPosition)
 	end
 
-	part.CFrame = CFrame.new(targetPosition)
-	return true
+	part.CFrame = CFrame.new(groundTargetPosition)
+	return true, groundTargetPosition, nil
 end
 
 -- Uses the exact same template-space anchor calculation as attachLaunchBeams.
@@ -2184,9 +2209,14 @@ local function runLaunch(player: Player, launch: LaunchState, targetPosition: Ve
 		task.spawn(LaunchBeamRuntime.fadeIn, beams, MergeConfig.LAUNCH_BEAM_FADE_IN_SECONDS)
 	end
 
-	if not animateDropDescent(player, launch, targetPosition) then
+	local projectileHalfHeight = tierDefFor(tier).Size / 2 * launch.sizeMultiplier
+	local descentOk, resolvedTargetPosition, shieldOwner =
+		animateDropDescent(player, launch, targetPosition, projectileHalfHeight)
+	if not descentOk then
 		return
 	end
+	targetPosition = resolvedTargetPosition
+	launch.blockedByForcefield = shieldOwner
 
 	-- The beams read as the descent itself, so they end with it: cut at
 	-- touchdown rather than waiting for finishLaunch, which only runs after the
@@ -2231,7 +2261,7 @@ local function runLaunch(player: Player, launch: LaunchState, targetPosition: Ve
 	-- space. Every other player's live squishies are checked spatially; an empty
 	-- landing simply produces the impact visual and damages nothing.
 	for targetPlayer in liveBases do
-		if targetPlayer ~= player then
+		if targetPlayer ~= player and targetPlayer ~= launch.blockedByForcefield then
 			MergeService.damageSquishiesNear(targetPlayer, targetPosition, MergeConfig.LAUNCH_IMPACT_RADIUS, damage)
 		end
 	end
@@ -2273,6 +2303,8 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 	if targetPosition == nil then
 		return false, "Choose a point inside the map"
 	end
+	local _, initialShieldOwner = BaseService.resolveForcefieldImpact(worldX, worldZ, halfSize * sizeMultiplier)
+	local targetOwner = BaseService.getOwnerAtPosition(worldX, worldZ) or initialShieldOwner
 
 	local launch: LaunchState = {
 		live = carry.live,
@@ -2282,6 +2314,7 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 		beams = nil,
 		scale = nil,
 		sizeMultiplier = sizeMultiplier,
+		blockedByForcefield = nil,
 	}
 	activeLaunches[player] = launch
 	carries[player] = nil
@@ -2300,6 +2333,26 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 	local dropStart = targetPosition + Vector3.new(0, MergeConfig.LAUNCH_DROP_HEIGHT, 0)
 	carry.part.CFrame = CFrame.new(dropStart)
 	applyLaunchScale(launch)
+
+	for _, recipient in Players:GetPlayers() do
+		local message: string
+		if targetOwner == nil then
+			message = if recipient == player
+				then "You launched a Squishy!"
+				else `{player.DisplayName} launched a Squishy!`
+		elseif targetOwner == player then
+			message = if recipient == player
+				then "You launched a Squishy at your own base!"
+				else `{player.DisplayName} launched a Squishy at their own base!`
+		elseif recipient == targetOwner then
+			message = `{player.DisplayName} launched a Squishy at your base!`
+		elseif recipient == player then
+			message = `You launched a Squishy at {targetOwner.DisplayName}'s base!`
+		else
+			message = `{player.DisplayName} launched a Squishy at {targetOwner.DisplayName}'s base!`
+		end
+		UINotificationService.SendAnnouncement(recipient, message)
+	end
 
 	task.spawn(function()
 		local ok, err = xpcall(function()

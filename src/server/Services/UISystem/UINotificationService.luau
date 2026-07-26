@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Thin server->client push helpers for the UISystem port: a generic toast
-	(SendNotification) and the confetti burst (EmitConfetti). Every other
+	(SendNotification), the authored announcement banner (SendAnnouncement /
+	BroadcastAnnouncement), and the confetti burst (EmitConfetti). Every other
 	UISystem service that needs to tell one specific player something calls
 	in here rather than touching Net.notify / Net.confettiEmit directly --
 	one place to add e.g. rate limiting later, and it collapses the source's
@@ -24,6 +25,14 @@ local UINotificationService = {}
 
 function UINotificationService.SendNotification(player: Player, kind: string, message: string)
 	Net.notify.sendTo({ kind = kind, message = message }, player)
+end
+
+function UINotificationService.SendAnnouncement(player: Player, message: string)
+	Net.announcement.sendTo({ message = message }, player)
+end
+
+function UINotificationService.BroadcastAnnouncement(message: string)
+	Net.announcement.sendToAll({ message = message })
 end
 
 function UINotificationService.EmitConfetti(player: Player)

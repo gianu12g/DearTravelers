@@ -1,16 +1,17 @@
 --!strict
 --[[
 	Connects the launch button to the authored LaunchTargetingUI and
-	LaunchTargetMarkerUI instances in StarterGui. Map geometry and UI remain
-	entirely authored. Targeting takes over the real Workspace.CurrentCamera --
-	tweening it to an authored top-down overview pose while active, and back to
-	wherever the player's camera actually was on every exit path -- and resolves
-	the clicked world point with a real workspace raycast against
-	Workspace.MapLayout. LaunchMapViewport has no Camera of its own anymore --
-	it renders as a pure 2D label overlay, realigned to sit atop the
-	real-camera overview; its opaque "BG" backdrop stays hidden for the
-	duration, and the overlay itself stays hidden until the camera finishes
-	tweening into the overview pose (see takeOverCamera's onPositioned).
+	LaunchTargetMarkerUI instances in StarterGui. Targeting takes over the real
+	Workspace.CurrentCamera, tweening it to a computed top-down overview pose
+	while active and back to wherever the player's camera actually was on every
+	exit path. The base ownership visuals now live in each base's NameLabel
+	BillboardGui, so no duplicated viewport overlay is required.
+
+	NameLabels use a raised world offset and half their authored size during
+	normal play so they clear the forcefield domes without dominating the 3D
+	view. During targeting they switch locally to their authored size and zero
+	world offset: from the straight-down overview, raising a 3D point creates
+	perspective parallax that pushes every label radially away from its base.
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -20,11 +21,11 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
+local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Motion = require(script.Parent.Parent.UI.Motion)
 local Net = require(ReplicatedStorage.Shared.Net)
-local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 
 local log = Log.new("LaunchController")
 
@@ -45,6 +46,8 @@ local FALLBACK_OVERVIEW_HEIGHT = 350
 -- fills the tighter screen axis; raise to zoom out further. Hand-tuned in
 -- Studio to put the camera at ~430 studs on a 16:9 screen at FOV 70.
 local OVERVIEW_FIT_MARGIN = 1.325
+local BASE_LABEL_FORCEFIELD_PADDING = 6
+local BASE_LABEL_GAMEPLAY_SCALE = 0.5
 local TARGET_ICON_WIDTH_SCALE = 0.056
 local TARGET_ICON_DROP_DISTANCE = 46
 local TARGET_ICON_START_SCALE = 0.3
@@ -68,13 +71,6 @@ type TargetSelection = {
 	radiusDiameter: number,
 }
 
-type AuthoredMapUi = {
-	labels: { [string]: TextLabel },
-	ownerAvatar: ImageLabel,
-	ownerName: TextLabel,
-	ownerNameOffset: UDim2,
-}
-
 local LaunchController = {}
 
 local dropLaunchUi: ScreenGui? = nil
@@ -91,6 +87,7 @@ local connectedCancelButton: TextButton? = nil
 local cancelActivatedConnection: RBXScriptConnection? = nil
 local connectedScreensFolder: Instance? = nil
 local screensChildAddedConnection: RBXScriptConnection? = nil
+local mapLayoutDescendantAddedConnection: RBXScriptConnection? = nil
 
 local targeting = false
 local awaitingServer = false
@@ -126,6 +123,7 @@ local overviewPoseWarned = false
 -- the client session.
 local cachedMapHalfExtentX: number? = nil
 local cachedMapHalfExtentZ: number? = nil
+local baseLabelLaunchSizes: { [BillboardGui]: UDim2 } = {}
 
 local function radiusDebugEnabled(): boolean
 	return player:GetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE) == true
@@ -142,36 +140,6 @@ local function cancelHintMotion()
 	if label ~= nil and label.Parent ~= nil and rest ~= nil then
 		label.Position = rest
 	end
-end
-
-local function resolveAuthoredMapUi(viewport: ViewportFrame): AuthoredMapUi?
-	local labels: { [string]: TextLabel } = {}
-	for _, text in { "CENTER", "BASE1", "BASE2", "BASE3", "BASE4", "BASE5", "BASE6", "BASE7", "BASE8" } do
-		local instance = viewport:FindFirstChild(text .. "Label")
-		if instance == nil or not instance:IsA("TextLabel") then
-			log.warn(`LaunchTargetingUI.LaunchMapViewport.{text}Label is missing`)
-			return nil
-		end
-		labels[text] = instance
-	end
-
-	local avatarInstance = viewport:FindFirstChild("BaseOwnerAvatar")
-	if avatarInstance == nil or not avatarInstance:IsA("ImageLabel") then
-		log.warn("LaunchTargetingUI.LaunchMapViewport.BaseOwnerAvatar is missing")
-		return nil
-	end
-	local nameInstance = viewport:FindFirstChild("BaseOwnerName")
-	if nameInstance == nil or not nameInstance:IsA("TextLabel") then
-		log.warn("LaunchTargetingUI.LaunchMapViewport.BaseOwnerName is missing")
-		return nil
-	end
-
-	return {
-		labels = labels,
-		ownerAvatar = avatarInstance,
-		ownerName = nameInstance,
-		ownerNameOffset = nameInstance.Position - avatarInstance.Position,
-	}
 end
 
 -- The 8 sign combinations for a box's local-space corners, used to build a
@@ -223,33 +191,81 @@ local function computeMapHalfExtents(mapLayout: Instance): (number, number)
 	return halfExtentX, halfExtentZ
 end
 
+-- The BillboardGuis remain parented to their base parts; this local property
+-- change does not replicate back to the server or affect another player's
+-- camera. A per-label LaunchViewSize attribute, when present, is the source of
+-- truth for its full launch-view size; otherwise its first observed Size is
+-- cached. Normal play uses BASE_LABEL_GAMEPLAY_SCALE. GameplayWorldOffsetY may
+-- override the geometry-derived normal height for art-direction tweaks.
+local function setBaseLabelsLaunchMode(launchMode: boolean)
+	local mapLayout = Workspace:FindFirstChild("MapLayout")
+	local basesFolder = if mapLayout ~= nil then mapLayout:FindFirstChild("Bases") else nil
+	local forcefieldsFolder = if mapLayout ~= nil then mapLayout:FindFirstChild("BaseForcefields") else nil
+	if basesFolder == nil then
+		return
+	end
+
+	for _, baseInstance in basesFolder:GetChildren() do
+		if not baseInstance:IsA("BasePart") then
+			continue
+		end
+		local nameLabel = baseInstance:FindFirstChild("NameLabel")
+		if nameLabel == nil or not nameLabel:IsA("BillboardGui") then
+			continue
+		end
+
+		local configuredLaunchSize = nameLabel:GetAttribute("LaunchViewSize")
+		local launchSize = if typeof(configuredLaunchSize) == "UDim2" then configuredLaunchSize else nil
+		launchSize = launchSize or baseLabelLaunchSizes[nameLabel]
+		if launchSize == nil then
+			launchSize = nameLabel.Size
+			baseLabelLaunchSizes[nameLabel] = launchSize
+		end
+
+		if launchMode then
+			nameLabel.Size = launchSize
+			nameLabel.StudsOffsetWorldSpace = Vector3.zero
+			continue
+		end
+
+		nameLabel.Size = UDim2.new(
+			launchSize.X.Scale * BASE_LABEL_GAMEPLAY_SCALE,
+			launchSize.X.Offset * BASE_LABEL_GAMEPLAY_SCALE,
+			launchSize.Y.Scale * BASE_LABEL_GAMEPLAY_SCALE,
+			launchSize.Y.Offset * BASE_LABEL_GAMEPLAY_SCALE
+		)
+		local configuredOffset = nameLabel:GetAttribute("GameplayWorldOffsetY")
+		local offsetY = if typeof(configuredOffset) == "number" then configuredOffset else nil
+		if offsetY == nil and forcefieldsFolder ~= nil then
+			local forcefield = forcefieldsFolder:FindFirstChild(baseInstance.Name .. "Forcefield")
+			if forcefield ~= nil and forcefield:IsA("BasePart") then
+				offsetY = forcefield.Position.Y
+					+ forcefield.Size.Y / 2
+					- baseInstance.Position.Y
+					+ BASE_LABEL_FORCEFIELD_PADDING
+			end
+		end
+		nameLabel.StudsOffsetWorldSpace = Vector3.new(0, offsetY or 0, 0)
+	end
+end
+
 --[[
 	Resolves the top-down overview camera pose WITHOUT mutating anything --
-	unlike the old resolveAuthoredOverview, this never creates or reparents a
-	Camera, because LaunchMapViewport no longer renders anything of its own
-	(it stays hidden until the camera finishes tweening into this pose; see
-	takeOverCamera below).
-
-	The old LaunchMapCamera Camera child and LaunchCameraCFrame/
-	LaunchCameraFieldOfView viewport attributes are gone: they were authored
-	against the old ViewportFrame mini-map, which ignores Lighting (no clouds
-	or atmosphere). Replayed on the real camera, that pose (Y=1185, FOV 25)
-	sits above the cloud layer -- confirmed live, the view is almost entirely
-	sky.
+	unlike the old viewport implementation, this never creates or reparents a
+	Camera.
 
 	Precedence:
-	1. LaunchOverviewCFrame/LaunchOverviewFieldOfView viewport attributes --
-	   a manual override for future art direction. Neither attribute exists
-	   in the place today; that's intentional, this tier is an escape hatch.
+	1. LaunchOverviewCFrame/LaunchOverviewFieldOfView attributes on
+	   LaunchTargetingUI -- a manual override for future art direction.
 	2. A pose computed to fit Workspace.MapLayout under the live camera's
 	   current FOV and aspect ratio, using the live camera's current FOV as
 	   the returned FOV too (so the takeover tween never fights a menu
 	   controller's own FieldOfView tween).
 ]]
-local function resolveOverviewPose(viewport: ViewportFrame?): (CFrame?, number?)
-	if viewport ~= nil then
-		local overrideCFrame = viewport:GetAttribute("LaunchOverviewCFrame")
-		local overrideFieldOfView = viewport:GetAttribute("LaunchOverviewFieldOfView")
+local function resolveOverviewPose(overrideSource: Instance?): (CFrame?, number?)
+	if overrideSource ~= nil then
+		local overrideCFrame = overrideSource:GetAttribute("LaunchOverviewCFrame")
+		local overrideFieldOfView = overrideSource:GetAttribute("LaunchOverviewFieldOfView")
 		if typeof(overrideCFrame) == "CFrame" and typeof(overrideFieldOfView) == "number" then
 			return overrideCFrame, overrideFieldOfView
 		end
@@ -300,7 +316,7 @@ end
 	cancel of the in-flight tween (re-takeover, or the caller giving up)
 	suppresses onComplete via Motion's cancel -- callers must tolerate that.
 ]]
-local function takeOverCamera(viewport: ViewportFrame?, onPositioned: (() -> ())?)
+local function takeOverCamera(overrideSource: Instance?, onPositioned: (() -> ())?)
 	local currentCamera = Workspace.CurrentCamera
 	if currentCamera == nil then
 		if onPositioned ~= nil then
@@ -309,7 +325,7 @@ local function takeOverCamera(viewport: ViewportFrame?, onPositioned: (() -> ())
 		return
 	end
 
-	local overviewCFrame, overviewFieldOfView = resolveOverviewPose(viewport)
+	local overviewCFrame, overviewFieldOfView = resolveOverviewPose(overrideSource)
 	if overviewCFrame == nil or overviewFieldOfView == nil then
 		if not overviewPoseWarned then
 			overviewPoseWarned = true
@@ -419,38 +435,6 @@ local function releaseCameraOverview()
 	cameraMotion = motion
 end
 
-local function updateAuthoredOwnership(authoredUi: AuthoredMapUi)
-	authoredUi.ownerAvatar.Visible = false
-	authoredUi.ownerName.Visible = false
-	for text, label in authoredUi.labels do
-		label.Text = text
-		label.Visible = true
-	end
-
-	local assignedBase = player:GetAttribute("AssignedBase")
-	if typeof(assignedBase) ~= "string" then
-		return
-	end
-	local baseLabel = authoredUi.labels[string.upper(assignedBase)]
-	if baseLabel == nil then
-		log.warn(`LaunchTargetingUI has no authored label for {assignedBase}`)
-		return
-	end
-
-	baseLabel.Visible = false
-	authoredUi.ownerAvatar.Position = baseLabel.Position
-	authoredUi.ownerAvatar.Image = `rbxthumb://type=AvatarHeadShot&id={player.UserId}&w=150&h=150`
-	authoredUi.ownerAvatar.Visible = true
-	authoredUi.ownerName.Position = baseLabel.Position + authoredUi.ownerNameOffset
-	authoredUi.ownerName.Text = player.DisplayName
-	authoredUi.ownerName.Visible = true
-
-	local stroke = authoredUi.ownerAvatar:FindFirstChildOfClass("UIStroke")
-	if stroke ~= nil then
-		stroke.Color = Color3.fromRGB(255, 232, 92)
-	end
-end
-
 local function resolveTargetMarkerUi(): (ScreenGui?, Frame?, ImageLabel?, Frame?)
 	-- LaunchTargetMarkerUI stays a direct PlayerGui child -- unlike
 	-- LaunchTargetingUI/DropLaunchUI, it was never moved under Screens.
@@ -480,27 +464,17 @@ local function resolveTargetMarkerUi(): (ScreenGui?, Frame?, ImageLabel?, Frame?
 	return guiInstance, iconHolderInstance, iconInstance, debugBoxInstance
 end
 
-local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?, AuthoredMapUi?)
+local function resolveTargetingUi(): ScreenGui?
 	local playerGui = player:WaitForChild("PlayerGui")
 	local screensInstance = playerGui:WaitForChild("Screens", WAIT_TIMEOUT)
 	if screensInstance == nil then
 		log.warn("PlayerGui.Screens did not appear -- launch targeting disabled")
-		return nil, nil, nil
+		return nil
 	end
 	local uiInstance = screensInstance:WaitForChild("LaunchTargetingUI", WAIT_TIMEOUT)
 	if uiInstance == nil or not uiInstance:IsA("ScreenGui") then
 		log.warn("PlayerGui.Screens.LaunchTargetingUI did not appear -- launch targeting disabled")
-		return nil, nil, nil
-	end
-
-	local viewportInstance = uiInstance:FindFirstChild("LaunchMapViewport")
-	if viewportInstance == nil or not viewportInstance:IsA("ViewportFrame") then
-		log.warn("LaunchTargetingUI.LaunchMapViewport is missing")
-		return nil, nil, nil
-	end
-	local authoredMapUi = resolveAuthoredMapUi(viewportInstance)
-	if authoredMapUi == nil then
-		return nil, nil, nil
+		return nil
 	end
 
 	local hintInstance = uiInstance:FindFirstChild("LaunchTargetingHint")
@@ -509,11 +483,11 @@ local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?, AuthoredMapUi?
 	local cancelInstance = if hintInstance ~= nil then hintInstance:FindFirstChild("Cancel") else nil
 	if labelInstance == nil or not labelInstance:IsA("TextLabel") then
 		log.warn("LaunchTargetingUI.LaunchTargetingHint.BG.TextLabel is missing")
-		return nil, nil, nil
+		return nil
 	end
 	if cancelInstance == nil or not cancelInstance:IsA("TextButton") then
 		log.warn("LaunchTargetingUI.LaunchTargetingHint.Cancel is missing")
-		return nil, nil, nil
+		return nil
 	end
 
 	if hintText ~= labelInstance then
@@ -538,7 +512,7 @@ local function resolveTargetingUi(): (ScreenGui?, ViewportFrame?, AuthoredMapUi?
 			LaunchController.cancelTargeting()
 		end)
 	end
-	return uiInstance, viewportInstance, authoredMapUi
+	return uiInstance
 end
 
 local function setHint(message: string, isError: boolean?)
@@ -596,6 +570,7 @@ local function destroyTargetingVisuals()
 	if hudGui ~= nil and hudGui.Parent ~= nil then
 		hudGui.Enabled = true
 	end
+	setBaseLabelsLaunchMode(false)
 	releaseCameraOverview()
 end
 
@@ -783,8 +758,8 @@ local function beginTargeting()
 		return
 	end
 
-	local overlayGui, authoredViewport, authoredMapUi = resolveTargetingUi()
-	if overlayGui == nil or authoredViewport == nil or authoredMapUi == nil then
+	local overlayGui = resolveTargetingUi()
+	if overlayGui == nil then
 		return
 	end
 	local markerGui, iconHolder, icon, debugBox = resolveTargetMarkerUi()
@@ -795,29 +770,12 @@ local function beginTargeting()
 	markerGui.Enabled = false
 	iconHolder.Visible = false
 	debugBox.Visible = false
-	-- The opaque "BG" backdrop is retired in favor of the real-camera overview
-	-- below and never comes back -- the authored default on a fresh clone
-	-- already starts Visible, which is all a future re-clone needs.
-	-- LaunchMapViewport itself starts hidden here and only turns back on once
-	-- takeOverCamera's onPositioned callback confirms the camera has actually
-	-- finished tweening into the overview pose (or fires immediately on a
-	-- degenerate path -- see takeOverCamera). Its labels still populate now,
-	-- while hidden, via updateAuthoredOwnership below. The hint and Cancel
-	-- button are siblings of the viewport in the same ScreenGui and keep
-	-- appearing immediately with it.
+	-- Any legacy opaque backdrop remains retired; the ownership images and
+	-- names now render through the bases' BillboardGuis in the real 3D map.
 	local overlayBackground = overlayGui:FindFirstChild("BG")
 	if overlayBackground ~= nil and overlayBackground:IsA("Frame") then
 		overlayBackground.Visible = false
 	end
-	authoredViewport.Visible = false
-
-	updateAuthoredOwnership(authoredMapUi)
-	takeOverCamera(authoredViewport, function()
-		if not targeting or authoredViewport.Parent == nil then
-			return
-		end
-		authoredViewport.Visible = true
-	end)
 
 	targetMarkerGui = markerGui
 	targetIconHolder = iconHolder
@@ -827,6 +785,8 @@ local function beginTargeting()
 	awaitingServer = false
 	playingAcceptedPlop = false
 	pendingSelection = nil
+	setBaseLabelsLaunchMode(true)
+	takeOverCamera(overlayGui, nil)
 	setHint("Choose anywhere on the map")
 	markerGui.Enabled = true
 	overlayGui.Enabled = true
@@ -843,6 +803,10 @@ local function beginTargeting()
 		end
 		ui.Enabled = false
 	end)
+end
+
+function LaunchController.beginTargeting()
+	beginTargeting()
 end
 
 local function resolveUi(): TextButton?
@@ -900,7 +864,7 @@ local function bindLaunchButton()
 	end
 
 	connectedButton = button
-	activatedConnection = button.Activated:Connect(beginTargeting)
+	activatedConnection = button.Activated:Connect(LaunchController.beginTargeting)
 	updateLaunchCooldownDisplay()
 end
 
@@ -1022,6 +986,34 @@ local function watchPlayerGui()
 end
 
 function LaunchController.Init()
+	setBaseLabelsLaunchMode(false)
+	task.spawn(function()
+		local mapLayout = Workspace:WaitForChild("MapLayout", WAIT_TIMEOUT)
+		if mapLayout == nil then
+			return
+		end
+
+		local previousConnection = mapLayoutDescendantAddedConnection
+		if previousConnection ~= nil then
+			previousConnection:Disconnect()
+		end
+		mapLayoutDescendantAddedConnection = mapLayout.DescendantAdded:Connect(function(descendant)
+			local parent = descendant.Parent
+			local isNameLabel = descendant:IsA("BillboardGui") and descendant.Name == "NameLabel"
+			local isForcefield = descendant:IsA("BasePart") and parent ~= nil and parent.Name == "BaseForcefields"
+			if not isNameLabel and not isForcefield then
+				return
+			end
+
+			task.defer(function()
+				if mapLayout.Parent ~= nil then
+					setBaseLabelsLaunchMode(targeting)
+				end
+			end)
+		end)
+		setBaseLabelsLaunchMode(targeting)
+	end)
+
 	Net.mergeLaunchResult.listen(function(data)
 		if not targeting then
 			return

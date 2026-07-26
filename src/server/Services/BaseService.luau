@@ -18,7 +18,7 @@
 	PlayerRemoving -- which hands us a Player and nothing else -- can find
 	and release that player's base in O(1) instead of scanning every base.
 
-	The Base<number> parts, their NameLabel.NameText, and their KeyCaps
+	The Base<number> parts, their NameLabel ownership UI, and their KeyCaps
 	folder already exist in Studio -- Rojo does not mount Workspace
 	(ARCHITECTURE.md's map), so this service only ever READS them, and it
 	resolves the map hierarchy in Start() rather than Init(): Init() must never
@@ -26,7 +26,7 @@
 	snapshot and malformed bases are logged and left out of rotation.
 
 	ATTRIBUTES: base assignment is public info (every player can already see
-	whose name is on a base's NameText), so it is fine to publish it as a
+	whose name is on a base's NameLabel), so it is fine to publish it as a
 	plain Attribute instead of routing it through Replica/DataService, which
 	exist for a player's own private profile. `player:SetAttribute
 	("AssignedBase", ...)` and `basePart:SetAttribute("OwnerUserId", ...)`
@@ -51,6 +51,8 @@ local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
 local Log = require(ReplicatedStorage.Shared.Log)
+local Net = require(ReplicatedStorage.Shared.Net)
+local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 
 local log = Log.new("BaseService")
@@ -63,14 +65,27 @@ local WAIT_TIMEOUT = 10
 -- Studs above the base part's top face a respawned character lands at, so
 -- PivotTo drops them onto the base instead of inside it.
 local SPAWN_HEIGHT_OFFSET = 5
+local DEFAULT_FORCEFIELD_TRANSPARENCY = 0.58
+local FORCEFIELD_DURATION_SECONDS = 20
+local FORCEFIELD_COOLDOWN_SECONDS = 120
+local lockInputLimiter = RateLimiter.new(2, 3)
 
 type BaseRecord = {
 	part: BasePart,
+	nameLabel: BillboardGui,
 	nameText: TextLabel,
+	ownerAvatar: ImageLabel?,
 	-- Captured from Studio at Start() time and restored on release, rather
 	-- than hardcoding a reset string here -- whatever placeholder was
-	-- authored on NameText is what "unclaimed" means for this base.
+	-- authored on the ownership UI is what "unclaimed" means for this base.
 	defaultText: string,
+	defaultTextVisible: boolean,
+	defaultAvatarImage: string?,
+	defaultAvatarVisible: boolean?,
+	-- Studio-authored sphere under MapLayout.BaseForcefields. Missing artwork
+	-- disables locking for only this base; assignment/spawning still work.
+	forcefield: BasePart?,
+	activeForcefieldTransparency: number,
 }
 
 local bases: { [string]: BaseRecord } = {}
@@ -79,6 +94,9 @@ local baseOrder: { string } = {}
 
 local assignments: { [string]: Player } = {}
 local playerBases: { [Player]: string } = {}
+local lockedBases: { [string]: true } = {}
+local lockCooldownEnds: { [string]: number } = {}
+local lockGenerations: { [string]: number } = {}
 -- The CharacterAdded connection driving respawn-to-base for whichever player
 -- currently owns a base. Reverse-indexed by Player for the same reason
 -- playerBases is: PlayerRemoving only hands us a Player.
@@ -88,6 +106,89 @@ local queuedPlayers: { [Player]: true } = {}
 
 local BaseService = {}
 local onPlayerAdded: (Player) -> ()
+
+local function setForcefieldState(player: Player, baseName: string, locked: boolean): (boolean, string)
+	local record = bases[baseName]
+	if record == nil then
+		return false, "Your base is not ready"
+	end
+
+	local forcefield = record.forcefield
+	if locked and (forcefield == nil or forcefield.Parent == nil) then
+		return false, "This base has no forcefield"
+	end
+
+	if locked then
+		lockedBases[baseName] = true
+	else
+		lockedBases[baseName] = nil
+	end
+	player:SetAttribute("BaseLocked", locked)
+	record.part:SetAttribute("ForcefieldActive", locked)
+	if forcefield ~= nil and forcefield.Parent ~= nil then
+		forcefield:SetAttribute("Active", locked)
+		forcefield.Transparency = if locked then record.activeForcefieldTransparency else 1
+	end
+
+	return true, if locked then "Base locked" else "Base unlocked"
+end
+
+local function invalidateForcefieldCycle(player: Player, baseName: string)
+	lockGenerations[baseName] = (lockGenerations[baseName] or 0) + 1
+	lockCooldownEnds[baseName] = nil
+	player:SetAttribute("BaseLockExpiresAt", nil)
+	player:SetAttribute("BaseLockCooldownEndsAt", nil)
+end
+
+local function activateForcefield(player: Player, baseName: string): (boolean, string)
+	local now = Workspace:GetServerTimeNow()
+	local cooldownEndsAt = lockCooldownEnds[baseName] or 0
+	if cooldownEndsAt > now then
+		local remaining = math.ceil(cooldownEndsAt - now)
+		return false, `Forcefield recharging ({remaining}s)`
+	end
+
+	local ok, message = setForcefieldState(player, baseName, true)
+	if not ok then
+		return false, message
+	end
+
+	local generation = (lockGenerations[baseName] or 0) + 1
+	local expiresAt = now + FORCEFIELD_DURATION_SECONDS
+	cooldownEndsAt = expiresAt + FORCEFIELD_COOLDOWN_SECONDS
+	lockGenerations[baseName] = generation
+	lockCooldownEnds[baseName] = cooldownEndsAt
+	player:SetAttribute("BaseLockExpiresAt", expiresAt)
+	player:SetAttribute("BaseLockCooldownEndsAt", cooldownEndsAt)
+
+	task.delay(FORCEFIELD_DURATION_SECONDS, function()
+		if
+			lockGenerations[baseName] ~= generation
+			or assignments[baseName] ~= player
+			or playerBases[player] ~= baseName
+		then
+			return
+		end
+
+		setForcefieldState(player, baseName, false)
+		player:SetAttribute("BaseLockExpiresAt", nil)
+	end)
+
+	task.delay(FORCEFIELD_DURATION_SECONDS + FORCEFIELD_COOLDOWN_SECONDS, function()
+		if
+			lockGenerations[baseName] ~= generation
+			or assignments[baseName] ~= player
+			or playerBases[player] ~= baseName
+		then
+			return
+		end
+
+		lockCooldownEnds[baseName] = nil
+		player:SetAttribute("BaseLockCooldownEndsAt", nil)
+	end)
+
+	return true, `Forcefield active for {FORCEFIELD_DURATION_SECONDS} seconds`
+end
 
 local function updateQueuePositions()
 	for position, player in waitingPlayers do
@@ -176,13 +277,23 @@ local function releaseBase(player: Player)
 	if baseName == nil then
 		return
 	end
+	invalidateForcefieldCycle(player, baseName)
+	setForcefieldState(player, baseName, false)
 	playerBases[player] = nil
 	assignments[baseName] = nil
 	player:SetAttribute("AssignedBase", nil)
+	player:SetAttribute("BaseLocked", nil)
 
 	local record = bases[baseName]
 	if record ~= nil then
+		record.nameLabel.Enabled = false
 		record.nameText.Text = record.defaultText
+		record.nameText.Visible = record.defaultTextVisible
+		local ownerAvatar = record.ownerAvatar
+		if ownerAvatar ~= nil then
+			ownerAvatar.Image = record.defaultAvatarImage or ""
+			ownerAvatar.Visible = record.defaultAvatarVisible == true
+		end
 		record.part:SetAttribute("OwnerUserId", nil)
 	end
 
@@ -214,8 +325,20 @@ onPlayerAdded = function(player: Player)
 
 	local record = bases[baseName]
 	if record ~= nil then
+		record.nameLabel.Enabled = true
 		record.nameText.Text = player.DisplayName
+		record.nameText.Visible = true
+		local ownerAvatar = record.ownerAvatar
+		if ownerAvatar ~= nil then
+			ownerAvatar.Image = `rbxthumb://type=AvatarHeadShot&id={player.UserId}&w=150&h=150`
+			ownerAvatar.Visible = true
+		end
 		record.part:SetAttribute("OwnerUserId", player.UserId)
+		invalidateForcefieldCycle(player, baseName)
+		local forcefieldReady = setForcefieldState(player, baseName, false)
+		if not forcefieldReady then
+			player:SetAttribute("BaseLocked", false)
+		end
 
 		characterConnections[player] = player.CharacterAdded:Connect(function(character: Model)
 			teleportCharacterToBase(character, record.part)
@@ -267,6 +390,92 @@ function BaseService.getOwner(baseName: string): Player?
 	return assignments[baseName]
 end
 
+-- The owner whose authored base footprint contains this X/Z point.
+-- Transforming through each base CFrame preserves correctness if a base is
+-- rotated or moved in Studio later.
+function BaseService.getOwnerAtPosition(worldX: number, worldZ: number): Player?
+	for baseName, owner in assignments do
+		local record = bases[baseName]
+		if record == nil then
+			continue
+		end
+		local basePart = record.part
+		local localPosition = basePart.CFrame:PointToObjectSpace(Vector3.new(worldX, basePart.Position.Y, worldZ))
+		if math.abs(localPosition.X) <= basePart.Size.X / 2 and math.abs(localPosition.Z) <= basePart.Size.Z / 2 then
+			return owner
+		end
+	end
+	return nil
+end
+
+function BaseService.isForcefieldActive(player: Player): boolean
+	local baseName = playerBases[player]
+	return baseName ~= nil and lockedBases[baseName] == true
+end
+
+-- Resolves the center position where a vertically falling projectile first
+-- touches an active upper hemisphere. The forcefields stay CanQuery=false so
+-- ordinary map raycasts and character movement ignore them; launch combat
+-- performs this authoritative analytic collision instead.
+function BaseService.resolveForcefieldImpact(
+	worldX: number,
+	worldZ: number,
+	projectileHalfHeight: number
+): (Vector3?, Player?)
+	for baseName in lockedBases do
+		local owner = assignments[baseName]
+		local record = bases[baseName]
+		local forcefield = if record ~= nil then record.forcefield else nil
+		if owner == nil or forcefield == nil or forcefield.Parent == nil then
+			continue
+		end
+
+		local radius = math.min(forcefield.Size.X, forcefield.Size.Z) / 2
+		local dx = worldX - forcefield.Position.X
+		local dz = worldZ - forcefield.Position.Z
+		local horizontalDistanceSquared = dx * dx + dz * dz
+		if horizontalDistanceSquared <= radius * radius then
+			local surfaceOffset = math.sqrt(math.max(0, radius * radius - horizontalDistanceSquared))
+			local surfaceY = forcefield.Position.Y + surfaceOffset
+			return Vector3.new(worldX, surfaceY + projectileHalfHeight, worldZ), owner
+		end
+	end
+	return nil, nil
+end
+
+function BaseService.Init()
+	Net.baseLockRequest.listen(function(_data, player)
+		if player == nil then
+			return
+		end
+
+		local baseName = playerBases[player]
+		local currentlyLocked = baseName ~= nil and lockedBases[baseName] == true
+		if not lockInputLimiter:allow(player) then
+			Net.baseLockResult.sendTo(
+				{ ok = false, locked = currentlyLocked, message = "Please wait before activating your forcefield" },
+				player
+			)
+			return
+		end
+		if baseName == nil then
+			Net.baseLockResult.sendTo({ ok = false, locked = false, message = "You do not have a base yet" }, player)
+			return
+		end
+
+		if currentlyLocked then
+			Net.baseLockResult.sendTo(
+				{ ok = false, locked = true, message = "Your forcefield is already active" },
+				player
+			)
+			return
+		end
+
+		local ok, message = activateForcefield(player, baseName)
+		Net.baseLockResult.sendTo({ ok = ok, locked = ok, message = message }, player)
+	end)
+end
+
 function BaseService.Start()
 	local mapLayout = Workspace:WaitForChild("MapLayout", WAIT_TIMEOUT)
 	if mapLayout == nil then
@@ -278,6 +487,11 @@ function BaseService.Start()
 	if basesFolder == nil then
 		log.error("Workspace.MapLayout.Bases did not appear within timeout -- BaseService disabled")
 		return
+	end
+	local forcefieldsFolder = mapLayout:FindFirstChild("BaseForcefields")
+	if forcefieldsFolder == nil or not forcefieldsFolder:IsA("Folder") then
+		log.warn("Workspace.MapLayout.BaseForcefields is missing -- base locking will be unavailable")
+		forcefieldsFolder = nil
 	end
 
 	local discovered: { { index: number, instance: Instance } } = {}
@@ -310,13 +524,27 @@ function BaseService.Start()
 			continue
 		end
 		local nameLabel: BillboardGui = nameLabelInstance
+		-- Unclaimed bases never show placeholder ownership UI. SafePlayerAdded
+		-- enables the billboard again as part of the synchronous claim state.
+		nameLabel.Enabled = false
 
-		local nameTextInstance = nameLabel:FindFirstChild("NameText")
+		local nameTextInstance = nameLabel:FindFirstChild("NameText") or nameLabel:FindFirstChild("BaseOwnerName")
 		if nameTextInstance == nil or not nameTextInstance:IsA("TextLabel") then
-			log.error(`{baseName}.NameLabel.NameText is missing or not a TextLabel -- that base will never be assigned`)
+			log.error(
+				`{baseName}.NameLabel needs a NameText or BaseOwnerName TextLabel -- that base will never be assigned`
+			)
 			continue
 		end
 		local nameText: TextLabel = nameTextInstance
+		local ownerAvatarInstance = nameLabel:FindFirstChild("BaseOwnerAvatar")
+		local ownerAvatar: ImageLabel? = nil
+		if ownerAvatarInstance ~= nil then
+			if ownerAvatarInstance:IsA("ImageLabel") then
+				ownerAvatar = ownerAvatarInstance
+			else
+				log.warn(`{baseName}.NameLabel.BaseOwnerAvatar is not an ImageLabel -- avatar updates disabled`)
+			end
+		end
 
 		-- Owned by whatever system populates it, not this one -- existence
 		-- is only worth a warning, never a reason to drop the base.
@@ -329,10 +557,39 @@ function BaseService.Start()
 			continue
 		end
 
+		local forcefield: BasePart? = nil
+		local activeForcefieldTransparency = DEFAULT_FORCEFIELD_TRANSPARENCY
+		if forcefieldsFolder ~= nil then
+			local forcefieldInstance = forcefieldsFolder:FindFirstChild(baseName .. "Forcefield")
+			if forcefieldInstance ~= nil and forcefieldInstance:IsA("BasePart") then
+				forcefield = forcefieldInstance
+				local configuredTransparency = forcefieldInstance:GetAttribute("ActiveTransparency")
+				if typeof(configuredTransparency) == "number" then
+					activeForcefieldTransparency = math.clamp(configuredTransparency, 0, 1)
+				end
+				forcefieldInstance.Anchored = true
+				forcefieldInstance.CanCollide = false
+				forcefieldInstance.CanTouch = false
+				forcefieldInstance.CanQuery = false
+				forcefieldInstance:SetAttribute("Active", false)
+				forcefieldInstance.Transparency = 1
+				basePart:SetAttribute("ForcefieldActive", false)
+			else
+				log.warn(`BaseForcefields.{baseName}Forcefield is missing or not a BasePart`)
+			end
+		end
+
 		bases[baseName] = {
 			part = basePart,
+			nameLabel = nameLabel,
 			nameText = nameText,
+			ownerAvatar = ownerAvatar,
 			defaultText = nameText.Text,
+			defaultTextVisible = nameText.Visible,
+			defaultAvatarImage = if ownerAvatar ~= nil then ownerAvatar.Image else nil,
+			defaultAvatarVisible = if ownerAvatar ~= nil then ownerAvatar.Visible else nil,
+			forcefield = forcefield,
+			activeForcefieldTransparency = activeForcefieldTransparency,
 		}
 		table.insert(baseOrder, baseName)
 	end
