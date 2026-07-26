@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Binds the Studio-authored PlayerGui.LockBaseUI button to the
+	Binds the Studio-authored PlayerGui.Screens.LockBaseUI button to the
 	server-authoritative timed base forcefield.
 
 	The client sends no base name and no desired state. BaseService resolves the
@@ -46,10 +46,27 @@ function BaseLockController.Start()
 		log.warn("PlayerGui did not appear -- base lock control disabled")
 		return
 	end
-	local screen = playerGui:WaitForChild("LockBaseUI", WAIT_TIMEOUT)
-	if screen == nil or not screen:IsA("ScreenGui") then
-		log.warn("PlayerGui.LockBaseUI is missing or not a ScreenGui -- base lock control disabled")
+	local screens = playerGui:WaitForChild("Screens", WAIT_TIMEOUT)
+	if screens == nil then
+		log.warn("PlayerGui.Screens did not appear -- base lock control disabled")
 		return
+	end
+	-- Root-level fallback keeps an older place copy usable while Studio/Rojo
+	-- catches up with the authored move into Screens.
+	local screen = screens:FindFirstChild("LockBaseUI") or playerGui:FindFirstChild("LockBaseUI")
+	if screen == nil then
+		screen = screens:WaitForChild("LockBaseUI", WAIT_TIMEOUT)
+	end
+	if screen == nil or not screen:IsA("ScreenGui") then
+		log.warn("PlayerGui.Screens.LockBaseUI is missing or not a ScreenGui -- base lock control disabled")
+		return
+	end
+	local targetingInstance = screens:WaitForChild("LaunchTargetingUI", WAIT_TIMEOUT)
+	local targetingScreen = if targetingInstance ~= nil and targetingInstance:IsA("ScreenGui")
+		then targetingInstance
+		else nil
+	if targetingScreen == nil then
+		log.warn("PlayerGui.Screens.LaunchTargetingUI is missing -- launch-view hiding disabled")
 	end
 	local buttonInstance = screen:FindFirstChild("A.Lock", true) or screen:FindFirstChild("Lock", true)
 	if buttonInstance == nil or not buttonInstance:IsA("GuiButton") then
@@ -68,8 +85,9 @@ function BaseLockController.Start()
 		local locked = player:GetAttribute("BaseLocked") == true
 		local activeSeconds = secondsRemaining("BaseLockExpiresAt")
 		local cooldownSeconds = secondsRemaining("BaseLockCooldownEndsAt")
-		screen.Enabled = hasBase
-		button.Interactable = hasBase and not pending and not locked and cooldownSeconds == 0
+		local targeting = targetingScreen ~= nil and targetingScreen.Enabled
+		screen.Enabled = hasBase and not targeting
+		button.Interactable = hasBase and not targeting and not pending and not locked and cooldownSeconds == 0
 		if label ~= nil then
 			if locked then
 				label.Text = `LOCKED {activeSeconds}s`
@@ -111,6 +129,9 @@ function BaseLockController.Start()
 	player:GetAttributeChangedSignal("BaseLocked"):Connect(refresh)
 	player:GetAttributeChangedSignal("BaseLockExpiresAt"):Connect(refresh)
 	player:GetAttributeChangedSignal("BaseLockCooldownEndsAt"):Connect(refresh)
+	if targetingScreen ~= nil then
+		targetingScreen:GetPropertyChangedSignal("Enabled"):Connect(refresh)
+	end
 	refresh()
 
 	task.spawn(function()
