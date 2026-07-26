@@ -22,7 +22,7 @@ export type TierDef = {
 
 local MergeConfig = {}
 
-MergeConfig.MAX_OBJECTS = 25
+MergeConfig.MAX_OBJECTS = 15
 MergeConfig.SPAWN_INTERVAL = 5 -- seconds between auto-spawn attempts, per pad
 MergeConfig.MAX_TIER = 10
 
