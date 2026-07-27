@@ -19,6 +19,7 @@ local Net = require(ReplicatedStorage.Shared.UISystem.Net)
 local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("RebirthService")
 
@@ -54,7 +55,11 @@ local function requestRebirth(player: Player)
 	end
 
 	MergeService.resetIncomeRemainder(player)
-	DataService.set(player, { "Merge", "SpawnLevel" }, 1)
+	DataService.setValues(player, { "Merge" }, {
+		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
+		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
+		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES,
+	})
 	DataService.setValues(player, {}, {
 		Coins = 0,
 		Rebirths = rebirths + 1,

@@ -193,6 +193,24 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.nothing,
 		}),
 
+		-- client -> server. Requests one coin upgrade by its small whitelisted
+		-- logical name. Current level, next value, price, rebirth gate and Coins
+		-- balance are all resolved again by UpgradesService.
+		upgradeRequest = ByteNet.definePacket({
+			value = ByteNet.struct({ upgrade = ByteNet.string }),
+		}),
+
+		-- server -> requesting client. Replicated player data remains the source
+		-- of truth; this reply clears the row's pending state and explains any
+		-- rejected purchase.
+		upgradeResult = ByteNet.definePacket({
+			value = ByteNet.struct({
+				ok = ByteNet.bool,
+				upgrade = ByteNet.string,
+				message = ByteNet.string,
+			}),
+		}),
+
 		-- client -> server. Toggles only the sender's assigned base forcefield.
 		-- No base name or desired state crosses the wire: BaseService resolves
 		-- both from its authoritative assignment/current-state tables.

@@ -56,6 +56,7 @@ local Icon = require(ReplicatedStorage.Packages.TopbarPlus)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("DevConsoleController")
 
@@ -838,7 +839,8 @@ local function updateInfo()
 	setInfo("Coins", snapshotText("Coins"))
 	setInfo("Level / XP", `{snapshotText("Level")} / {snapshotText("Experience")}`)
 	setInfo("Spawn tier", snapshotText("Merge.SpawnLevel"))
-	setInfo("Squishies", `{countArrayEntries("Merge.Squishies")} / {MergeConfig.MAX_OBJECTS}`)
+	local maxSpawns = snapshotNumber("Merge.MaxSpawns") or UpgradeConfig.DEFAULT_MAX_SPAWNS
+	setInfo("Squishies", `{countArrayEntries("Merge.Squishies")} / {maxSpawns}`)
 	setInfo("Spins", snapshotText("UISystem.Spins"))
 	setInfo("Keycap theme", snapshotText("Cosmetics.KeycapThemeId"))
 	setInfo("Squishy beam", snapshotText("Cosmetics.SquishyBeamId"))
@@ -1354,7 +1356,7 @@ local function buildActionsPage(parent: Frame)
 		{
 			text = "Fill pad",
 			onClick = function()
-				onSpawnSquishiesClicked(MergeConfig.MAX_OBJECTS)
+				onSpawnSquishiesClicked(snapshotNumber("Merge.MaxSpawns") or UpgradeConfig.DEFAULT_MAX_SPAWNS)
 			end,
 		},
 		{ text = "Clear all", color = DANGER_COLOR, onClick = onClearSquishiesClicked },

@@ -50,10 +50,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
+local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.Net)
 local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("BaseService")
 
@@ -66,8 +68,9 @@ local WAIT_TIMEOUT = 10
 -- PivotTo drops them onto the base instead of inside it.
 local SPAWN_HEIGHT_OFFSET = 5
 local DEFAULT_FORCEFIELD_TRANSPARENCY = 0.58
-local FORCEFIELD_DURATION_SECONDS = 20
-local FORCEFIELD_COOLDOWN_SECONDS = 120
+-- Recharge used to be a fixed two minutes. The upgrade launch lowers the
+-- baseline to one minute; LockBase itself increases the active duration.
+local FORCEFIELD_COOLDOWN_SECONDS = 60
 local lockInputLimiter = RateLimiter.new(2, 3)
 
 type BaseRecord = {
@@ -141,6 +144,11 @@ local function invalidateForcefieldCycle(player: Player, baseName: string)
 end
 
 local function activateForcefield(player: Player, baseName: string): (boolean, string)
+	local data = DataService.getData(player)
+	if data == nil then
+		return false, "Your data is still loading"
+	end
+
 	local now = Workspace:GetServerTimeNow()
 	local cooldownEndsAt = lockCooldownEnds[baseName] or 0
 	if cooldownEndsAt > now then
@@ -153,15 +161,16 @@ local function activateForcefield(player: Player, baseName: string): (boolean, s
 		return false, message
 	end
 
+	local durationSeconds = UpgradeConfig.lockDurationSeconds(data.Merge.LockBase)
 	local generation = (lockGenerations[baseName] or 0) + 1
-	local expiresAt = now + FORCEFIELD_DURATION_SECONDS
+	local expiresAt = now + durationSeconds
 	cooldownEndsAt = expiresAt + FORCEFIELD_COOLDOWN_SECONDS
 	lockGenerations[baseName] = generation
 	lockCooldownEnds[baseName] = cooldownEndsAt
 	player:SetAttribute("BaseLockExpiresAt", expiresAt)
 	player:SetAttribute("BaseLockCooldownEndsAt", cooldownEndsAt)
 
-	task.delay(FORCEFIELD_DURATION_SECONDS, function()
+	task.delay(durationSeconds, function()
 		if
 			lockGenerations[baseName] ~= generation
 			or assignments[baseName] ~= player
@@ -174,7 +183,7 @@ local function activateForcefield(player: Player, baseName: string): (boolean, s
 		player:SetAttribute("BaseLockExpiresAt", nil)
 	end)
 
-	task.delay(FORCEFIELD_DURATION_SECONDS + FORCEFIELD_COOLDOWN_SECONDS, function()
+	task.delay(durationSeconds + FORCEFIELD_COOLDOWN_SECONDS, function()
 		if
 			lockGenerations[baseName] ~= generation
 			or assignments[baseName] ~= player
@@ -187,7 +196,8 @@ local function activateForcefield(player: Player, baseName: string): (boolean, s
 		player:SetAttribute("BaseLockCooldownEndsAt", nil)
 	end)
 
-	return true, `Forcefield active for {FORCEFIELD_DURATION_SECONDS} seconds`
+	local minutes = durationSeconds / 60
+	return true, if minutes == 1 then "Forcefield active for 1 minute" else `Forcefield active for {minutes} minutes`
 end
 
 local function updateQueuePositions()

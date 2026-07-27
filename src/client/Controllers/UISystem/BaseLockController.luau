@@ -90,7 +90,7 @@ function BaseLockController.Start()
 		button.Interactable = hasBase and not targeting and not pending and not locked and cooldownSeconds == 0
 		if label ~= nil then
 			if locked then
-				label.Text = `LOCKED {activeSeconds}s`
+				label.Text = `LOCKED {formatCooldown(activeSeconds)}`
 			elseif cooldownSeconds > 0 then
 				label.Text = `COOLDOWN {formatCooldown(cooldownSeconds)}`
 			else

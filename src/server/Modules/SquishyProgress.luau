@@ -15,6 +15,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local EconomyConfig = require(script.Parent.EconomyConfig)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local SquishyProgress = {}
 
@@ -52,7 +53,9 @@ function SquishyProgress.applySessionStart(data: any, now: number): (number, num
 		-- shape before Replica can see it.
 		merge = {
 			Squishies = {},
-			SpawnLevel = 1,
+			SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
+			MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
+			LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES,
 			LastActiveAt = 0,
 			OfflineEarnings = { Amount = 0, Seconds = 0, AwardedAt = 0 },
 		}

@@ -27,6 +27,7 @@ local Progression = require(ReplicatedStorage.Shared.Progression)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local Replica = require(ServerStorage.ReplicaServer)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("DataService")
 
@@ -81,7 +82,12 @@ local TEMPLATE = {
 	]]
 	Merge = {
 		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number } },
-		SpawnLevel = 1,
+		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
+		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling;
+		-- MaxSpawns is the per-player capacity within it. LockBase is stored in
+		-- whole minutes so its UI value and persisted value are identical.
+		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
+		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES,
 		-- Trusted server time used to calculate the next offline-income grant.
 		LastActiveAt = 0,
 		-- The latest grant receipt is persisted/replicated so the joining
@@ -463,7 +469,9 @@ local function repairProfileData(data: any)
 	data.Coins = finiteInteger(data.Coins, 0, EconomyConfig.MAX_COINS, 0)
 	data.Rebirths = RebirthConfig.sanitizeRebirths(data.Rebirths)
 	data.Level, data.Experience = Progression.resolve(data.Level, data.Experience, 0)
-	data.Merge.SpawnLevel = finiteInteger(data.Merge.SpawnLevel, 1, MergeConfig.MAX_TIER, 1)
+	data.Merge.SpawnLevel = UpgradeConfig.sanitizeValue("SpawnTier", data.Merge.SpawnLevel)
+	data.Merge.MaxSpawns = UpgradeConfig.sanitizeValue("MaxSpawns", data.Merge.MaxSpawns)
+	data.Merge.LockBase = UpgradeConfig.sanitizeValue("LockBase", data.Merge.LockBase)
 	data.Merge.LastActiveAt = finiteInteger(data.Merge.LastActiveAt, 0, 2 ^ 53 - 1, 0)
 	data.Merge.OfflineEarnings.Amount = finiteInteger(data.Merge.OfflineEarnings.Amount, 0, EconomyConfig.MAX_GRANT, 0)
 	data.Merge.OfflineEarnings.Seconds =

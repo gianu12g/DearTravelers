@@ -37,8 +37,10 @@
 	remembered numeric index -- table.remove shifts every later index, but a
 	table reference does not move.
 
-	CAPACITY: auto-spawn simply stops writing once a pad holds MAX_OBJECTS.
-	No error, no queue -- the pad just waits until Phase 2 frees a slot.
+	CAPACITY: auto-spawn simply stops writing once a pad reaches that player's
+	persisted MaxSpawns upgrade. MergeConfig.MAX_OBJECTS remains the absolute
+	safety ceiling for profile repair/restoration. No error, no queue -- the pad
+	just waits until Phase 2 frees a slot.
 
 	PHASE 2 -- CARRY/MERGE/DROP:
 
@@ -154,6 +156,7 @@ local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("MergeService")
 
@@ -1312,7 +1315,8 @@ local function trySpawnObject(player: Player, live: LiveBase)
 		return
 	end
 
-	if #data.Merge.Squishies >= MergeConfig.MAX_OBJECTS then
+	local maxSpawns = UpgradeConfig.readValue(data, "MaxSpawns")
+	if #data.Merge.Squishies >= maxSpawns then
 		return -- pad full; auto-spawn just waits
 	end
 

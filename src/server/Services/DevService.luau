@@ -38,6 +38,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeService = require(script.Parent.MergeService)
 local Net = require(ReplicatedStorage.Shared.Net)
+local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("DevService")
 
@@ -493,8 +494,10 @@ local function onSpawnSquishies(data: { targetPlayer: Instance?, count: number }
 	end
 
 	log.info(`{player.Name} spawned {spawned} squishies on {target.Name}'s pad (asked for {count})`)
+	local targetData = DataService.getData(target)
+	local maxSpawns = UpgradeConfig.readValue(targetData, "MaxSpawns")
 	local message = if spawned == 0
-		then `Pad is full or too crowded -- nothing placed (cap {MergeConfig.MAX_OBJECTS})`
+		then `Pad is full or too crowded -- nothing placed (cap {maxSpawns})`
 		elseif spawned < count then `Spawned {spawned} of {count} -- pad ran out of room`
 		else `Spawned {spawned} squishies`
 	Net.devResult.sendTo({ ok = spawned > 0, message = message }, player)
