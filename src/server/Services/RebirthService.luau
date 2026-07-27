@@ -58,7 +58,7 @@ local function requestRebirth(player: Player)
 	DataService.setValues(player, { "Merge" }, {
 		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
 		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
-		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES,
+		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,
 	})
 	DataService.setValues(player, {}, {
 		Coins = 0,

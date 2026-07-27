@@ -2381,7 +2381,7 @@ local function launchCarried(player: Player, worldX: number, worldZ: number): (b
 		else
 			message = `{player.DisplayName} launched a Squishy at {targetOwner.DisplayName}'s base!`
 		end
-		UINotificationService.SendAnnouncement(recipient, message)
+		UINotificationService.SendNotification(recipient, "Info", message)
 	end
 
 	task.spawn(function()

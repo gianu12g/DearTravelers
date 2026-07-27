@@ -84,10 +84,10 @@ local TEMPLATE = {
 		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number } },
 		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
 		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling;
-		-- MaxSpawns is the per-player capacity within it. LockBase is stored in
-		-- whole minutes so its UI value and persisted value are identical.
+		-- MaxSpawns is the per-player capacity within it. LockBase stores its
+		-- upgrade level; each purchased level shortens the post-lock cooldown.
 		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
-		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES,
+		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,
 		-- Trusted server time used to calculate the next offline-income grant.
 		LastActiveAt = 0,
 		-- The latest grant receipt is persisted/replicated so the joining

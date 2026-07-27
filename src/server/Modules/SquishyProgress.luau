@@ -55,7 +55,7 @@ function SquishyProgress.applySessionStart(data: any, now: number): (number, num
 			Squishies = {},
 			SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
 			MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
-			LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES,
+			LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,
 			LastActiveAt = 0,
 			OfflineEarnings = { Amount = 0, Seconds = 0, AwardedAt = 0 },
 		}

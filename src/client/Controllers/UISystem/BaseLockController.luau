@@ -26,12 +26,23 @@ local player = Players.LocalPlayer
 
 local BaseLockController = {}
 
-local function secondsRemaining(attributeName: string): number
-	local endTime = player:GetAttribute(attributeName)
+local function secondsRemaining(instance: Instance?, attributeName: string): number
+	local endTime = if instance ~= nil then instance:GetAttribute(attributeName) else nil
 	if typeof(endTime) ~= "number" then
 		return 0
 	end
 	return math.max(0, math.ceil(endTime - Workspace:GetServerTimeNow()))
+end
+
+local function assignedBasePart(): BasePart?
+	local baseName = player:GetAttribute("AssignedBase")
+	if typeof(baseName) ~= "string" then
+		return nil
+	end
+	local mapLayout = Workspace:FindFirstChild("MapLayout")
+	local bases = if mapLayout ~= nil then mapLayout:FindFirstChild("Bases") else nil
+	local base = if bases ~= nil then bases:FindFirstChild(baseName) else nil
+	return if base ~= nil and base:IsA("BasePart") then base else nil
 end
 
 local function formatCooldown(seconds: number): string
@@ -81,10 +92,11 @@ function BaseLockController.Start()
 	local requestGeneration = 0
 
 	local function refresh()
-		local hasBase = typeof(player:GetAttribute("AssignedBase")) == "string"
-		local locked = player:GetAttribute("BaseLocked") == true
-		local activeSeconds = secondsRemaining("BaseLockExpiresAt")
-		local cooldownSeconds = secondsRemaining("BaseLockCooldownEndsAt")
+		local base = assignedBasePart()
+		local hasBase = base ~= nil
+		local locked = base ~= nil and base:GetAttribute("ForcefieldActive") == true
+		local activeSeconds = secondsRemaining(base, "ForcefieldExpiresAt")
+		local cooldownSeconds = secondsRemaining(base, "ForcefieldCooldownEndsAt")
 		local targeting = targetingScreen ~= nil and targetingScreen.Enabled
 		screen.Enabled = hasBase and not targeting
 		button.Interactable = hasBase and not targeting and not pending and not locked and cooldownSeconds == 0
@@ -126,9 +138,6 @@ function BaseLockController.Start()
 	end)
 
 	player:GetAttributeChangedSignal("AssignedBase"):Connect(refresh)
-	player:GetAttributeChangedSignal("BaseLocked"):Connect(refresh)
-	player:GetAttributeChangedSignal("BaseLockExpiresAt"):Connect(refresh)
-	player:GetAttributeChangedSignal("BaseLockCooldownEndsAt"):Connect(refresh)
 	if targetingScreen ~= nil then
 		targetingScreen:GetPropertyChangedSignal("Enabled"):Connect(refresh)
 	end

@@ -93,14 +93,6 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.struct({ kind = ByteNet.string, message = ByteNet.string }),
 		}),
 
-		-- server -> client. Full-width gameplay announcement displayed through
-		-- the Studio-authored PlayerGui.NotificationUI banner. This stays
-		-- separate from `notify`: announcements serialize in a visible queue,
-		-- while generic success/error toasts may stack and deduplicate.
-		announcement = ByteNet.definePacket({
-			value = ByteNet.struct({ message = ByteNet.string }),
-		}),
-
 		-- server -> client. Fire the confetti burst effect.
 		confettiEmit = ByteNet.definePacket({
 			value = ByteNet.nothing,

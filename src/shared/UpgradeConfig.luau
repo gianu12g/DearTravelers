@@ -26,8 +26,11 @@ UpgradeConfig.ORDER = { "SpawnTier", "MaxSpawns", "LockBase" } :: { UpgradeKey }
 UpgradeConfig.DEFAULT_SPAWN_LEVEL = 1
 UpgradeConfig.DEFAULT_MAX_SPAWNS = 6
 UpgradeConfig.MAX_MAX_SPAWNS = MergeConfig.MAX_OBJECTS
-UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES = 1
-UpgradeConfig.MAX_LOCK_BASE_MINUTES = 5
+UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL = 1
+UpgradeConfig.MAX_LOCK_BASE_LEVEL = 5
+UpgradeConfig.LOCK_DURATION_SECONDS = 20
+UpgradeConfig.DEFAULT_LOCK_COOLDOWN_SECONDS = 60
+UpgradeConfig.LOCK_COOLDOWN_REDUCTION_PER_LEVEL = 2
 
 -- Each upgrade buys a different kind of power, so one shared curve makes the
 -- cheap rows trivial long before the stronger rows feel earned.
@@ -35,7 +38,8 @@ UpgradeConfig.MAX_LOCK_BASE_MINUTES = 5
 -- SpawnTier stays the gentlest because rebirth resets it and higher spawn
 -- tiers are what let a run get moving. MaxSpawns compounds production and is
 -- deliberately the steepest economic purchase. LockBase grants no income,
--- but its long protection windows should still require meaningful progress.
+-- but reducing how often a base is vulnerable should still require meaningful
+-- progress.
 UpgradeConfig.COST_CURVES = {
 	SpawnTier = {
 		BaseCost = 50_000,
@@ -77,7 +81,7 @@ function UpgradeConfig.minimumValue(key: UpgradeKey): number
 	elseif key == "MaxSpawns" then
 		return UpgradeConfig.DEFAULT_MAX_SPAWNS
 	else
-		return UpgradeConfig.DEFAULT_LOCK_BASE_MINUTES
+		return UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL
 	end
 end
 
@@ -87,7 +91,7 @@ function UpgradeConfig.maximumValue(key: UpgradeKey): number
 	elseif key == "MaxSpawns" then
 		return UpgradeConfig.MAX_MAX_SPAWNS
 	else
-		return UpgradeConfig.MAX_LOCK_BASE_MINUTES
+		return UpgradeConfig.MAX_LOCK_BASE_LEVEL
 	end
 end
 
@@ -148,8 +152,13 @@ function UpgradeConfig.nextValue(key: UpgradeKey, value: any): number?
 	return safeValue + 1
 end
 
-function UpgradeConfig.lockDurationSeconds(lockBaseMinutes: any): number
-	return UpgradeConfig.sanitizeValue("LockBase", lockBaseMinutes) * 60
+function UpgradeConfig.lockCooldownSeconds(lockBaseLevel: any): number
+	local level = UpgradeConfig.sanitizeValue("LockBase", lockBaseLevel)
+	local purchasedLevels = level - UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL
+	return math.max(
+		0,
+		UpgradeConfig.DEFAULT_LOCK_COOLDOWN_SECONDS - purchasedLevels * UpgradeConfig.LOCK_COOLDOWN_REDUCTION_PER_LEVEL
+	)
 end
 
 return UpgradeConfig

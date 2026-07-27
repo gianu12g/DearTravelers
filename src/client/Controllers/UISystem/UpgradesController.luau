@@ -50,7 +50,7 @@ local function displayValue(key: UpgradeConfig.UpgradeKey, value: number): strin
 	elseif key == "MaxSpawns" then
 		return tostring(value)
 	else
-		return `{value}m`
+		return `{UpgradeConfig.lockCooldownSeconds(value)}s cooldown`
 	end
 end
 
