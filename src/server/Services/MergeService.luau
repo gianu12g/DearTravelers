@@ -150,6 +150,7 @@ local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
 local Net = require(ReplicatedStorage.Shared.Net)
 local RateLimiter = require(ServerStorage.Modules.RateLimiter)
+local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
@@ -306,6 +307,16 @@ local characterRemovingConnections: { [Player]: RBXScriptConnection } = {}
 -- the existing Heartbeat connection instead of a loop per player.
 local incomeAccumulator = 0
 local activityCheckpointAccumulator = 0
+-- Coins are integer-owned, while 25% rebirth bonuses can produce quarters.
+-- Carry each player's fractional remainder across online pulses so a $1
+-- model at 1.25x pays $5 over four seconds instead of being floored back to
+-- $1 forever. The remainder is always < 1 coin and intentionally session-only.
+local incomeRemainders: { [Player]: number } = {}
+-- The same carried object can overlap a target for many Heartbeats. Remember
+-- the exact CarryState already notified so one continuous push produces one
+-- toast; dropping and picking up again creates a new CarryState and therefore
+-- a new, legitimate attempt.
+local maxLevelNotifiedCarry: { [Player]: CarryState } = {}
 
 local MUSH_BOOST_AMOUNT = 5
 local MUSH_BOOST_DURATION = 5
@@ -934,9 +945,9 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	billboard.LightInfluence = 0
 	billboard.Parent = part
 
-	-- The permanent label is a clean progression value (1, 2, 4, 8...) rather
-	-- than currency. incomeForTier remains the single source of truth for that
-	-- doubling curve and for the separate floating "+$X" income popups.
+	-- The permanent label is the player-facing tier number
+	-- (2 ^ (model level - 1)), not income. Floating "+$X" popups separately
+	-- display the rebirth-adjusted money earned by this model.
 	local incomeText = Instance.new("TextLabel")
 	incomeText.Name = "IncomeText"
 	incomeText.AnchorPoint = Vector2.new(0.5, 1)
@@ -948,7 +959,7 @@ local function materializeObject(spawnArea: BasePart, entry: MergeObjectEntry): 
 	incomeText.TextColor3 = Color3.fromRGB(255, 248, 231)
 	incomeText.TextStrokeColor3 = Color3.fromRGB(58, 38, 31)
 	incomeText.TextStrokeTransparency = 0.15
-	incomeText.Text = Format.FormatNumber(MergeConfig.incomeForTier(entry.Tier))
+	incomeText.Text = Format.FormatNumber(RebirthConfig.tierNumberForModelLevel(entry.Tier))
 	incomeText.Parent = billboard
 
 	createHealthBar(part, billboard, entry.Tier, entry.Health)
@@ -1305,7 +1316,7 @@ local function trySpawnObject(player: Player, live: LiveBase)
 		return -- pad full; auto-spawn just waits
 	end
 
-	local tier = sanitizeTier(data.Merge.SpawnLevel)
+	local tier = math.min(sanitizeTier(data.Merge.SpawnLevel), RebirthConfig.maxModelLevel(data.Rebirths))
 	local tierDef = MergeConfig.Tiers[tier]
 
 	local x, z = findOpenSpot(live.spawnArea, tierDef, live.parts)
@@ -1554,9 +1565,10 @@ end
 ]]
 local function tryMergeCarry(player: Player, carry: CarryState)
 	local entry = carry.entry
-	if entry.Tier >= MergeConfig.MAX_TIER then
-		return -- tier+1 wouldn't exist -- two max-tier objects never merge (spec)
-	end
+	local data = DataService.getData(player)
+	local rebirths = if data ~= nil then RebirthConfig.sanitizeRebirths(data.Rebirths) else 0
+	local maxModelLevel = RebirthConfig.maxModelLevel(rebirths)
+	local mergeLocked = entry.Tier >= maxModelLevel
 
 	local halfSize = tierDefFor(entry.Tier).Size / 2
 	local threshold = halfSize + halfSize + MergeConfig.MERGE_EPSILON -- same tier -> same size
@@ -1593,6 +1605,17 @@ local function tryMergeCarry(player: Player, carry: CarryState)
 	-- (the merge result), and mutating a table while a `for...in` is still
 	-- traversing it is undefined behaviour in Luau.
 	if target ~= nil and targetEntry ~= nil then
+		if mergeLocked then
+			if maxLevelNotifiedCarry[player] ~= carry then
+				maxLevelNotifiedCarry[player] = carry
+				local message = if rebirths >= RebirthConfig.MAX_REBIRTHS
+					then RebirthConfig.MAX_TIER_MESSAGE
+					else RebirthConfig.REQUIRES_REBIRTH_MESSAGE
+				UINotificationService.SendNotification(player, "Error", message)
+			end
+			return
+		end
+
 		commitMerge(player, carry, target, targetEntry)
 	end
 end
@@ -1633,7 +1656,10 @@ local function runIncomeTick()
 			continue -- not expected once a pad is live, but never error over it
 		end
 
-		local total = SquishyProgress.incomePerPulse(data.Merge.Squishies)
+		local exactTotal = SquishyProgress.incomePerPulse(data.Merge.Squishies, data.Rebirths)
+			+ (incomeRemainders[player] or 0)
+		local total = math.floor(exactTotal)
+		incomeRemainders[player] = exactTotal - total
 
 		if total > 0 and CoinsService.add(player, total) then
 			Net.mergeIncomePulse.sendTo(nil, player)
@@ -2470,6 +2496,8 @@ local function onPlayerRemoving(player: Player)
 	deactivateBase(player)
 	clearMushBoost(player)
 	activationTokens[player] = nil
+	incomeRemainders[player] = nil
+	maxLevelNotifiedCarry[player] = nil
 end
 
 --[[
@@ -2735,6 +2763,13 @@ function MergeService.clearSquishies(player: Player): (number?, number)
 	return applySquishyDamage(player, function(_entry: MergeObjectEntry): number
 		return math.huge
 	end, nil)
+end
+
+-- Rebirth resets the player's whole cash-producing state. This fractional
+-- carry is not persisted currency, but retaining it after Coins and every
+-- squishy are wiped would leak a pre-rebirth fraction into the new run.
+function MergeService.resetIncomeRemainder(player: Player)
+	incomeRemainders[player] = nil
 end
 
 --[[

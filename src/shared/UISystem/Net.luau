@@ -160,6 +160,13 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.struct({ ok = ByteNet.bool, message = ByteNet.string }),
 		}),
 
+		-- client -> server. Requests one rebirth. No tier, rebirth count, or
+		-- reset payload crosses the wire: RebirthService derives and validates
+		-- all of it from the sender's authoritative profile.
+		rebirthRequest = ByteNet.definePacket({
+			value = ByteNet.nothing,
+		}),
+
 		-- client -> server. Update a settings volume slider. value is
 		-- ALWAYS a number (Music/SFX/keyboard volume) -- unlike the source's
 		-- Packet.Any, the wire type itself rules out any other payload

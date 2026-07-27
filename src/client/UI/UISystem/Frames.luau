@@ -39,6 +39,7 @@ export type FrameName =
 	| "Settings"
 	| "FriendInvite"
 	| "Cosmetics"
+	| "Rebirth"
 
 -- Logical name -> the actual Studio-authored child name under Main.Frames.
 local STUDIO_NAMES: { [FrameName]: string } = {
@@ -53,6 +54,7 @@ local STUDIO_NAMES: { [FrameName]: string } = {
 	Settings = "Settings",
 	FriendInvite = "Friends",
 	Cosmetics = "Cosmetics",
+	Rebirth = "Rebirth",
 }
 
 local cache: { [FrameName]: Frame } = {}

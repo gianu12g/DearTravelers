@@ -24,6 +24,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local ProfileStore = require(ServerStorage.ServerPackages.ProfileStore)
 local Progression = require(ReplicatedStorage.Shared.Progression)
+local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local Replica = require(ServerStorage.ReplicaServer)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
 
@@ -53,6 +54,7 @@ local MAX_OWNED_COSMETICS = 512
 local TEMPLATE = {
 	Version = DATA_VERSION,
 	Coins = 0,
+	Rebirths = 0,
 	Level = 1,
 	Experience = 0,
 	-- Nested tables are fine -- this is the whole reason Replica exists.
@@ -459,6 +461,7 @@ local function repairProfileData(data: any)
 	end
 
 	data.Coins = finiteInteger(data.Coins, 0, EconomyConfig.MAX_COINS, 0)
+	data.Rebirths = RebirthConfig.sanitizeRebirths(data.Rebirths)
 	data.Level, data.Experience = Progression.resolve(data.Level, data.Experience, 0)
 	data.Merge.SpawnLevel = finiteInteger(data.Merge.SpawnLevel, 1, MergeConfig.MAX_TIER, 1)
 	data.Merge.LastActiveAt = finiteInteger(data.Merge.LastActiveAt, 0, 2 ^ 53 - 1, 0)
@@ -522,7 +525,10 @@ local function repairProfileData(data: any)
 		then
 			continue
 		end
-		local safeTier = math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER)
+		-- entry.Tier is the historical persisted name for MODEL LEVEL.
+		-- A profile can never retain a model above its rebirth unlock cap.
+		local safeTier =
+			math.clamp(math.floor(tier), 1, math.min(MergeConfig.MAX_TIER, RebirthConfig.maxModelLevel(data.Rebirths)))
 		local maxHealth = MergeConfig.healthForTier(safeTier)
 		local safeHealth = finiteNumber(health, 0, maxHealth, maxHealth)
 		-- A zero-health squishy was already dead when its prior server closed.

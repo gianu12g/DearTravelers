@@ -13,6 +13,10 @@
 	Loader ignores it (ARCHITECTURE.md Recipe 3). Require it directly.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
+
 export type TierDef = {
 	Name: string,
 	Color: Color3,
@@ -24,11 +28,12 @@ local MergeConfig = {}
 
 MergeConfig.MAX_OBJECTS = 15
 MergeConfig.SPAWN_INTERVAL = 5 -- seconds between auto-spawn attempts, per pad
-MergeConfig.MAX_TIER = 10
+-- Historical name: this is the maximum MODEL LEVEL stored in entry.Tier.
+MergeConfig.MAX_TIER = RebirthConfig.MAX_MODEL_LEVEL
 
 -- Placement (free placement, no grid -- see the Phase 1 spec).
--- Kept clear of the pad's edge so a tier-10 cube (9 studs) never visually
--- overhangs the SpawnArea part.
+-- Kept clear of the pad's edge so even the level-30 placeholder (13 studs)
+-- remains comfortably inside the SpawnArea part.
 MergeConfig.PAD_MARGIN = 2
 -- Minimum gap between two objects' SURFACES, not their centers -- summed
 -- with both objects' half-sizes at the call site to get a center-to-center
@@ -85,8 +90,8 @@ MergeConfig.MERGE_VFX_TEMPLATE_NAME = "MergeSquishyVFX"
 -- LAUNCH_VFX_SCALE; 1 renders it exactly as authored.
 MergeConfig.MERGE_VFX_SCALE = 1
 
--- Phase 3: passive income. Every owned object earns BASE_INCOME * 2^(tier-1)
--- per pulse -- $1 at tier 1, doubling each tier up to $512 at MAX_TIER (10).
+-- Phase 3: passive income. Every owned object earns BASE_INCOME * 2^(level-1)
+-- per pulse -- $1 at model level 1, doubling through model level 30.
 -- The doubling is deliberate (spec): a merge visibly doubles that object's
 -- earning rate, which is the whole point of merging rather than just hoarding.
 MergeConfig.INCOME_INTERVAL = 1 -- seconds between income pulses
@@ -158,13 +163,10 @@ MergeConfig.LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER = 1
 -- the Explosion above follows when the squishy rebounds.
 MergeConfig.LAUNCH_GROUND_HIT_TEMPLATE_NAME = "GroundHit"
 
---[[
-	10 tiers, gray -> near-white. Size grows per tier; tier 10 stays at 9
-	studs so it never exceeds the pad inset (35 - PAD_MARGIN on a 70-stud
-	SpawnArea). Adding tier 11 later is one entry -- nothing else in this
-	module or MergeService indexes tiers by a hardcoded count other than
-	MAX_TIER above.
-]]
+-- Model-level definitions. Levels 1-10 preserve the authored progression.
+-- Levels 11-30 continue the placeholder style used by levels 8-10: one
+-- SmoothPlastic body with a distinct color and a restrained 0.2-stud growth
+-- per level, topping out at 13 studs.
 MergeConfig.Tiers = {
 	{ Name = "Pebble", Color = Color3.fromRGB(150, 150, 150), Size = 2.0 },
 	{ Name = "Bark Chunk", Color = Color3.fromRGB(139, 90, 43), Size = 2.8 },
@@ -176,6 +178,26 @@ MergeConfig.Tiers = {
 	{ Name = "Golden Relic", Color = Color3.fromRGB(255, 193, 7), Size = 7.4 },
 	{ Name = "Aurora Crystal", Color = Color3.fromRGB(0, 229, 255), Size = 8.2 },
 	{ Name = "Radiant Prism", Color = Color3.fromRGB(245, 245, 255), Size = 9.0 },
+	{ Name = "Tier 11", Color = Color3.fromRGB(255, 92, 92), Size = 9.2 },
+	{ Name = "Tier 12", Color = Color3.fromRGB(255, 139, 76), Size = 9.4 },
+	{ Name = "Tier 13", Color = Color3.fromRGB(255, 200, 74), Size = 9.6 },
+	{ Name = "Tier 14", Color = Color3.fromRGB(221, 255, 79), Size = 9.8 },
+	{ Name = "Tier 15", Color = Color3.fromRGB(138, 255, 92), Size = 10.0 },
+	{ Name = "Tier 16", Color = Color3.fromRGB(70, 255, 144), Size = 10.2 },
+	{ Name = "Tier 17", Color = Color3.fromRGB(71, 255, 225), Size = 10.4 },
+	{ Name = "Tier 18", Color = Color3.fromRGB(71, 203, 255), Size = 10.6 },
+	{ Name = "Tier 19", Color = Color3.fromRGB(76, 128, 255), Size = 10.8 },
+	{ Name = "Tier 20", Color = Color3.fromRGB(112, 82, 255), Size = 11.0 },
+	{ Name = "Tier 21", Color = Color3.fromRGB(180, 80, 255), Size = 11.2 },
+	{ Name = "Tier 22", Color = Color3.fromRGB(238, 82, 255), Size = 11.4 },
+	{ Name = "Tier 23", Color = Color3.fromRGB(255, 76, 180), Size = 11.6 },
+	{ Name = "Tier 24", Color = Color3.fromRGB(255, 108, 145), Size = 11.8 },
+	{ Name = "Tier 25", Color = Color3.fromRGB(255, 151, 105), Size = 12.0 },
+	{ Name = "Tier 26", Color = Color3.fromRGB(255, 216, 92), Size = 12.2 },
+	{ Name = "Tier 27", Color = Color3.fromRGB(177, 255, 102), Size = 12.4 },
+	{ Name = "Tier 28", Color = Color3.fromRGB(83, 255, 181), Size = 12.6 },
+	{ Name = "Tier 29", Color = Color3.fromRGB(86, 224, 255), Size = 12.8 },
+	{ Name = "Tier 30", Color = Color3.fromRGB(185, 148, 255), Size = 13.0 },
 } :: { TierDef }
 
 --[[
@@ -200,9 +222,9 @@ function MergeConfig.incomeForTier(tier: number): number
 	return MergeConfig.BASE_INCOME * (2 ^ (safeTier - 1))
 end
 
--- Health deliberately mirrors the earning multiplier: a tier-1 squishy has
--- 1 max health, tier 2 has 2, and so on through 512 at tier 10. Route this
--- through incomeForTier so the two progression curves cannot drift apart.
+-- Health deliberately mirrors the earning multiplier: a model-level-1
+-- squishy has 1 max health, level 2 has 2, and so on through the configured
+-- level 30. Route this through incomeForTier so the curves cannot drift.
 function MergeConfig.healthForTier(tier: number): number
 	return MergeConfig.incomeForTier(tier)
 end

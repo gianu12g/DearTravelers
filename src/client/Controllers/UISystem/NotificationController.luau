@@ -57,6 +57,7 @@ type ActiveNotification = {
 
 local activeNotifications: { [string]: ActiveNotification } = {}
 local layoutOrder = 0
+local NOTIFICATION_Z_INDEX = 100
 
 local template: Frame? = nil
 local notificationsUi: Instance? = nil
@@ -106,10 +107,30 @@ local function resolveTemplate(): Frame
 	local ui = hud:WaitForChild("Notifications")
 	local templateInstance = ui:WaitForChild("Template") :: Frame
 	templateInstance.Parent = nil
+	if ui:IsA("GuiObject") then
+		ui.ZIndex = NOTIFICATION_Z_INDEX
+		ui.Position = UDim2.new(
+			ui.Position.X.Scale,
+			ui.Position.X.Offset,
+			math.max(ui.Position.Y.Scale, 0.14),
+			ui.Position.Y.Offset
+		)
+	end
 
 	notificationsUi = ui
 	template = templateInstance
 	return templateInstance
+end
+
+local function raiseNotificationZIndex(notification: GuiObject)
+	local originalRootZIndex = notification.ZIndex
+	notification.ZIndex = NOTIFICATION_Z_INDEX
+
+	for _, descendant in notification:GetDescendants() do
+		if descendant:IsA("GuiObject") then
+			descendant.ZIndex = NOTIFICATION_Z_INDEX + math.max(0, descendant.ZIndex - originalRootZIndex)
+		end
+	end
 end
 
 local function playSound(kind: NotificationKind)
@@ -184,6 +205,8 @@ function NotificationController.Notify(kind: string, message: string)
 			stroke.Color = typeData.Stroke
 		end
 		clone.Size = UDim2.fromScale(0, 0)
+		clone.Visible = true
+		raiseNotificationZIndex(clone)
 
 		layoutOrder -= 1
 		clone.LayoutOrder = layoutOrder

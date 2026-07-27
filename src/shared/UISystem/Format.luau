@@ -103,6 +103,21 @@ function Format.FormatNumber(value: number): string
 	return string.format("%.2f%s", truncated, suffix)
 end
 
+-- Same compact notation as FormatNumber, but preserves quarter-unit model
+-- income below 1K (for example, a 1.25x rebirth multiplier turns $1 into
+-- $1.25). Trailing zeroes are removed so whole values still read as "$2",
+-- not "$2.00".
+function Format.FormatIncome(value: number): string
+	if value >= 1000 then
+		return Format.FormatNumber(value)
+	end
+
+	local formatted = string.format("%.2f", math.max(0, value))
+	formatted = string.gsub(formatted, "0+$", "")
+	formatted = string.gsub(formatted, "%.$", "")
+	return formatted
+end
+
 --[[
 	Retries `callback` up to `retries` times, waiting 0.5s between attempts.
 	Returns (true, result) on the first success, or (false, lastResult) if

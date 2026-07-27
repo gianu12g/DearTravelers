@@ -14,6 +14,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local EconomyConfig = require(script.Parent.EconomyConfig)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
+local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 
 local SquishyProgress = {}
 
@@ -24,7 +25,7 @@ end
 -- The authoritative income pulse for a saved squishy collection. The count is
 -- bounded exactly like materialization on the pad, so malformed oversized
 -- profile data can never earn money for impossible extra squishies.
-function SquishyProgress.incomePerPulse(squishies: any): number
+function SquishyProgress.incomePerPulse(squishies: any, rebirths: any?): number
 	if type(squishies) ~= "table" then
 		return 0
 	end
@@ -37,7 +38,7 @@ function SquishyProgress.incomePerPulse(squishies: any): number
 			total += MergeConfig.incomeForTier(squishy.Tier)
 		end
 	end
-	return total
+	return total * RebirthConfig.incomeMultiplier(rebirths)
 end
 
 -- Applies one capped offline grant and returns (actualCoinsGranted,
@@ -68,8 +69,11 @@ function SquishyProgress.applySessionStart(data: any, now: number): (number, num
 	end
 
 	local pulseCount = math.floor(offlineSeconds / MergeConfig.INCOME_INTERVAL)
-	local calculatedEarnings = SquishyProgress.incomePerPulse(merge.Squishies) * pulseCount
-	calculatedEarnings = math.min(calculatedEarnings, EconomyConfig.MAX_GRANT)
+	local calculatedEarnings = SquishyProgress.incomePerPulse(merge.Squishies, data.Rebirths) * pulseCount
+	-- Coins are integer-owned throughout the economy. Floor once after the
+	-- whole offline duration, not once per second, so the 25% increments are
+	-- preserved instead of disappearing on low-level models.
+	calculatedEarnings = math.min(math.floor(calculatedEarnings), EconomyConfig.MAX_GRANT)
 
 	local currentCoins = data.Coins
 	if not isFiniteNumber(currentCoins) or currentCoins < 0 then

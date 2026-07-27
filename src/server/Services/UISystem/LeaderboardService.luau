@@ -119,7 +119,7 @@ local METRIC_DEFINITIONS: { MetricDefinition } = {
 		storeName = "Leaderboard_Income_v1",
 		title = "TOP INCOME",
 		getScore = function(_player: Player, data: DataService.PlayerData): number
-			return SquishyProgress.incomePerPulse(data.Merge.Squishies)
+			return SquishyProgress.incomePerPulse(data.Merge.Squishies, data.Rebirths)
 		end,
 		formatScore = function(value: number): string
 			return `{Format.FormatNumber(value)}/s`

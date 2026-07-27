@@ -57,10 +57,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
+local DataController = require(script.Parent.DataController)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
+local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 
 local log = Log.new("IncomePopupController")
 
@@ -82,6 +84,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local basesFolder: Instance? = nil
 local popupHost: Folder? = nil
+local currentRebirths = 0
 
 type Popup = {
 	billboard: BillboardGui,
@@ -163,7 +166,7 @@ end
 local function spawnPopup(part: BasePart)
 	local tier = sanitizeTier(part:GetAttribute("Tier"))
 	local tierDef = MergeConfig.Tiers[tier]
-	local amount = MergeConfig.incomeForTier(tier)
+	local amount = MergeConfig.incomeForTier(tier) * RebirthConfig.incomeMultiplier(currentRebirths)
 
 	local startOffset = Vector3.new(0, tierDef.Size / 2 + 0.5, 0)
 	local endOffset = startOffset + Vector3.new(0, RISE_DISTANCE, 0)
@@ -176,7 +179,7 @@ local function spawnPopup(part: BasePart)
 	billboard.Enabled = true
 	label.TextTransparency = 0
 	label.TextStrokeTransparency = 0.2
-	label.Text = "+$" .. Format.FormatNumber(amount)
+	label.Text = "+$" .. Format.FormatIncome(amount)
 
 	local released = false
 	local function finishPopup()
@@ -251,6 +254,10 @@ function IncomePopupController.Init()
 end
 
 function IncomePopupController.Start()
+	DataController.observe({ "Rebirths" }, function(value)
+		currentRebirths = RebirthConfig.sanitizeRebirths(value)
+	end)
+
 	local mapLayout = Workspace:WaitForChild("MapLayout", WAIT_TIMEOUT)
 	if mapLayout == nil then
 		log.error("Workspace.MapLayout did not appear within timeout -- income popups disabled")
