@@ -16,19 +16,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 
 local Promotion = {
-	Packs = {
-		["Starter Pack"] = Images.StarterPack, -- Change this to the Icon ID you want to use.
-		["Secret Pack"] = Images.SecretPack, -- Change this to the Icon ID you want to use.
-	},
+	Packs = {} :: { [string]: number },
 	Passes = {
 		["VIP"] = Images.VipPass, -- Change this to the Icon ID you want to use.
-		["Teleporter"] = Images.TeleporterPass, -- Change this to the Icon ID you want to use.
-		["x2 Speed"] = Images.SpeedPass, -- Change this to the Icon ID you want to use.
+		["2x Cash"] = Images.Cash100K,
+		["2x Speed"] = Images.SpeedPass,
 	},
-	Products = {
-		["100K Cash"] = Images.Cash100K, -- Change this to the Icon ID you want to use.
-		["x5 Spins"] = Images.Wheel, -- Change this to the Icon ID you want to use.
-	},
+	Products = {} :: { [string]: number },
 }
 
 export type Promotion = typeof(Promotion)

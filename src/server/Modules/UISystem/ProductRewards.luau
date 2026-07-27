@@ -14,8 +14,8 @@ local CoinsService = require(ServerStorage.Services.CoinsService)
 local WheelSpinService = require(ServerStorage.Services.UISystem.WheelSpinService)
 
 local ProductRewards: { [string]: (Player) -> boolean } = {
-	["1K Cash"] = function(player: Player)
-		return CoinsService.add(player, 1000)
+	["10K Cash"] = function(player: Player)
+		return CoinsService.add(player, 10000)
 	end,
 
 	["100K Cash"] = function(player: Player)
@@ -30,15 +30,15 @@ local ProductRewards: { [string]: (Player) -> boolean } = {
 		return CoinsService.add(player, 10000000)
 	end,
 
-	["x2 Spins"] = function(player: Player)
+	["2 Spins"] = function(player: Player)
 		return WheelSpinService.AddSpins(player, 2)
 	end,
 
-	["x5 Spins"] = function(player: Player)
+	["5 Spins"] = function(player: Player)
 		return WheelSpinService.AddSpins(player, 5)
 	end,
 
-	["x10 Spins"] = function(player: Player)
+	["10 Spins"] = function(player: Player)
 		return WheelSpinService.AddSpins(player, 10)
 	end,
 }

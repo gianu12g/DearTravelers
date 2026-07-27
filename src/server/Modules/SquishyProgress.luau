@@ -45,7 +45,7 @@ end
 -- Applies one capped offline grant and returns (actualCoinsGranted,
 -- eligibleOfflineSeconds). A first-time player has LastActiveAt == 0 and
 -- receives no synthetic windfall.
-function SquishyProgress.applySessionStart(data: any, now: number): (number, number)
+function SquishyProgress.applySessionStart(data: any, now: number, maxOfflineSeconds: number?): (number, number)
 	local merge = data.Merge
 	if type(merge) ~= "table" then
 		-- Reconcile adds missing fields but deliberately does not replace a
@@ -66,9 +66,12 @@ function SquishyProgress.applySessionStart(data: any, now: number): (number, num
 	end
 	local lastActiveAt = merge.LastActiveAt
 	local offlineSeconds = 0
+	local offlineCap = if isFiniteNumber(maxOfflineSeconds) and maxOfflineSeconds > 0
+		then math.floor(maxOfflineSeconds)
+		else MergeConfig.MAX_OFFLINE_SECONDS
 
 	if isFiniteNumber(lastActiveAt) and lastActiveAt > 0 and now > lastActiveAt then
-		offlineSeconds = math.min(math.floor(now - lastActiveAt), MergeConfig.MAX_OFFLINE_SECONDS)
+		offlineSeconds = math.min(math.floor(now - lastActiveAt), offlineCap)
 	end
 
 	local pulseCount = math.floor(offlineSeconds / MergeConfig.INCOME_INTERVAL)

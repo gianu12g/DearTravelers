@@ -1,42 +1,41 @@
 --!strict
 --[[
-	Developer-product catalog (currency packs + spin packs). Ported 1:1 from
-	the UISystem dump's ReplicatedStorage.Configuration.Products.
+	Live developer-product catalog (currency packs + spin packs).
 
 	Not every product has a GiftID -- the spin packs cannot be gifted, only
-	bought for yourself, matching the source table exactly.
+	bought for yourself.
 
 	A plain module (Loader ignores it, ARCHITECTURE.md Recipe 3).
 ]]
 
 local Products = {
-	["1K Cash"] = {
-		ProductID = 3601118674, -- Change this to whatever your product ID is [Product]
-		GiftID = 3601118829, -- Change this to whatever your product ID is [Product]
+	["10K Cash"] = {
+		ProductID = 3611981992,
+		GiftID = 3611982428,
 	},
 	["100K Cash"] = {
-		ProductID = 3601118714, -- Change this to whatever your product ID is [Product]
-		GiftID = 3601118897, -- Change this to whatever your product ID is [Product]
+		ProductID = 3611982273,
+		GiftID = 3611982480,
 	},
 	["1M Cash"] = {
-		ProductID = 3596658382, -- Change this to whatever your product ID is [Product]
-		GiftID = 3596658445, -- Change this to whatever your product ID is [Product]
+		ProductID = 3611982313,
+		GiftID = 3611982533,
 	},
 	["10M Cash"] = {
-		ProductID = 3601118759, -- Change this to whatever your product ID is [Product]
-		GiftID = 3601118944, -- Change this to whatever your product ID is [Product]
+		ProductID = 3611982365,
+		GiftID = 3611982590,
 	},
 
-	["x2 Spins"] = {
-		ProductID = 3596661032, -- Change this to whatever your product ID is [Product]
+	["2 Spins"] = {
+		ProductID = 3611983395,
 	},
 
-	["x5 Spins"] = {
-		ProductID = 3599716704, -- Change this to whatever your product ID is [Product]
+	["5 Spins"] = {
+		ProductID = 3611983417,
 	},
 
-	["x10 Spins"] = {
-		ProductID = 3599716772, -- Change this to whatever your product ID is [Product]
+	["10 Spins"] = {
+		ProductID = 3611983494,
 	},
 }
 

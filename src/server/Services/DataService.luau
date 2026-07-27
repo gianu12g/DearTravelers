@@ -22,6 +22,7 @@ local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local EconomyConfig = require(ServerStorage.Modules.EconomyConfig)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
+local PassEntitlements = require(ServerStorage.Modules.PassEntitlements)
 local ProfileStore = require(ServerStorage.ServerPackages.ProfileStore)
 local Progression = require(ReplicatedStorage.Shared.Progression)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
@@ -563,7 +564,11 @@ local function onPlayerAdded(player: Player)
 
 	-- This runs before profiles[player] and Replica exist, making the offline
 	-- payout part of the atomic initial state delivered to the client.
-	local offlineEarnings, offlineSeconds = SquishyProgress.applySessionStart(profile.Data, os.time())
+	local maxOfflineSeconds = if PassEntitlements.owns(player, PassEntitlements.OFFLINE_EARNINGS, profile.Data)
+		then MergeConfig.MAX_OFFLINE_PLUS_SECONDS
+		else MergeConfig.MAX_OFFLINE_SECONDS
+	local offlineEarnings, offlineSeconds =
+		SquishyProgress.applySessionStart(profile.Data, os.time(), maxOfflineSeconds)
 	if offlineEarnings > 0 then
 		log.info(`{player.Name}'s squishies earned {offlineEarnings} coins over {offlineSeconds}s offline`)
 	end

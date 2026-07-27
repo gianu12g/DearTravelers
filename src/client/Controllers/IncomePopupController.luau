@@ -171,7 +171,8 @@ end
 local function spawnPopup(part: BasePart)
 	local tier = sanitizeTier(part:GetAttribute("Tier"))
 	local tierDef = MergeConfig.Tiers[tier]
-	local amount = MergeConfig.incomeForTier(tier) * RebirthConfig.incomeMultiplier(currentRebirths)
+	local cashMultiplier = if player:GetAttribute("CashMultiplier") == 2 then 2 else 1
+	local amount = MergeConfig.incomeForTier(tier) * RebirthConfig.incomeMultiplier(currentRebirths) * cashMultiplier
 
 	local startOffset = Vector3.new(0, tierDef.Size / 2 + 0.5, 0)
 	local endOffset = startOffset + Vector3.new(0, RISE_DISTANCE, 0)

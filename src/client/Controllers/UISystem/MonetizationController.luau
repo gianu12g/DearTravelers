@@ -196,7 +196,7 @@ end
 
 function MonetizationController.StartProductPrompt(productName: string)
 	local productConfig = ProductsConfig[productName]
-	if productConfig == nil then
+	if productConfig == nil or productConfig.ProductID <= 0 then
 		log.warn(`StartProductPrompt: unknown product "{productName}"`)
 		return
 	end
@@ -254,6 +254,11 @@ function MonetizationController.SetPassButton(button: GuiButton, passName: strin
 end
 
 function MonetizationController.SetProductButton(button: GuiButton, productName: string)
+	local productConfig = ProductsConfig[productName]
+	if productConfig == nil or productConfig.ProductID <= 0 then
+		button.Visible = false
+		return
+	end
 	button.MouseButton1Click:Connect(function()
 		MonetizationController.StartProductPrompt(productName)
 	end)
@@ -277,7 +282,7 @@ end
 
 function MonetizationController.SetPassGiftButton(button: GuiButton, passName: string)
 	local passConfig = PassesConfig[passName]
-	if passConfig == nil or not passConfig.Enabled then
+	if passConfig == nil or not passConfig.Enabled or passConfig.GiftID == nil then
 		button.Visible = false
 		return
 	end
@@ -294,6 +299,11 @@ function MonetizationController.SetPassGiftButton(button: GuiButton, passName: s
 end
 
 function MonetizationController.SetProductGiftButton(button: GuiButton, productName: string)
+	local productConfig = ProductsConfig[productName]
+	if productConfig == nil or productConfig.GiftID == nil then
+		button.Visible = false
+		return
+	end
 	button.MouseButton1Click:Connect(function()
 		giftData.GiftType = "Product"
 		giftData.GiftName = productName
@@ -527,7 +537,20 @@ function MonetizationController.Start()
 	end)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(closePromptAnimation)
-	MarketplaceService.PromptGamePassPurchaseFinished:Connect(closePromptAnimation)
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(_, passId: number, purchased: boolean)
+		closePromptAnimation()
+		if not purchased then
+			return
+		end
+		for passName, passConfig in PassesConfig do
+			if passConfig.PassID == passId then
+				updateOwnedButtons(passButtons, function(name: string)
+					return name == passName
+				end)
+				break
+			end
+		end
+	end)
 
 	local playerGui = player:WaitForChild("PlayerGui")
 	local fullGui = playerGui:WaitForChild("Full")

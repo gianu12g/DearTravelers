@@ -109,6 +109,18 @@ local queuedPlayers: { [Player]: true } = {}
 local BaseService = {}
 local onPlayerAdded: (Player) -> ()
 
+local function ownerDisplayName(player: Player): string
+	return if player:GetAttribute("VIP") == true then `[VIP] {player.DisplayName}` else player.DisplayName
+end
+
+function BaseService.refreshNameLabel(player: Player)
+	local baseName = playerBases[player]
+	local record = if baseName ~= nil then bases[baseName] else nil
+	if record ~= nil then
+		record.nameText.Text = ownerDisplayName(player)
+	end
+end
+
 local function setForcefieldState(player: Player, baseName: string, locked: boolean): (boolean, string)
 	local record = bases[baseName]
 	if record == nil then
@@ -341,7 +353,7 @@ onPlayerAdded = function(player: Player)
 	local record = bases[baseName]
 	if record ~= nil then
 		record.nameLabel.Enabled = true
-		record.nameText.Text = player.DisplayName
+		record.nameText.Text = ownerDisplayName(player)
 		record.nameText.Visible = true
 		local ownerAvatar = record.ownerAvatar
 		if ownerAvatar ~= nil then

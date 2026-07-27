@@ -2,9 +2,13 @@
 --[[
 	Rotating 3-slot promo carousel on the HUD's right side
 	(PlayerGui.Main.HUD.Right.SideItem1-3). Ported from the source's
-	Controllers/PromotionController.luau: tweens items in/out every 15s,
-	filters out already-owned Packs/Passes via MonetizationController,
-	and avoids repeating the same items back-to-back.
+	Controllers/PromotionController.luau, and avoids repeating the same items
+	back-to-back. Configured passes remain visible after purchase so the HUD
+	always keeps all three authored slots.
+
+	Cycle: slide in -> hold 15s on screen -> slide out -> stay hidden 15s ->
+	swap contents while off screen -> repeat. Contents are only ever swapped
+	while the slots are off screen, so a promo is never replaced mid-display.
 ]]
 
 local Players = game:GetService("Players")
@@ -21,6 +25,16 @@ local PromotionConfig = require(ReplicatedStorage.Shared.UISystem.Config.Promoti
 local log = Log.new("PromotionController")
 
 local player = Players.LocalPlayer
+
+local SLOT_COUNT = 3
+local DISPLAY_SECONDS = 15
+local HIDDEN_SECONDS = 15
+local TWEEN_SECONDS = 0.6
+local STAGGER_SECONDS = 0.2
+
+-- Anchors the source uses to park a slot off the right edge vs. flush on screen.
+local ANCHOR_SHOWN = Vector2.new(0, 0.5)
+local ANCHOR_HIDDEN = Vector2.new(1, 0.5)
 
 type PromoType = "Pack" | "Pass" | "Product" | ""
 
@@ -57,18 +71,41 @@ local function fillItemData(item: GuiObject, name: string, icon: number, price: 
 	end
 end
 
+-- Instant, un-tweened placement. Used once at boot so the first tweenIn()
+-- actually animates instead of the slots popping in wherever the GUI authored
+-- them.
+local function snapContainer(item: GuiObject, anchor: Vector2)
+	local container = item:FindFirstChild("Container")
+	if container ~= nil and container:IsA("GuiObject") then
+		container.AnchorPoint = anchor
+	end
+end
+
 local function tweenContainer(item: GuiObject, anchor: Vector2, easingDirection: Enum.EasingDirection)
 	local container = item:FindFirstChild("Container")
 	if container == nil or not container:IsA("GuiObject") then
 		return nil
 	end
-	local tweenInfo = TweenInfo.new(0.6, Enum.EasingStyle.Sine, easingDirection)
+	local tweenInfo = TweenInfo.new(TWEEN_SECONDS, Enum.EasingStyle.Sine, easingDirection)
 	local tween = TweenService:Create(container, tweenInfo, { AnchorPoint = anchor })
 	tween:Play()
 	return tween
 end
 
 local function pickRandom(pool: { PoolEntry }, count: number, previousKeys: { [string]: boolean }): { PoolEntry }
+	-- When the pool cannot fill more than the slots there is nothing to rotate:
+	-- every entry is shown every cycle. Shuffling here would only reorder which
+	-- slot each promo lands in, which reads as the banner swapping to a
+	-- "different" promo for no reason. Sort instead -- the pool is built by
+	-- dictionary iteration, so its order is not stable between refreshes.
+	if #pool <= count then
+		local stable = table.clone(pool)
+		table.sort(stable, function(a: PoolEntry, b: PoolEntry): boolean
+			return a.Name < b.Name
+		end)
+		return stable
+	end
+
 	local preferred: { PoolEntry } = {}
 	local fallback: { PoolEntry } = {}
 
@@ -123,22 +160,27 @@ function PromotionController.Start()
 		[3] = { Type = "", Name = "" },
 	}
 
-	local function tweenIn()
+	-- Staggered slide, then wait out the last slot's tween so the caller's
+	-- dwell timer only starts once every slot has actually settled.
+	local function tweenAll(anchor: Vector2, easingDirection: Enum.EasingDirection)
 		local lastTween: Tween? = nil
-		for i = 1, 3 do
-			lastTween = tweenContainer(items[i], Vector2.new(0, 0.5), Enum.EasingDirection.In)
-			task.wait(0.2)
+		for i = 1, SLOT_COUNT do
+			lastTween = tweenContainer(items[i], anchor, easingDirection)
+			if i < SLOT_COUNT then
+				task.wait(STAGGER_SECONDS)
+			end
 		end
 		if lastTween ~= nil then
 			lastTween.Completed:Wait()
 		end
 	end
 
+	local function tweenIn()
+		tweenAll(ANCHOR_SHOWN, Enum.EasingDirection.In)
+	end
+
 	local function tweenOut()
-		for i = 1, 3 do
-			tweenContainer(items[i], Vector2.new(1, 0.5), Enum.EasingDirection.Out)
-			task.wait(0.2)
-		end
+		tweenAll(ANCHOR_HIDDEN, Enum.EasingDirection.Out)
 	end
 
 	local function refreshPromotion()
@@ -165,7 +207,7 @@ function PromotionController.Start()
 
 		for passName, iconId in PromotionConfig.Passes do
 			local passConfig = PassesConfig[passName]
-			if passConfig ~= nil and passConfig.Enabled and not MonetizationController.IsPassOwned(passName) then
+			if passConfig ~= nil and passConfig.Enabled then
 				table.insert(pool, {
 					Type = "Pass",
 					Name = passName,
@@ -186,9 +228,9 @@ function PromotionController.Start()
 			end
 		end
 
-		local picked = pickRandom(pool, 3, previousKeys)
+		local picked = pickRandom(pool, SLOT_COUNT, previousKeys)
 
-		for i = 1, 3 do
+		for i = 1, SLOT_COUNT do
 			local item = items[i]
 			local entry = picked[i]
 
@@ -203,7 +245,7 @@ function PromotionController.Start()
 		end
 	end
 
-	for i = 1, 3 do
+	for i = 1, SLOT_COUNT do
 		local item = items[i]
 		if item:IsA("GuiButton") then
 			item.MouseButton1Click:Connect(function()
@@ -221,11 +263,22 @@ function PromotionController.Start()
 
 	log.info("ready")
 
+	-- Park every slot off screen before the first fill, so the opening slide is
+	-- an actual animation and no stale authored content is ever on screen.
+	for i = 1, SLOT_COUNT do
+		snapContainer(items[i], ANCHOR_HIDDEN)
+	end
+
+	refreshPromotion()
 	while true do
 		tweenIn()
-		refreshPromotion()
+		task.wait(DISPLAY_SECONDS)
 		tweenOut()
-		task.wait(15)
+		-- Both the swap and the idle gap happen off screen; without the wait the
+		-- loop slid straight back in with new contents, which looked like the
+		-- banner cancelling itself.
+		refreshPromotion()
+		task.wait(HIDDEN_SECONDS)
 	end
 end
 

@@ -86,7 +86,8 @@ function Income.runTick()
 			continue -- not expected once a pad is live, but never error over it
 		end
 
-		local exactTotal = SquishyProgress.incomePerPulse(data.Merge.Squishies, data.Rebirths)
+		local cashMultiplier = if player:GetAttribute("CashMultiplier") == 2 then 2 else 1
+		local exactTotal = SquishyProgress.incomePerPulse(data.Merge.Squishies, data.Rebirths) * cashMultiplier
 			+ (incomeRemainders[player] or 0)
 		local total = math.floor(exactTotal)
 		incomeRemainders[player] = exactTotal - total

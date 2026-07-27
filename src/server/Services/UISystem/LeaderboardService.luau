@@ -118,8 +118,9 @@ local METRIC_DEFINITIONS: { MetricDefinition } = {
 		tag = "LeaderboardIncome",
 		storeName = "Leaderboard_Income_v1",
 		title = "TOP INCOME",
-		getScore = function(_player: Player, data: DataService.PlayerData): number
-			return SquishyProgress.incomePerPulse(data.Merge.Squishies, data.Rebirths)
+		getScore = function(player: Player, data: DataService.PlayerData): number
+			local cashMultiplier = if player:GetAttribute("CashMultiplier") == 2 then 2 else 1
+			return SquishyProgress.incomePerPulse(data.Merge.Squishies, data.Rebirths) * cashMultiplier
 		end,
 		formatScore = function(value: number): string
 			return `{Format.FormatNumber(value)}/s`

@@ -358,7 +358,9 @@ local MarketplaceAttrs: { [string]: (GuiObject, string) -> () } = {
 	["Ui-Product-Robux"] = function(item, value)
 		local price = MonetizationController.GetPrice("Product", value)
 		local textItem = item :: any
-		textItem.Text = " " .. tostring(price or "?")
+		local prefix = attributeString(item, "Ui-Price-Prefix") or " "
+		local suffix = attributeString(item, "Ui-Price-Suffix") or ""
+		textItem.Text = prefix .. tostring(price or "?") .. suffix
 	end,
 
 	["Ui-Pass"] = function(item, value)
@@ -370,7 +372,9 @@ local MarketplaceAttrs: { [string]: (GuiObject, string) -> () } = {
 	["Ui-Pass-Robux"] = function(item, value)
 		local price = MonetizationController.GetPrice("Pass", value)
 		local textItem = item :: any
-		textItem.Text = " " .. tostring(price or "?")
+		local prefix = attributeString(item, "Ui-Price-Prefix") or " "
+		local suffix = attributeString(item, "Ui-Price-Suffix") or ""
+		textItem.Text = prefix .. tostring(price or "?") .. suffix
 	end,
 
 	["Ui-Gift-Pass"] = function(item, value)

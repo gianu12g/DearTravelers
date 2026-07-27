@@ -122,6 +122,9 @@ MergeConfig.BASE_INCOME = 1 -- $ per pulse at tier 1
 -- a long absence cannot destabilize the economy. Change this one value to
 -- tune the maximum banked duration.
 MergeConfig.MAX_OFFLINE_SECONDS = 8 * 60 * 60
+-- Permanent Offline Earnings+ entitlement. DataService chooses this cap
+-- before applying the atomic session-start payout.
+MergeConfig.MAX_OFFLINE_PLUS_SECONDS = 24 * 60 * 60
 -- Persist a recent server timestamp while the player is online. This bounds
 -- duplicate income after an unclean session handoff without adding a write
 -- to every one-second income pulse.
