@@ -45,7 +45,7 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 4
+local DATA_VERSION = 1
 local MAX_PROCESSED_PURCHASE_IDS = 200
 -- Comfortably above CosmeticsCatalog's current id count for any slot --
 -- a bound exists only to keep a corrupted profile from growing unbounded,
@@ -162,73 +162,15 @@ local TEMPLATE = {
 
 export type PlayerData = typeof(TEMPLATE)
 
--- Index N migrates version N -> N+1. Never delete or renumber one.
-local MIGRATIONS: { (data: any) -> () } = {
-	[0] = function(_data)
-		-- Version was introduced before any breaking shape change. Explicitly
-		-- retain the historical 0 -> 1 no-op so migration-chain validation can
-		-- distinguish intent from a deployment that accidentally omits a step.
-	end,
-	[1] = function(data)
-		-- Objects was the original internal name for the player's collected
-		-- merge items. Preserve every existing entry while adopting the
-		-- player-facing Squishies terminology.
-		local merge = if type(data.Merge) == "table" then data.Merge else {}
-		if merge.Squishies == nil then
-			merge.Squishies = merge.Objects or {}
-		end
-		merge.Objects = nil
-		data.Merge = merge
-	end,
-	[2] = function(data)
-		-- ClaimedRewards used to be treated as a sparse numeric dictionary.
-		-- Replica numeric tables must be compact, so normalize both reward tracks
-		-- into dense boolean arrays while preserving every existing claim.
-		local uiSystem = if type(data.UISystem) == "table" then data.UISystem else {}
+-- 2026-07-27, pre-release chain reset -- the v1.2 store's migrations were
+-- deleted when the store was bumped to PlayerData_v1.3; every profile in the
+-- new store starts at Version 1; index N migrates N -> N+1 going forward.
+local MIGRATIONS: { (data: any) -> () } = {}
 
-		local function denseClaims(container: any, count: number): { boolean }
-			local old = if type(container) == "table" and type(container.ClaimedRewards) == "table"
-				then container.ClaimedRewards
-				else {}
-			local dense = table.create(count, false)
-			for i = 1, count do
-				dense[i] = old[i] == true or old[tostring(i)] == true
-			end
-			return dense
-		end
-
-		if type(uiSystem.DailyRewards) ~= "table" then
-			uiSystem.DailyRewards = { StartTimestamp = 0, ClaimedRewards = {} }
-		end
-		if type(uiSystem.PlaytimeRewards) ~= "table" then
-			uiSystem.PlaytimeRewards = { StartTimestamp = 0, StartPlaytime = 0, ClaimedRewards = {} }
-		end
-		uiSystem.DailyRewards.ClaimedRewards = denseClaims(uiSystem.DailyRewards, 7)
-		uiSystem.PlaytimeRewards.ClaimedRewards = denseClaims(uiSystem.PlaytimeRewards, 7)
-		uiSystem.ProcessedPurchaseIds = uiSystem.ProcessedPurchaseIds or {}
-		uiSystem.PendingGift = uiSystem.PendingGift or { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 }
-		data.UISystem = uiSystem
-	end,
-	[3] = function(data)
-		-- Reconcile cannot add keys inside entries of a numeric array. Existing
-		-- squishies therefore need their initial full-health value written by an
-		-- explicit migration; repairProfileData below clamps malformed values.
-		local merge = if type(data.Merge) == "table" then data.Merge else {}
-		local squishies = if type(merge.Squishies) == "table" then merge.Squishies else {}
-		for _, entry in squishies do
-			if type(entry) == "table" and entry.Health == nil then
-				entry.Health = MergeConfig.healthForTier(entry.Tier)
-			end
-		end
-		merge.Squishies = squishies
-		data.Merge = merge
-	end,
-}
-
-local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.2"
+local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.3"
 -- Studio writes to a separate DataStore, so persistence can be tested across
 -- Play sessions without ever touching production player profiles.
-local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.2_Studio"
+local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.3_Studio"
 local PROFILE_STORE_NAME = if RunService:IsStudio() then STUDIO_PROFILE_STORE_NAME else LIVE_PROFILE_STORE_NAME
 
 local DataService = {
@@ -426,12 +368,6 @@ local function repairProfileData(data: any)
 	if type(cosmetics.MergePopId) ~= "string" or not table.find(cosmetics.Owned.MergePops, cosmetics.MergePopId) then
 		cosmetics.MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 	end
-	-- 2026-07-24 trail->beam migration: Reconcile only ADDS missing keys, so a
-	-- profile saved before this rename still carries the old trail fields
-	-- alongside the new beam ones repaired above. Drop them once, here.
-	cosmetics.SquishyTrailId = nil
-	cosmetics.Owned.SquishyTrails = nil
-
 	local uiSystem = data.UISystem
 	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)
 	uiSystem.Packs = compactStringArray(uiSystem.Packs, 100)
