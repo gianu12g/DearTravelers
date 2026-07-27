@@ -360,14 +360,17 @@ end
 	whenever it IS available) -- a hard softlock with no player-initiated way
 	out.
 
-	Deliberately conservative: a rescue only fires once the SAME stuck shape
-	has been observed for MergeConfig.DEADLOCK_RESCUE_TICKS consecutive
-	auto-spawn ticks (live.deadlockStreak, ~10s at SPAWN_INTERVAL) -- a
-	confirmation window against reacting to a single snapshot taken right as
-	the board's composition changed (a merge just landed, a rebirth just
-	raised the cap), not because a genuine deadlock could ever resolve
-	itself: by definition nothing on this pad CAN merge while the conditions
-	below all hold, so requiring a repeat costs nothing.
+	Fires as soon as the SAME stuck shape has been observed for
+	MergeConfig.DEADLOCK_RESCUE_TICKS consecutive auto-spawn ticks
+	(live.deadlockStreak). Threshold is 1 -- the predicate below is exact, not
+	a heuristic (tallied fresh from live persisted data at fire time, and a
+	legal pair reappearing anywhere on the board resets the streak before this
+	fires), so there is nothing for a repeat observation to confirm; a
+	genuine deadlock could never resolve itself, by definition nothing on
+	this pad CAN merge while the conditions below all hold. The streak
+	counter itself stays live (rather than collapsing to a plain boolean)
+	because it still guards trySpawnObject's retry-without-reconfirm path
+	when findOpenSpot fails below.
 
 	`live.deadlockStreak` lives on the LiveBase itself, not a per-player
 	module table -- deactivateBase (base change, player leaving) discards the
@@ -421,8 +424,9 @@ local function tryDeadlockRescue(player: Player, live: Types.LiveBase, data: Dat
 	end
 
 	-- True deadlock on THIS tick: full board, no legal pair among mergeable
-	-- tiers, at least one mergeable singleton. Require it to repeat before
-	-- acting -- see this function's header.
+	-- tiers, at least one mergeable singleton. At threshold 1 this fires the
+	-- rescue below immediately -- see this function's header for why no
+	-- confirmation repeat is needed.
 	live.deadlockStreak += 1
 	if live.deadlockStreak < MergeConfig.DEADLOCK_RESCUE_TICKS then
 		return
