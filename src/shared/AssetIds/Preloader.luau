@@ -35,16 +35,28 @@ local Preloader = {}
 	module happens to have, flat or nested, without needing a type for every
 	possible shape. Dedupes via `seen` so two names sharing one ID (e.g.
 	Images.SecretPack / DailyRewards day 2) don't preload twice.
+
+	A table carrying a numeric `Id` is a leaf, not a group: that is a Sounds
+	entry, whose other numbers are playback settings (`Start`) rather than
+	asset IDs. Recursing into one would queue `rbxassetid://0.05`.
 ]]
 local function collectIds(source: any, ids: { string }, seen: { [number]: true })
+	local function add(id: number)
+		if not seen[id] then
+			seen[id] = true
+			table.insert(ids, `rbxassetid://{id}`)
+		end
+	end
+
 	for _, value in source do
 		if type(value) == "number" then
-			if not seen[value] then
-				seen[value] = true
-				table.insert(ids, `rbxassetid://{value}`)
-			end
+			add(value)
 		elseif type(value) == "table" then
-			collectIds(value, ids, seen)
+			if type(value.Id) == "number" then
+				add(value.Id)
+			else
+				collectIds(value, ids, seen)
+			end
 		end
 	end
 end

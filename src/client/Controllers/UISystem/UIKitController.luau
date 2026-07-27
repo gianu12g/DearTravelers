@@ -44,6 +44,7 @@ local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Frames = require(script.Parent.Parent.Parent.UI.UISystem.Frames)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MonetizationController = require(script.Parent.MonetizationController)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local UISignals = require(script.Parent.Parent.Parent.UI.UISystem.UISignals)
 
@@ -84,9 +85,12 @@ local function attributeNumber(item: Instance, name: string): number?
 	return value
 end
 
-local function makeSound(item: Instance, assetId: string): Sound
+-- Built once per decorated item and replayed on every hover/click, so the
+-- entry's head trim has to be a playback region rather than a per-play seek --
+-- see AssetIds/SoundKit.
+local function makeSound(item: Instance, entry: Sounds.Entry): Sound
 	local sound = Instance.new("Sound")
-	sound.SoundId = assetId
+	SoundKit.apply(sound, entry)
 	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 	sound.Parent = item
 	return sound
@@ -303,7 +307,7 @@ local ClickEffects: { [string]: (GuiObject, number?) -> () } = {
 
 local HoverSounds: { [string]: (GuiObject) -> () } = {
 	Default = function(item)
-		local sound = makeSound(item, `rbxassetid://{Sounds.UiHover}`)
+		local sound = makeSound(item, Sounds.UiHover)
 		item.MouseEnter:Connect(function()
 			sound:Play()
 		end)
@@ -315,7 +319,7 @@ local ClickSounds: { [string]: (GuiObject) -> () } = {
 		if not item:IsA("GuiButton") then
 			return
 		end
-		local sound = makeSound(item, `rbxassetid://{Sounds.UiClick}`)
+		local sound = makeSound(item, Sounds.UiClick)
 		item.MouseButton1Click:Connect(function()
 			sound:Play()
 		end)
@@ -325,7 +329,7 @@ local ClickSounds: { [string]: (GuiObject) -> () } = {
 		if not item:IsA("GuiButton") then
 			return
 		end
-		local sound = makeSound(item, `rbxassetid://{Sounds.UiClose}`)
+		local sound = makeSound(item, Sounds.UiClose)
 		item.MouseButton1Click:Connect(function()
 			sound:Play()
 		end)
@@ -335,7 +339,7 @@ local ClickSounds: { [string]: (GuiObject) -> () } = {
 		if not item:IsA("GuiButton") then
 			return
 		end
-		local sound = makeSound(item, `rbxassetid://{Sounds.UiMoney}`)
+		local sound = makeSound(item, Sounds.UiMoney)
 		item.MouseButton1Click:Connect(function()
 			sound:Play()
 		end)

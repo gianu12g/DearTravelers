@@ -23,6 +23,7 @@ local SoundService = game:GetService("SoundService")
 
 local GeneralConfig = require(ReplicatedStorage.Shared.UISystem.Config.General)
 local Log = require(ReplicatedStorage.Shared.Log)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 
 local log = Log.new("AmbientMusicController")
 
@@ -42,9 +43,9 @@ function AmbientMusicController.Start()
 	tracksFolder.Name = "AmbientMusicTracks"
 
 	local tracks: { Sound } = {}
-	for index, id in GeneralConfig.AmbientMusic do
+	for index, entry in GeneralConfig.AmbientMusic do
 		local track = Instance.new("Sound")
-		track.SoundId = `rbxassetid://{id}`
+		SoundKit.apply(track, entry)
 		track.Name = tostring(index)
 		track.SoundGroup = musicGroup :: SoundGroup
 		track.Parent = tracksFolder
@@ -55,6 +56,10 @@ function AmbientMusicController.Start()
 
 	log.info(`ready ({#tracks} tracks)`)
 
+	-- Sequencing hangs off Ended, so a music entry must not be given a `Start`
+	-- in AssetIds/Sounds without checking that assumption: SoundKit turns a
+	-- trim into a playback region, and a region's end is what Ended then
+	-- reports. The trim exists for short SFX; nothing here uses one.
 	while true do
 		for _, track in tracks do
 			track:Play()

@@ -11,10 +11,14 @@
 
 	Every emitter in the pack stays disabled; its authored EmitCount/EmitDelay
 	attributes drive the one-shot (see Shared.AuthoredVfx).
+
+	The merge SFX rides the same broadcast, so every observer hears the pop
+	where it happened.
 ]]
 
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
 local AuthoredVfx = require(ReplicatedStorage.Shared.AuthoredVfx)
@@ -22,12 +26,25 @@ local CosmeticsCatalog = require(ReplicatedStorage.Shared.CosmeticsCatalog)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 
 local log = Log.new("MergeVfxController")
 -- Grace period past the longest authored particle lifetime before the clone is
 -- destroyed, so nothing pops out mid-fade.
 local VFX_LINGER = 0.5
+-- One of these is picked per merge so back-to-back merges don't sound cloned.
+-- Each entry carries its own head trim (AssetIds/Sounds `Start`), since the two
+-- uploads don't open with the same amount of dead air.
+local MERGE_SOUND_ENTRIES: { Sounds.Entry } = {
+	Sounds.MergeSquishyA,
+	Sounds.MergeSquishyB,
+}
+local MERGE_SOUND_VOLUME = 1
+-- Same generous fixed cleanup window MushController uses: covers the whole clip
+-- (and a SoundId that never loads, so Ended never fires) without a Length wait.
+local MERGE_SOUND_LIFETIME = 10
 local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 	motion = true,
 	offsets = true,
@@ -60,6 +77,36 @@ local function isMergePopTemplate(template: Instance): boolean
 		return false
 	end
 	return template:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
+end
+
+--[[
+	The pop SFX gets its own anchored, inert emitter Part instead of riding the
+	cosmetic burst clone: `play` bails out entirely when a player's Merge Pop
+	template is missing or malformed, and a merge should still be audible then.
+	A fresh Sound per merge lets rapid merges layer instead of restarting one.
+]]
+local function playMergeSound(position: Vector3)
+	local anchor = Instance.new("Part")
+	anchor.Name = "MergeSoundEmitter"
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanTouch = false
+	anchor.CanQuery = false
+	anchor.CastShadow = false
+	anchor.Transparency = 1
+	anchor.Size = Vector3.one * 0.2
+	anchor.CFrame = CFrame.new(position)
+	anchor.Parent = Workspace
+
+	local sound = Instance.new("Sound")
+	sound.Name = "MergeSound"
+	sound.Volume = MERGE_SOUND_VOLUME
+	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+	SoundKit.apply(sound, MERGE_SOUND_ENTRIES[math.random(#MERGE_SOUND_ENTRIES)])
+	sound.Parent = anchor
+
+	Debris:AddItem(anchor, MERGE_SOUND_LIFETIME)
+	sound:Play()
 end
 
 local function play(templateName: string, position: Vector3)
@@ -103,7 +150,9 @@ function MergeVfxController.Init()
 	end
 
 	Net.mergeSquishyVfx.listen(function(data)
-		play(data.templateName, Vector3.new(data.worldX, data.worldY, data.worldZ))
+		local position = Vector3.new(data.worldX, data.worldY, data.worldZ)
+		playMergeSound(position)
+		play(data.templateName, position)
 	end)
 end
 

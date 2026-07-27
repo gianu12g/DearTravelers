@@ -30,6 +30,8 @@ local LaunchEffects = require(script.Parent.LaunchEffects)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local Spawning = require(script.Parent.Spawning)
 local StatusUI = require(script.Parent.StatusUI)
 local Types = require(script.Parent.Types)
@@ -50,7 +52,14 @@ local liveBases: { [Player]: Types.LiveBase } = nil :: any
 local carries: { [Player]: Types.CarryState } = nil :: any
 local activeLaunches: { [Player]: Types.LaunchState } = nil :: any
 
-local LAUNCH_MUSH_SOUND_LIFETIME = 10
+local LAUNCH_SOUND_LIFETIME = 10
+-- Touchdown thud, played whether the drop hit the map surface or was stopped
+-- by a base forcefield -- both resolve to the same landing frame below. Any
+-- head trim on these two lives on their AssetIds/Sounds entry, not here.
+local LAUNCH_LAND_SOUND_VOLUME = 2
+-- The pop, fired from the same call as the explosion burst so the two land on
+-- the same frame instead of drifting apart across the impact squash.
+local LAUNCH_EXPLOSION_SOUND_VOLUME = 2
 
 -- Drop spawn squish: the same press feel Mush gives a carried squishy
 -- (MushController's COMPRESS_SCALE/SPREAD_SCALE/SQUASH_IN/SQUASH_HOLD/
@@ -146,19 +155,46 @@ end
 -- Server-side mirror of MushController.playMushSound: the part is Anchored
 -- for the whole drop, so a Sound parented to it replicates and plays for
 -- every client the same way the projectile's own CFrame changes already do
--- -- unlike Mush's player-triggered version, this needs no Net event.
-local function playLaunchMushSound(part: BasePart, soundId: string, volume: number)
-	if soundId == "" or part.Parent == nil then
-		return
+-- -- unlike Mush's player-triggered version, this needs no Net event. A fresh
+-- Sound per call lets the launch's sounds overlap instead of cutting each
+-- other off; the caller applies the id, since the mush sounds are authored
+-- per tier while the rest are AssetIds entries.
+local function newLaunchSound(part: BasePart, name: string, volume: number): Sound?
+	if part.Parent == nil then
+		return nil
 	end
 
 	local sound = Instance.new("Sound")
-	sound.Name = "MushSound"
-	sound.SoundId = soundId
+	sound.Name = name
 	sound.Volume = math.clamp(volume, 0, 10)
 	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 	sound.Parent = part
-	Debris:AddItem(sound, LAUNCH_MUSH_SOUND_LIFETIME)
+	Debris:AddItem(sound, LAUNCH_SOUND_LIFETIME)
+	return sound
+end
+
+-- Per-tier mush sound: id and volume come off the model template's own
+-- attributes (MergeObjectVisuals.getMushSound), not from AssetIds, so there is
+-- no entry to carry a head trim -- these are authored to start on their hit.
+local function playLaunchMushSound(part: BasePart, soundId: string, volume: number)
+	if soundId == "" then
+		return
+	end
+
+	local sound = newLaunchSound(part, "MushSound", volume)
+	if sound == nil then
+		return
+	end
+	SoundKit.applyId(sound, soundId, nil)
+	sound:Play()
+end
+
+local function playLaunchEntrySound(part: BasePart, name: string, entry: Sounds.Entry, volume: number)
+	local sound = newLaunchSound(part, name, volume)
+	if sound == nil then
+		return
+	end
+	SoundKit.apply(sound, entry)
 	sound:Play()
 end
 
@@ -454,6 +490,9 @@ end
 local function explodeDroppedSquishy(launch: Types.LaunchState, position: Vector3)
 	local explosionPosition = launchVfxPoint(launch, LAUNCH_EXPLOSION_ATTACHMENT_NAME, position)
 	LaunchEffects.hideLaunchVisual(launch)
+	-- hideLaunchVisual only zeroes Transparency, so the part is still a live
+	-- sound anchor here; finishLaunch is what eventually cleans it up.
+	playLaunchEntrySound(launch.part, "ExplosionSound", Sounds.SquishyPop, LAUNCH_EXPLOSION_SOUND_VOLUME)
 	Vfx.spawnLaunchImpactVfx(explosionPosition)
 end
 
@@ -535,7 +574,11 @@ local function runLaunch(player: Player, launch: Types.LaunchState, targetPositi
 	LaunchEffects.destroyLaunchBeams(launch)
 
 	-- GroundHit marks the exact touchdown frame, before the squishy compresses.
+	-- The thud rides the projectile itself rather than the GroundHit broadcast:
+	-- spawnGroundHitVfx is skipped entirely when its template is missing, and a
+	-- landing should still be audible.
 	local bottomCenter = targetPosition - Vector3.new(0, launch.part.Size.Y / 2, 0)
+	playLaunchEntrySound(launch.part, "LandSound", Sounds.SquishyLand, LAUNCH_LAND_SOUND_VOLUME)
 	Vfx.spawnGroundHitVfx(launchGroundHitPoint(launch, bottomCenter))
 
 	-- Landing impact is always bottom-anchored ("Top" -- see

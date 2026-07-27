@@ -6,10 +6,10 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
 
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 
 local SOUND_NAME = "ClickSound"
-local SOUND_ID = `rbxassetid://{Sounds.KeyPress}`
 local SOUND_VOLUME = 0.75
 local SOUND_GROUP_NAME = "Keyboard"
 local SOUND_LOAD_TIMEOUT = 3
@@ -41,7 +41,7 @@ local Sound = {}
 function Sound.playKeySound(key: MeshPart)
 	local sound = Instance.new("Sound")
 	sound.Name = SOUND_NAME
-	sound.SoundId = SOUND_ID
+	SoundKit.apply(sound, Sounds.KeyPress)
 	sound.Volume = SOUND_VOLUME
 	sound.SoundGroup = keyboardSoundGroup
 	sound.PlaybackSpeed = math.random(PLAYBACK_SPEED_MIN * 100, PLAYBACK_SPEED_MAX * 100) / 100

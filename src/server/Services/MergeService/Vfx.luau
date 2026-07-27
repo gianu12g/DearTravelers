@@ -45,8 +45,8 @@ end
 
 --[[
 	Placeholder-quality mini explosion at a merge's target (mergee) position --
-	ParticleEmitter burst only, no Sound (spec calls it optional and there is
-	no existing SFX asset id in this codebase to reuse without guessing one).
+	ParticleEmitter burst only, no Sound: the merge SFX is played per-client by
+	MergeVfxController off the sendMergeSquishyVfx broadcast below.
 	Parented under the pad's own MergeObjects folder per the naming rules
 	(model-naming-style.md), so it is destroyed along with everything else if
 	the pad deactivates mid-burst instead of leaking into Workspace.

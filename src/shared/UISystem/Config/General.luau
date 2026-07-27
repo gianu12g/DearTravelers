@@ -19,7 +19,7 @@ local General = {
 	GroupID = 584245985, -- ID of the group for group rewards
 	Admins = { 11068316955 }, -- List of Admin IDs for admin commands
 
-	AmbientMusic = { -- List of Music IDs which will run in the background in order
+	AmbientMusic = { -- AssetIds/Sounds entries, played in the background in order
 		Sounds.MusicLifeInAnElevator,
 		Sounds.MusicRelaxedScene,
 		Sounds.MusicShiawase,

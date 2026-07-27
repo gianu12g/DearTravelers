@@ -17,6 +17,7 @@ local SoundService = game:GetService("SoundService")
 
 local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 
 local log = Log.new("NotificationController")
@@ -28,7 +29,7 @@ export type NotificationKind = "Success" | "Error" | "Info"
 type NotificationTypeData = {
 	Background: Color3,
 	Stroke: Color3,
-	Sound: number,
+	Sound: Sounds.Entry,
 }
 
 local TYPES: { [NotificationKind]: NotificationTypeData } = {
@@ -231,7 +232,7 @@ function NotificationController.Init()
 	folder.Name = "Notifications"
 	for kind, data in TYPES do
 		local sound = Instance.new("Sound")
-		sound.SoundId = `rbxassetid://{data.Sound}`
+		SoundKit.apply(sound, data.Sound)
 		sound.Volume = 1
 		sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 		sound.Name = kind
