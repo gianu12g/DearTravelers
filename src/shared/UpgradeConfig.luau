@@ -42,8 +42,8 @@ UpgradeConfig.LOCK_COOLDOWN_REDUCTION_PER_LEVEL = 2
 -- progress.
 UpgradeConfig.COST_CURVES = {
 	SpawnTier = {
-		BaseCost = 50_000,
-		Multiplier = 2.25,
+		BaseCost = 10_000,
+		Multiplier = 3,
 	},
 	MaxSpawns = {
 		BaseCost = 250_000,

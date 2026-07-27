@@ -26,6 +26,7 @@ local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local StatusUI = require(script.Parent.StatusUI)
 local Types = require(script.Parent.Types)
+local UINotificationService = require(script.Parent.Parent.UISystem.UINotificationService)
 local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("MergeService")
@@ -347,6 +348,130 @@ function Spawning.spawnRestingPart(player: Player, live: Types.LiveBase, entry: 
 	return part
 end
 
+--[[
+	Deadlock escape valve for a full pad. Called only from trySpawnObject's
+	board-full branch below, exactly where auto-spawn would otherwise just
+	wait forever: merging requires exact tier equality (Carry.tryMergeCarry)
+	and is blocked outright at this player's rebirth cap
+	(RebirthConfig.maxModelLevel), so a full board of pairwise-distinct,
+	all-mergeable tiers has no legal pair, no free slot to auto-spawn into,
+	and no rebirth available (RebirthConfig.bestModelLevel has not reached the
+	cap -- checked explicitly below, since rebirth is the intended way out
+	whenever it IS available) -- a hard softlock with no player-initiated way
+	out.
+
+	Deliberately conservative: a rescue only fires once the SAME stuck shape
+	has been observed for MergeConfig.DEADLOCK_RESCUE_TICKS consecutive
+	auto-spawn ticks (live.deadlockStreak, ~10s at SPAWN_INTERVAL) -- a
+	confirmation window against reacting to a single snapshot taken right as
+	the board's composition changed (a merge just landed, a rebirth just
+	raised the cap), not because a genuine deadlock could ever resolve
+	itself: by definition nothing on this pad CAN merge while the conditions
+	below all hold, so requiring a repeat costs nothing.
+
+	`live.deadlockStreak` lives on the LiveBase itself, not a per-player
+	module table -- deactivateBase (base change, player leaving) discards the
+	whole `live` table, taking the counter with it for free. See
+	trySpawnObject for where it gets reset to 0 on every non-full tick.
+]]
+local function tryDeadlockRescue(player: Player, live: Types.LiveBase, data: DataService.PlayerData)
+	local maxModelLevel = RebirthConfig.maxModelLevel(data.Rebirths)
+
+	-- Rebirth guard: this player's best on-board model level already reached
+	-- the cap, so rebirth -- not a free rescue spawn -- is the intended way
+	-- off this board. Deliberately checked against the BEST entry, not "are
+	-- all entries capped": a mixed board (say {1..9} plus two duplicates
+	-- already at the cap) has no mergeable pair either, but rebirth is just
+	-- as available there, and must win the same way.
+	if RebirthConfig.bestModelLevel(data.Merge.Squishies) >= maxModelLevel then
+		live.deadlockStreak = 0
+		return
+	end
+
+	-- Tally counts per tier among MERGEABLE entries only. A capped-tier
+	-- duplicate can never merge (Carry.tryMergeCarry's own mergeLocked
+	-- check), so it must not count as a legal pair here -- and rescuing INTO
+	-- a capped tier would just recreate an equally unmergeable duplicate.
+	local mergeableCounts: { [number]: number } = {}
+	local lowestMergeableTier: number? = nil
+	for _, entry in data.Merge.Squishies do
+		if entry.Tier < maxModelLevel then
+			mergeableCounts[entry.Tier] = (mergeableCounts[entry.Tier] or 0) + 1
+			if lowestMergeableTier == nil or entry.Tier < lowestMergeableTier then
+				lowestMergeableTier = entry.Tier
+			end
+		end
+	end
+
+	if lowestMergeableTier == nil then
+		-- Every entry is already at/above this player's rebirth cap. This is
+		-- NOT the softlock this exists for -- rebirth is the intended, and
+		-- available, way forward, so do not short-circuit it with a free spawn.
+		live.deadlockStreak = 0
+		return
+	end
+
+	for _, count in mergeableCounts do
+		if count >= 2 then
+			-- A legal pair exists somewhere on the board. Carry's own
+			-- Heartbeat merge check owns resolving it; this pad isn't stuck.
+			live.deadlockStreak = 0
+			return
+		end
+	end
+
+	-- True deadlock on THIS tick: full board, no legal pair among mergeable
+	-- tiers, at least one mergeable singleton. Require it to repeat before
+	-- acting -- see this function's header.
+	live.deadlockStreak += 1
+	if live.deadlockStreak < MergeConfig.DEADLOCK_RESCUE_TICKS then
+		return
+	end
+
+	-- Same normal-spawn-path shape as trySpawnObject below (findOpenSpot ->
+	-- entry -> tableInsert -> spawnRestingPart), deliberately skipping only
+	-- the MaxSpawns gate that sent us here. Targets the LOWEST mergeable
+	-- singleton so the player's cheapest stuck object clears the deadlock,
+	-- not an arbitrary one. Sanitized lookup, same idiom as
+	-- materializeObject/pickUp (Types.luau's own tierDefFor/sanitizeTier
+	-- note): lowestMergeableTier came off a persisted entry, and a corrupted
+	-- value must not reach a raw MergeConfig.Tiers index -- a nil tierDef
+	-- would throw inside runAutoSpawnLoop, which is not pcall-wrapped,
+	-- killing auto-spawn for the rest of the session.
+	local sanitizedTier = Types.sanitizeTier(lowestMergeableTier)
+	local tierDef = Types.tierDefFor(lowestMergeableTier)
+	local x, z = Spawning.findOpenSpot(live.spawnArea, tierDef, live.parts)
+	if x == nil or z == nil then
+		-- No room even for the rescue -- skip and retry next tick rather
+		-- than forcing an overlapping placement. Streak is left at/above
+		-- threshold on purpose: the deadlock has not resolved, so the very
+		-- next tick should retry the spawn immediately, not wait for a fresh
+		-- confirmation window.
+		return
+	end
+
+	local roundedX = math.round(x * 100) / 100
+	local roundedZ = math.round(z * 100) / 100
+	local entry: Types.MergeObjectEntry = {
+		Tier = sanitizedTier,
+		X = roundedX,
+		Z = roundedZ,
+		Health = MergeConfig.healthForTier(sanitizedTier),
+	}
+
+	if DataService.tableInsert(player, { "Merge", "Squishies" }, entry) == nil then
+		return
+	end
+	Spawning.spawnRestingPart(player, live, entry)
+
+	-- The board now holds a fresh legal pair at `lowestMergeableTier` (this
+	-- rescue IS its second copy), so the very next tick's scan above would
+	-- reset this to 0 on its own -- reset here too rather than leaving a
+	-- rescue that just fired reading as "still stuck" for even one tick.
+	live.deadlockStreak = 0
+	UINotificationService.SendNotification(player, "Info", MergeConfig.DEADLOCK_RESCUE_MESSAGE)
+end
+
 function Spawning.trySpawnObject(player: Player, live: Types.LiveBase)
 	local data = DataService.getData(player)
 	if data == nil then
@@ -355,8 +480,17 @@ function Spawning.trySpawnObject(player: Player, live: Types.LiveBase)
 
 	local maxSpawns = UpgradeConfig.readValue(data, "MaxSpawns")
 	if #data.Merge.Squishies >= maxSpawns then
-		return -- pad full; auto-spawn just waits
+		-- Pad full: normally auto-spawn just waits, but a board of pairwise-
+		-- distinct mergeable tiers can get permanently stuck here (no legal
+		-- pair, no free slot, no rebirth reachable) -- see
+		-- tryDeadlockRescue's header for the softlock this escapes.
+		tryDeadlockRescue(player, live, data)
+		return
 	end
+	-- Board has room again -- any prior deadlock streak no longer describes
+	-- this board and must not carry over into a future, unrelated full-board
+	-- tick.
+	live.deadlockStreak = 0
 
 	local tier = math.min(Types.sanitizeTier(data.Merge.SpawnLevel), RebirthConfig.maxModelLevel(data.Rebirths))
 	local tierDef = MergeConfig.Tiers[tier]
@@ -461,6 +595,7 @@ function Spawning.activateBase(player: Player, baseName: string)
 			objectsFolder = folder,
 			parts = {},
 			disarmed = {},
+			deadlockStreak = 0,
 		}
 		-- Set BEFORE the restore loop below: spawnRestingPart's Touched wiring
 		-- closes over `live` and checks `liveBases[player] == live` on every
@@ -468,11 +603,21 @@ function Spawning.activateBase(player: Player, baseName: string)
 		-- touched.
 		liveBases[player] = live
 
-		-- Capped at MAX_OBJECTS even though a compliant writer never exceeds
-		-- it: profile data is attacker-influenced over a long enough time
-		-- horizon (dev console, a future migration bug), and a planted
-		-- oversized array must not materialize hundreds of Parts.
-		local restoreCount = math.min(#data.Merge.Squishies, MergeConfig.MAX_OBJECTS)
+		-- Capped at MAX_OBJECTS + 1, not MAX_OBJECTS: a compliant writer can
+		-- legitimately reach MAX_OBJECTS + 1 today, because tryDeadlockRescue
+		-- deliberately bypasses the MaxSpawns gate to append its one escape-
+		-- valve squishy onto an already-full (<= MAX_OBJECTS) board. Capping
+		-- at MAX_OBJECTS here would silently leave that legitimate 16th entry
+		-- out of `parts`/the objectsFolder while it stayed in
+		-- data.Merge.Squishies -- a data-only entry with no Part, still
+		-- counted by MaxSpawns (so spawning stays blocked) and still read as
+		-- "a legal pair exists" by tryDeadlockRescue's own scan, but with
+		-- nothing to actually merge: a worse softlock than the one that
+		-- rescue exists to fix. The +1 is still a hard ceiling, not an
+		-- invitation -- profile data remains attacker-influenced over a long
+		-- enough time horizon (dev console, a future migration bug), and a
+		-- planted oversized array must not materialize hundreds of Parts.
+		local restoreCount = math.min(#data.Merge.Squishies, MergeConfig.MAX_OBJECTS + 1)
 		for i = 1, restoreCount do
 			Spawning.spawnRestingPart(player, live, data.Merge.Squishies[i])
 		end

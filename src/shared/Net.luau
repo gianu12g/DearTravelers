@@ -127,7 +127,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			client -> server. Runs `count` immediate auto-spawn attempts on the
 			target's pad instead of waiting SPAWN_INTERVAL for each.
 
-			uint8 is not a size micro-optimisation: MAX_OBJECTS is 25, so the
+			uint8 is not a size micro-optimisation: MAX_OBJECTS is 15, so the
 			wire type itself already rules out a count that could spin the
 			server's spawn loop, before DevService clamps it again.
 		]]

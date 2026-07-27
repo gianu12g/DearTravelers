@@ -84,8 +84,11 @@ local TEMPLATE = {
 		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number } },
 		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
 		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling;
-		-- MaxSpawns is the per-player capacity within it. LockBase stores its
-		-- upgrade level; each purchased level shortens the post-lock cooldown.
+		-- MaxSpawns is the per-player capacity within it, except for the one
+		-- transient MAX_OBJECTS + 1 entry MergeService.Spawning.tryDeadlockRescue
+		-- may append onto an already-full board (see that function's own
+		-- header). LockBase stores its upgrade level; each purchased level
+		-- shortens the post-lock cooldown.
 		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
 		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,
 		-- Trusted server time used to calculate the next offline-income grant.
@@ -448,6 +451,13 @@ local function repairProfileData(data: any)
 	end
 	data.Inventory = inventory
 
+	-- Also the natural cleanup for an un-merged deadlock-rescue spawn
+	-- (MergeService.Spawning.tryDeadlockRescue): that rescue is always
+	-- APPENDED, so it is always the last (highest-index) entry a still-full
+	-- board could have. Keeping the FIRST MAX_OBJECTS entries and dropping
+	-- the rest therefore always drops the rescue spawn specifically, never an
+	-- arbitrary pre-existing one -- and the rescue's own trigger simply
+	-- re-fires next session if the board is still deadlocked.
 	local compactSquishies = {}
 	for _, entry in data.Merge.Squishies do
 		if #compactSquishies >= MergeConfig.MAX_OBJECTS then

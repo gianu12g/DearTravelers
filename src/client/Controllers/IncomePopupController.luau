@@ -156,7 +156,12 @@ end
 local function releasePopup(popup: Popup)
 	popup.billboard.Enabled = false
 	popup.billboard.Adornee = nil
-	if #popupPool < MergeConfig.MAX_OBJECTS then
+	-- MAX_OBJECTS + 1, not MAX_OBJECTS: a deadlock rescue (server-side
+	-- Spawning.tryDeadlockRescue) can transiently hold a pad at 16 live
+	-- squishies, and capping the pool at 15 would destroy-and-recreate one
+	-- BillboardGui every single pulse for as long as that 16th squishy is on
+	-- the board.
+	if #popupPool < MergeConfig.MAX_OBJECTS + 1 then
 		table.insert(popupPool, popup)
 	else
 		popup.billboard:Destroy()
@@ -208,7 +213,8 @@ end
 
 --[[
 	One authoritative pulse, one snapshot of the local player's current base.
-	No cached Part list is needed: MAX_OBJECTS bounds this to 25 children once
+	No cached Part list is needed: MAX_OBJECTS bounds this to 15 children (16
+	while a deadlock rescue is pending -- see Spawning.tryDeadlockRescue) once
 	per second, and reading the folder live is what makes a newly spawned or
 	merged model automatically share the next pulse.
 

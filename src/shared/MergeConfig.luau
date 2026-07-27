@@ -28,6 +28,22 @@ local MergeConfig = {}
 
 MergeConfig.MAX_OBJECTS = 15
 MergeConfig.SPAWN_INTERVAL = 5 -- seconds between auto-spawn attempts, per pad
+-- Deadlock rescue (Spawning.tryDeadlockRescue): a true deadlock -- board
+-- full, no legal merge pair among mergeable-tier entries -- must be observed
+-- on this many CONSECUTIVE auto-spawn ticks (each SPAWN_INTERVAL apart)
+-- before Spawning force-spawns one escape-valve squishy, bypassing the
+-- MaxSpawns gate. Requiring two ticks (~10s) rather than acting on the first
+-- is a confirmation window against a one-tick snapshot taken right as the
+-- board's composition changed (a merge just landed, a rebirth just raised
+-- the cap) -- costless, since a deadlock still real one tick later is not
+-- going anywhere on its own regardless. The dev-console spawn burst
+-- (Damage.spawnSquishies looping trySpawnObject with no task.wait between
+-- calls) collapses this ~10s window into consecutive loop iterations
+-- instead -- benign, since it still only ever produces at most one rescue
+-- per burst.
+MergeConfig.DEADLOCK_RESCUE_TICKS = 2
+-- Cozy toast sent alongside the rescue spawn (UINotificationService "Info").
+MergeConfig.DEADLOCK_RESCUE_MESSAGE = "Your pad was stuck, so a partner Squishy appeared!"
 -- Historical name: this is the maximum MODEL LEVEL stored in entry.Tier.
 MergeConfig.MAX_TIER = RebirthConfig.MAX_MODEL_LEVEL
 

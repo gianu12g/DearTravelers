@@ -40,7 +40,10 @@
 	CAPACITY: auto-spawn simply stops writing once a pad reaches that player's
 	persisted MaxSpawns upgrade. MergeConfig.MAX_OBJECTS remains the absolute
 	safety ceiling for profile repair/restoration. No error, no queue -- the pad
-	just waits until Phase 2 frees a slot.
+	just waits until Phase 2 frees a slot. The one deliberate exception is
+	Spawning.tryDeadlockRescue, which bypasses the MaxSpawns gate (never
+	MAX_OBJECTS) to append a single escape-valve squishy onto a
+	confirmed-deadlocked full board.
 
 	PHASE 2 -- CARRY/MERGE/DROP:
 
