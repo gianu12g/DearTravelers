@@ -275,6 +275,14 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			}),
 		}),
 
+		-- Server -> launching client only. The impact particles remain a
+		-- mergeLaunchVfx broadcast, but the accompanying pop is private to
+		-- whoever initiated the launch instead of a replicated server Sound
+		-- that every player hears.
+		mergeLaunchExplosionSound = ByteNet.definePacket({
+			value = ByteNet.nothing,
+		}),
+
 		--[[
 			server -> every client. "Two squishies just merged here." Same
 			replication-race argument as mergeLaunchVfx: Emit() is transient, so

@@ -30,6 +30,7 @@ local LaunchEffects = require(script.Parent.LaunchEffects)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
+local Net = require(ReplicatedStorage.Shared.Net)
 local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local Spawning = require(script.Parent.Spawning)
@@ -54,12 +55,9 @@ local activeLaunches: { [Player]: Types.LaunchState } = nil :: any
 
 local LAUNCH_SOUND_LIFETIME = 10
 -- Touchdown thud, played whether the drop hit the map surface or was stopped
--- by a base forcefield -- both resolve to the same landing frame below. Any
--- head trim on these two lives on their AssetIds/Sounds entry, not here.
+-- by a base forcefield -- both resolve to the same landing frame below. Its
+-- head trim lives on the AssetIds/Sounds entry, not here.
 local LAUNCH_LAND_SOUND_VOLUME = 2
--- The pop, fired from the same call as the explosion burst so the two land on
--- the same frame instead of drifting apart across the impact squash.
-local LAUNCH_EXPLOSION_SOUND_VOLUME = 2
 
 -- Drop spawn squish: the same press feel Mush gives a carried squishy
 -- (MushController's COMPRESS_SCALE/SPREAD_SCALE/SQUASH_IN/SQUASH_HOLD/
@@ -487,12 +485,13 @@ end
 
 -- Explosion fires during the landing rebound at explosionPosAtt. GroundHit is
 -- sent separately at touchdown, before the landing squash begins.
-local function explodeDroppedSquishy(launch: Types.LaunchState, position: Vector3)
+local function explodeDroppedSquishy(player: Player, launch: Types.LaunchState, position: Vector3)
 	local explosionPosition = launchVfxPoint(launch, LAUNCH_EXPLOSION_ATTACHMENT_NAME, position)
 	LaunchEffects.hideLaunchVisual(launch)
-	-- hideLaunchVisual only zeroes Transparency, so the part is still a live
-	-- sound anchor here; finishLaunch is what eventually cleans it up.
-	playLaunchEntrySound(launch.part, "ExplosionSound", Sounds.SquishyPop, LAUNCH_EXPLOSION_SOUND_VOLUME)
+	-- The particles remain visible to every observer, but the pop is private
+	-- to the player who initiated the launch. A server-created Sound under
+	-- this replicated projectile made every client hear it.
+	Net.mergeLaunchExplosionSound.sendTo(nil, player)
 	Vfx.spawnLaunchImpactVfx(explosionPosition)
 end
 
@@ -598,7 +597,7 @@ local function runLaunch(player: Player, launch: Types.LaunchState, targetPositi
 		LAUNCH_IMPACT_SQUASH_HOLD,
 		LAUNCH_IMPACT_SQUASH_OUT,
 		function()
-			explodeDroppedSquishy(launch, targetPosition)
+			explodeDroppedSquishy(player, launch, targetPosition)
 		end
 	)
 	if not impactSquishOk then

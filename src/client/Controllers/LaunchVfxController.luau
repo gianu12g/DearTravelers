@@ -6,20 +6,29 @@
 	only that cosmetic event. Cloning and ParticleEmitter:Emit() happen here so
 	the one-shot cannot race a newly-replicated server clone. Every emitter stays
 	disabled; its authored EmitCount and EmitDelay attributes drive the burst.
+
+	The explosion pop is also created here, but from a separate packet sent
+	only to the player who launched. Other observers still see the impact
+	particles without hearing a globally replicated server Sound.
 ]]
 
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
 local AuthoredVfx = require(ReplicatedStorage.Shared.AuthoredVfx)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
+local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 
 local log = Log.new("LaunchVfxController")
 local VFX_LINGER = 0.5
+local EXPLOSION_SOUND_VOLUME = 2
+local SOUND_LIFETIME = 10
 local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 	motion = true,
 	offsets = true,
@@ -29,6 +38,17 @@ local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 local launchVfxFolder = ReplicatedStorage.Assets.VFX.LaunchExplosion
 
 local LaunchVfxController = {}
+
+local function playExplosionSound()
+	local sound = Instance.new("Sound")
+	sound.Name = "LaunchExplosionSound"
+	sound.Volume = EXPLOSION_SOUND_VOLUME
+	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+	SoundKit.apply(sound, Sounds.SquishyPop)
+	sound.Parent = SoundService
+	Debris:AddItem(sound, SOUND_LIFETIME)
+	sound:Play()
+end
 
 local function scaleLaunchVfx(root: Instance, effectMultiplier: number?)
 	local multiplier = MergeConfig.LAUNCH_VFX_SCALE * (effectMultiplier or 1)
@@ -95,6 +115,7 @@ function LaunchVfxController.Init()
 	Net.mergeLaunchVfx.listen(function(data)
 		play(data.templateName, Vector3.new(data.worldX, data.worldY, data.worldZ))
 	end)
+	Net.mergeLaunchExplosionSound.listen(playExplosionSound)
 end
 
 function LaunchVfxController.Start()

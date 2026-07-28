@@ -12,8 +12,9 @@
 	Every emitter in the pack stays disabled; its authored EmitCount/EmitDelay
 	attributes drive the one-shot (see Shared.AuthoredVfx).
 
-	The merge SFX rides the same broadcast, so every observer hears the pop
-	where it happened.
+	The merge SFX rides the same broadcast but is instantiated locally with an
+	explicit short 3D rolloff, so nearby observers hear where it happened and
+	distant players do not hear a map-wide pop.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -42,6 +43,8 @@ local MERGE_SOUND_ENTRIES: { Sounds.Entry } = {
 	Sounds.MergeSquishyB,
 }
 local MERGE_SOUND_VOLUME = 1
+local MERGE_SOUND_MIN_DISTANCE = 8
+local MERGE_SOUND_MAX_DISTANCE = 80
 -- Same generous fixed cleanup window MushController uses: covers the whole clip
 -- (and a SoundId that never loads, so Ended never fires) without a Length wait.
 local MERGE_SOUND_LIFETIME = 10
@@ -101,6 +104,9 @@ local function playMergeSound(position: Vector3)
 	local sound = Instance.new("Sound")
 	sound.Name = "MergeSound"
 	sound.Volume = MERGE_SOUND_VOLUME
+	sound.RollOffMode = Enum.RollOffMode.InverseTapered
+	sound.RollOffMinDistance = MERGE_SOUND_MIN_DISTANCE
+	sound.RollOffMaxDistance = MERGE_SOUND_MAX_DISTANCE
 	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 	SoundKit.apply(sound, MERGE_SOUND_ENTRIES[math.random(#MERGE_SOUND_ENTRIES)])
 	sound.Parent = anchor
