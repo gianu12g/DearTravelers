@@ -19,7 +19,6 @@
 
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
 local AuthoredVfx = require(ReplicatedStorage.Shared.AuthoredVfx)
@@ -43,11 +42,6 @@ local MERGE_SOUND_ENTRIES: { Sounds.Entry } = {
 	Sounds.MergeSquishyB,
 }
 local MERGE_SOUND_VOLUME = 1
-local MERGE_SOUND_MIN_DISTANCE = 8
-local MERGE_SOUND_MAX_DISTANCE = 80
--- Same generous fixed cleanup window MushController uses: covers the whole clip
--- (and a SoundId that never loads, so Ended never fires) without a Length wait.
-local MERGE_SOUND_LIFETIME = 10
 local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 	motion = true,
 	offsets = true,
@@ -82,37 +76,18 @@ local function isMergePopTemplate(template: Instance): boolean
 	return template:FindFirstChildWhichIsA("ParticleEmitter", true) ~= nil
 end
 
---[[
-	The pop SFX gets its own anchored, inert emitter Part instead of riding the
-	cosmetic burst clone: `play` bails out entirely when a player's Merge Pop
-	template is missing or malformed, and a merge should still be audible then.
-	A fresh Sound per merge lets rapid merges layer instead of restarting one.
-]]
+-- `play` bails out entirely when a player's Merge Pop template is missing or
+-- malformed, and a merge should still be audible then -- SoundKit.playAt
+-- builds its own anchor independent of the cosmetic burst clone, so a fresh
+-- Sound per merge still lets rapid merges layer instead of restarting one.
 local function playMergeSound(position: Vector3)
-	local anchor = Instance.new("Part")
-	anchor.Name = "MergeSoundEmitter"
-	anchor.Anchored = true
-	anchor.CanCollide = false
-	anchor.CanTouch = false
-	anchor.CanQuery = false
-	anchor.CastShadow = false
-	anchor.Transparency = 1
-	anchor.Size = Vector3.one * 0.2
-	anchor.CFrame = CFrame.new(position)
-	anchor.Parent = Workspace
-
-	local sound = Instance.new("Sound")
-	sound.Name = "MergeSound"
-	sound.Volume = MERGE_SOUND_VOLUME
-	sound.RollOffMode = Enum.RollOffMode.InverseTapered
-	sound.RollOffMinDistance = MERGE_SOUND_MIN_DISTANCE
-	sound.RollOffMaxDistance = MERGE_SOUND_MAX_DISTANCE
-	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
-	SoundKit.apply(sound, MERGE_SOUND_ENTRIES[math.random(#MERGE_SOUND_ENTRIES)])
-	sound.Parent = anchor
-
-	Debris:AddItem(anchor, MERGE_SOUND_LIFETIME)
-	sound:Play()
+	SoundKit.playAt(
+		position,
+		"MergeSound",
+		MERGE_SOUND_ENTRIES[math.random(#MERGE_SOUND_ENTRIES)],
+		MERGE_SOUND_VOLUME,
+		SoundKit.Profiles.LOCAL_POP
+	)
 end
 
 local function play(templateName: string, position: Vector3)

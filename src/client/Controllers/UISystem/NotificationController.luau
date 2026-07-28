@@ -233,8 +233,11 @@ function NotificationController.Init()
 	for kind, data in TYPES do
 		local sound = Instance.new("Sound")
 		SoundKit.apply(sound, data.Sound)
+		-- Non-spatial (SoundKit.Profiles.UI): parented to a Folder under
+		-- SoundService, not a BasePart, so no RollOff* property applies.
+		SoundKit.applyProfile(sound, SoundKit.Profiles.UI)
 		sound.Volume = 1
-		sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+		sound.SoundGroup = SoundKit.getSoundGroup("SFX")
 		sound.Name = kind
 		sound.Parent = folder
 	end

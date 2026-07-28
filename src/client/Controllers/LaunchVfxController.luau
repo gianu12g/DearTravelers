@@ -1,20 +1,25 @@
 --!strict
 --[[
-	Renders the two authored launch landing bursts locally for every observer.
+	Renders the two authored launch landing bursts locally for every observer,
+	and plays the launch sequence's audio (mush materialize, touchdown thud,
+	explosion) off the separate Net.mergeLaunchAudio broadcast.
 
 	The server owns when and where GroundHit/Explosion happen and broadcasts
 	only that cosmetic event. Cloning and ParticleEmitter:Emit() happen here so
 	the one-shot cannot race a newly-replicated server clone. Every emitter stays
 	disabled; its authored EmitCount and EmitDelay attributes drive the burst.
 
-	The explosion pop rides the same broadcast and is instantiated locally at
-	the impact position with short 3D rolloff. Nearby observers hear it, while
-	distant players do not hear a map-wide replicated Sound.
+	Audio is intentionally NOT bundled onto this broadcast: mergeLaunchVfx (and
+	the equivalent GroundHit send) skip sending entirely when their authored
+	template is missing, and a launch should still be audible then -- see
+	Net.mergeLaunchAudio's own header note. All three launch sounds use
+	SoundKit.Profiles.LAUNCH_IMPACT: they have to carry across the whole map
+	(a launch always lands at ANOTHER player's base, never closer than ~145
+	studs on this map's 8-base ring), not just to nearby observers.
 ]]
 
 local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
 local AuthoredVfx = require(ReplicatedStorage.Shared.AuthoredVfx)
@@ -28,9 +33,7 @@ local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 local log = Log.new("LaunchVfxController")
 local VFX_LINGER = 0.5
 local EXPLOSION_SOUND_VOLUME = 2
-local EXPLOSION_SOUND_MIN_DISTANCE = 8
-local EXPLOSION_SOUND_MAX_DISTANCE = 80
-local SOUND_LIFETIME = 10
+local LAND_SOUND_VOLUME = 2
 local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 	motion = true,
 	offsets = true,
@@ -40,19 +43,6 @@ local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 local launchVfxFolder = ReplicatedStorage.Assets.VFX.LaunchExplosion
 
 local LaunchVfxController = {}
-
-local function playExplosionSound(anchor: BasePart)
-	local sound = Instance.new("Sound")
-	sound.Name = "LaunchExplosionSound"
-	sound.Volume = EXPLOSION_SOUND_VOLUME
-	sound.RollOffMode = Enum.RollOffMode.InverseTapered
-	sound.RollOffMinDistance = EXPLOSION_SOUND_MIN_DISTANCE
-	sound.RollOffMaxDistance = EXPLOSION_SOUND_MAX_DISTANCE
-	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
-	SoundKit.apply(sound, Sounds.SquishyPop)
-	sound.Parent = anchor
-	sound:Play()
-end
 
 local function scaleLaunchVfx(root: Instance, effectMultiplier: number?)
 	local multiplier = MergeConfig.LAUNCH_VFX_SCALE * (effectMultiplier or 1)
@@ -78,8 +68,7 @@ local function playExplosion(template: Attachment, position: Vector3)
 	explosion.Parent = anchor
 	scaleLaunchVfx(explosion, MergeConfig.LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER)
 
-	playExplosionSound(anchor)
-	Debris:AddItem(anchor, math.max(AuthoredVfx.emitBurst(explosion) + VFX_LINGER, SOUND_LIFETIME))
+	Debris:AddItem(anchor, AuthoredVfx.emitBurst(explosion) + VFX_LINGER)
 end
 
 local function playGroundHit(template: BasePart, position: Vector3)
@@ -116,9 +105,38 @@ local function play(templateName: string, position: Vector3)
 	end
 end
 
+-- See Net.mergeLaunchAudio's header: "Mush" carries a raw per-tier soundId
+-- (no client-visible AssetIds entry exists for it), while "Land" and
+-- "Explosion" resolve their own entry from the shared Sounds table, same as
+-- every other AssetIds-backed sound in this codebase.
+local function playLaunchAudio(kind: string, soundId: string, soundVolume: number, position: Vector3)
+	if kind == "Mush" then
+		if soundId == "" then
+			return
+		end
+		SoundKit.playAtId(position, "MushSound", soundId, nil, soundVolume, SoundKit.Profiles.LAUNCH_IMPACT)
+	elseif kind == "Land" then
+		SoundKit.playAt(position, "LandSound", Sounds.SquishyLand, LAND_SOUND_VOLUME, SoundKit.Profiles.LAUNCH_IMPACT)
+	elseif kind == "Explosion" then
+		SoundKit.playAt(
+			position,
+			"LaunchExplosionSound",
+			Sounds.SquishyPop,
+			EXPLOSION_SOUND_VOLUME,
+			SoundKit.Profiles.LAUNCH_IMPACT
+		)
+	else
+		log.warn(`unknown launch audio kind "{kind}"`)
+	end
+end
+
 function LaunchVfxController.Init()
 	Net.mergeLaunchVfx.listen(function(data)
 		play(data.templateName, Vector3.new(data.worldX, data.worldY, data.worldZ))
+	end)
+
+	Net.mergeLaunchAudio.listen(function(data)
+		playLaunchAudio(data.kind, data.soundId, data.soundVolume, Vector3.new(data.worldX, data.worldY, data.worldZ))
 	end)
 end
 

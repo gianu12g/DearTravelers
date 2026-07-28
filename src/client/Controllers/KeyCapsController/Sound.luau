@@ -4,7 +4,6 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
 
 local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
@@ -16,22 +15,14 @@ local SOUND_LOAD_TIMEOUT = 3
 local PLAYBACK_SPEED_MIN = 1
 local PLAYBACK_SPEED_MAX = 1.2
 
-local function getKeyboardSoundGroup(): SoundGroup
-	local existing = SoundService:FindFirstChild(SOUND_GROUP_NAME)
-	if existing ~= nil then
-		if not existing:IsA("SoundGroup") then
-			error(`SoundService.{SOUND_GROUP_NAME} must be a SoundGroup, got {existing.ClassName}`, 0)
-		end
-		return existing
-	end
-
-	local group = Instance.new("SoundGroup")
-	group.Name = SOUND_GROUP_NAME
-	group.Parent = SoundService
-	return group
-end
-
-local keyboardSoundGroup = getKeyboardSoundGroup()
+-- Resolved once at module load, same as before, but through SoundKit's shared
+-- resolver rather than a hand-rolled lookup: it warns once instead of
+-- hard-erroring the whole script if "Keyboard" is ever missing/misconfigured,
+-- and creates the client-side fallback the same way AmbientMusicController
+-- does for "Music" -- see SoundKit.getSoundGroup's own header note on why
+-- that fallback is client-only. Everything below this (Ended/Stopped +
+-- timeout cleanup, PlaybackSpeed randomisation) is untouched.
+local keyboardSoundGroup = SoundKit.getSoundGroup(SOUND_GROUP_NAME)
 
 local Sound = {}
 

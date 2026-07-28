@@ -11,11 +11,9 @@
 	detection remains stable throughout the effect.
 ]]
 
-local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -23,6 +21,7 @@ local Workspace = game:GetService("Workspace")
 local Log = require(ReplicatedStorage.Shared.Log)
 local Motion = require(script.Parent.Parent.UI.Motion)
 local Net = require(ReplicatedStorage.Shared.Net)
+local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 
 local log = Log.new("MushController")
 
@@ -34,7 +33,6 @@ local SQUASH_IN = TweenInfo.new(0.16, Enum.EasingStyle.Sine, Enum.EasingDirectio
 local SQUASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 local SQUASH_HOLD = 0.08
 local REQUEST_TIMEOUT = 1
-local SOUND_LIFETIME = 10
 local COOLDOWN_FALLBACK = 5
 local HIDDEN_COOLDOWN_TEXT = ""
 local INSTRUCTION_FADE_DELAY = 1
@@ -107,19 +105,16 @@ local function findCarriedRoot(): BasePart?
 	return nil
 end
 
+-- Carried right in front of the player, so LOCAL_POP's tight falloff (8/80)
+-- is ample -- this is a deliberate behaviour change from the previous
+-- unlimited-range rolloff (SoundId was assigned raw, with no RollOffMode at
+-- all, so the engine default Inverse had no cutoff) down to 80 studs.
 local function playMushSound(root: BasePart, soundId: string, volume: number)
 	if soundId == "" then
 		return
 	end
 
-	local sound = Instance.new("Sound")
-	sound.Name = "MushSound"
-	sound.SoundId = soundId
-	sound.Volume = math.clamp(volume, 0, 10)
-	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
-	sound.Parent = root
-	Debris:AddItem(sound, SOUND_LIFETIME)
-	sound:Play()
+	SoundKit.playOnId(root, "MushSound", soundId, nil, math.clamp(volume, 0, 10), SoundKit.Profiles.LOCAL_POP)
 end
 
 local function squashGeometry(root: BasePart, direction: string): (Vector3, Vector3)

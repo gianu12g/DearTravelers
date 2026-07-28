@@ -35,7 +35,6 @@ local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
@@ -87,11 +86,13 @@ end
 
 -- Built once per decorated item and replayed on every hover/click, so the
 -- entry's head trim has to be a playback region rather than a per-play seek --
--- see AssetIds/SoundKit.
+-- see AssetIds/SoundKit. Non-spatial (SoundKit.Profiles.UI): `item` is a
+-- GuiObject, not a BasePart, so no RollOff* property would mean anything.
 local function makeSound(item: Instance, entry: Sounds.Entry): Sound
 	local sound = Instance.new("Sound")
 	SoundKit.apply(sound, entry)
-	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
+	SoundKit.applyProfile(sound, SoundKit.Profiles.UI)
+	sound.SoundGroup = SoundKit.getSoundGroup("SFX")
 	sound.Parent = item
 	return sound
 end

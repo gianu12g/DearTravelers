@@ -154,6 +154,48 @@ function Vfx.spawnGroundHitVfx(position: Vector3)
 end
 
 --[[
+	Launch-sequence audio (mush materialize, touchdown thud, explosion), sent
+	independently of spawnLaunchImpactVfx/spawnGroundHitVfx above: both of
+	those early-return when their authored VFX template is missing, and a
+	launch should still be audible even then -- see Net.mergeLaunchAudio's own
+	header note and MergeService.Launch's comment on why the thud was already
+	pulled off the VFX broadcast for exactly this reason.
+]]
+local function sendLaunchAudio(kind: string, position: Vector3, soundId: string, soundVolume: number)
+	Net.mergeLaunchAudio.sendToAll({
+		kind = kind,
+		soundId = soundId,
+		soundVolume = soundVolume,
+		worldX = position.X,
+		worldY = position.Y,
+		worldZ = position.Z,
+	})
+end
+
+-- Per-tier mush sound: id and volume come off the model template's own
+-- attributes (MergeObjectVisuals.getMushSound), not from AssetIds, so they
+-- have to cross the wire raw -- there is no client-visible entry to name
+-- instead. A no-op when the tier authored no sound.
+function Vfx.sendLaunchMushAudio(position: Vector3, soundId: string, soundVolume: number)
+	if soundId == "" then
+		return
+	end
+	sendLaunchAudio("Mush", position, soundId, soundVolume)
+end
+
+-- Touchdown thud. The client already has Sounds.SquishyLand, so it resolves
+-- the entry itself from `kind`; only the impact position is server-owned.
+function Vfx.sendLaunchLandAudio(position: Vector3)
+	sendLaunchAudio("Land", position, "", 0)
+end
+
+-- The squishy's own Explosion pop, pinned to explosionPosAtt on its body.
+-- Same resolve-from-`kind` shape as sendLaunchLandAudio.
+function Vfx.sendLaunchExplosionAudio(position: Vector3)
+	sendLaunchAudio("Explosion", position, "", 0)
+end
+
+--[[
 	The authored merge burst, broadcast for the same reason as the launch packs
 	-- see sendLaunchVfx. Plays on top of spawnMergeVfx's procedural pop rather
 	than replacing it; the template lookup is checked at boot (Start) so a

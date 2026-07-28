@@ -276,6 +276,34 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		}),
 
 		--[[
+			server -> every client. One launch-sequence sound: mush materialize,
+			touchdown thud, or explosion. Sent independently of mergeLaunchVfx on
+			purpose -- MergeService.Launch documents that the thud was deliberately
+			pulled off the VFX broadcast because Vfx.spawnLaunchImpactVfx (and the
+			equivalent GroundHit send) early return when their authored template is
+			missing, and a launch should still be audible then. All three sounds
+			share this shape so the client can play every one of them the same way
+			(SoundKit.playAt with the LAUNCH_IMPACT profile).
+
+			`kind` selects which sound: "Mush" | "Land" | "Explosion". Only "Mush"
+			uses `soundId`/`soundVolume` -- that one is authored per tier on a
+			ServerStorage-only template attribute (MergeObjectVisuals.getMushSound),
+			so there is no client-visible AssetIds entry for it to look up, unlike
+			Land (Sounds.SquishyLand) and Explosion (Sounds.SquishyPop), which the
+			client already has and resolves itself from `kind`.
+		]]
+		mergeLaunchAudio = ByteNet.definePacket({
+			value = ByteNet.struct({
+				kind = ByteNet.string,
+				soundId = ByteNet.string,
+				soundVolume = ByteNet.float64,
+				worldX = ByteNet.float64,
+				worldY = ByteNet.float64,
+				worldZ = ByteNet.float64,
+			}),
+		}),
+
+		--[[
 			server -> every client. "Two squishies just merged here." Same
 			replication-race argument as mergeLaunchVfx: Emit() is transient, so
 			the server sends only the position and every client clones the
