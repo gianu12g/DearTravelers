@@ -6,9 +6,10 @@
 	everything else has settled.
 
 	PORT-SPEC.md §6.2 / this task: SoundService.Music is expected to already
-	exist in the target place, but creates one as a fallback if it doesn't,
-	so a missing SoundGroup degrades to "plays without a mixer bus" instead
-	of erroring the whole controller.
+	exist in the target place. Resolved through SoundKit.getSoundGroup, which
+	creates one as a client-side fallback if it doesn't, so a missing
+	SoundGroup degrades to "plays without a mixer bus" instead of erroring the
+	whole controller.
 
 	Bug fixed in passing: the source named its per-track container Folder
 	"Music" -- the SAME name as the SoundGroup it plays through, so
@@ -30,14 +31,7 @@ local log = Log.new("AmbientMusicController")
 local AmbientMusicController = {}
 
 function AmbientMusicController.Start()
-	local musicGroup = SoundService:FindFirstChild("Music")
-	if musicGroup == nil or not musicGroup:IsA("SoundGroup") then
-		log.warn("SoundService.Music SoundGroup missing -- creating one as a fallback")
-		local group = Instance.new("SoundGroup")
-		group.Name = "Music"
-		group.Parent = SoundService
-		musicGroup = group
-	end
+	local musicGroup = SoundKit.getSoundGroup("Music")
 
 	local tracksFolder = Instance.new("Folder")
 	tracksFolder.Name = "AmbientMusicTracks"
@@ -47,7 +41,7 @@ function AmbientMusicController.Start()
 		local track = Instance.new("Sound")
 		SoundKit.apply(track, entry)
 		track.Name = tostring(index)
-		track.SoundGroup = musicGroup :: SoundGroup
+		track.SoundGroup = musicGroup
 		track.Parent = tracksFolder
 		table.insert(tracks, track)
 	end

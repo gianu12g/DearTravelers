@@ -18,9 +18,13 @@
 	named rolloff profiles, SoundGroup resolution, one-shot lifetime -- so the
 	~8-line `Instance.new("Sound")` block that used to be copy-pasted at every
 	call site (LaunchVfxController, MergeVfxController, MushController,
-	MergeService.Launch, UIKitController, NotificationController) collapses
-	into one function call each. See `Profiles` for the named rolloff presets
-	and `playOn`/`playAt`/`playOnId`/`playAtId` for the one-shot helpers.
+	UIKitController, NotificationController) collapses into one function call
+	each. MergeService.Launch used to be on this list too, but the launch
+	sounds moved off the server entirely: it now only broadcasts
+	Net.mergeLaunchAudio, and LaunchVfxController -- already above -- is what
+	plays them, through this same module, on the client. See `Profiles` for
+	the named rolloff presets and `playOn`/`playAt`/`playOnId`/`playAtId` for
+	the one-shot helpers.
 
 	A plain module (Loader ignores it, ARCHITECTURE.md Recipe 3).
 ]]
@@ -109,9 +113,7 @@ local warnedGroups: { [string]: boolean } = {}
 
 --[[
 	Looks up a SoundGroup under SoundService by name, warning ONCE if it is
-	absent instead of returning nil silently -- mirrors
-	Controllers/UISystem/AmbientMusicController.luau's own fallback (see its
-	header note).
+	absent instead of returning nil silently.
 
 	The server must never create the group itself: SoundService replicates,
 	so a server-side `Instance.new("SoundGroup")` would create a SECOND group
@@ -119,8 +121,8 @@ local warnedGroups: { [string]: boolean } = {}
 	place's own SFX/Music/Keyboard groups are expected to already exist by the
 	time a server Sound needs one, and a server that "fixes" a missing one
 	only duplicates it for every client. A client missing the group creates
-	one locally as a fallback instead, same as AmbientMusicController does for
-	"Music".
+	one locally as a fallback instead -- AmbientMusicController's "Music" and
+	KeyCaps' "Keyboard" both rely on this.
 ]]
 function SoundKit.getSoundGroup(groupName: string): SoundGroup?
 	local existing = SoundService:FindFirstChild(groupName)
