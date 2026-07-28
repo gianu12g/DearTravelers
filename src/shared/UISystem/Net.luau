@@ -166,5 +166,56 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		settingUpdate = ByteNet.definePacket({
 			value = ByteNet.struct({ key = ByteNet.string, value = ByteNet.float64 }),
 		}),
+
+		--[[
+			client -> server. ThemeShop's primary button action. The server
+			redeems one existing voucher for an unowned cosmetic, prompts when
+			that balance is zero, or asks for a second confirmation click before
+			buying another voucher from an owned card. The slot/id never
+			participate in receipt routing.
+		]]
+		voucherPurchase = ByteNet.definePacket({
+			value = ByteNet.struct({
+				slot = ByteNet.string,
+				id = ByteNet.string,
+			}),
+		}),
+
+		--[[
+			client -> server. Gift-confirm action. With a voucher available,
+			the server durably reserves it and queues a transfer to this player.
+			With no voucher, it prompts the gift-voucher product but deliberately
+			does NOT persist/use the target until the client confirms again after
+			the receipt has replicated the new balance.
+		]]
+		voucherGift = ByteNet.definePacket({
+			value = ByteNet.struct({
+				targetUserId = ByteNet.float64,
+				requestId = ByteNet.string,
+			}),
+		}),
+
+		-- server -> client. requestId prevents a delayed response from an older
+		-- transfer from closing a newer recipient confirmation.
+		voucherGiftResult = ByteNet.definePacket({
+			value = ByteNet.struct({
+				ok = ByteNet.bool,
+				requestId = ByteNet.string,
+			}),
+		}),
+
+		--[[
+			client -> server. Ask to buy a ThemeShop cosmetic with Cash
+			(CoinsService) instead of Robux, for the sender. No purchase
+			prompt and no durable intent needed -- CoinsService.trySpend and
+			CosmeticsService.grant both happen inside one yield-free server
+			handler, so there is no window a receipt could arrive into later.
+		]]
+		cosmeticCashBuy = ByteNet.definePacket({
+			value = ByteNet.struct({
+				slot = ByteNet.string,
+				id = ByteNet.string,
+			}),
+		}),
 	}
 end)

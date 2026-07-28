@@ -23,6 +23,7 @@
 ]]
 
 local MarketplaceService = game:GetService("MarketplaceService")
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -57,15 +58,21 @@ local FOV_CLOSE = 70
 local BLUR_SIZE = 40
 
 type GiftData = {
-	GiftType: "Pass" | "Product",
+	GiftType: "Pass" | "Product" | "Voucher",
 	GiftName: string,
 	GiftTarget: number,
+	-- Which frame opened the picker, so its Close button returns there
+	-- instead of always going to "Shop" -- ThemeShopController reuses this
+	-- same picker (StartVoucherGiftPrompt below), and closing it should not
+	-- strand the player on an unrelated frame.
+	OriginFrame: Frames.FrameName,
 }
 
 local giftData: GiftData = {
 	GiftType = "Pass",
 	GiftName = "",
 	GiftTarget = 0,
+	OriginFrame = "Shop",
 }
 
 local priceCache: { [ItemType]: { [number]: number } } = {
@@ -82,8 +89,26 @@ local giftedPasses: { [string]: boolean } = {}
 local ownedPacks: { string } = {}
 local passButtons: { { button: GuiButton, name: string } } = {}
 local packButtons: { { button: GuiButton, name: string } } = {}
+local voucherCount = 0
+local voucherTransferPending = false
+local voucherActiveRequestId: string? = nil
+local voucherConfirmLabel: TextLabel? = nil
 
 local MonetizationController = {}
+
+local function updateVoucherConfirmLabel()
+	local label = voucherConfirmLabel
+	if label == nil or giftData.GiftType ~= "Voucher" then
+		return
+	end
+	if voucherTransferPending then
+		label.Text = "SENDING..."
+	elseif voucherCount > 0 then
+		label.Text = "SEND"
+	else
+		label.Text = "BUY"
+	end
+end
 
 local function fetchPrice(id: number, itemType: ItemType): number?
 	local cache = priceCache[itemType]
@@ -289,6 +314,7 @@ function MonetizationController.SetPassGiftButton(button: GuiButton, passName: s
 	button.MouseButton1Click:Connect(function()
 		giftData.GiftType = "Pass"
 		giftData.GiftName = passName
+		giftData.OriginFrame = "Shop"
 		local frame = Frames.get("GiftPlayerChoose")
 		local main = frame:WaitForChild("Main")
 		local holder = main:WaitForChild("Holder")
@@ -307,6 +333,7 @@ function MonetizationController.SetProductGiftButton(button: GuiButton, productN
 	button.MouseButton1Click:Connect(function()
 		giftData.GiftType = "Product"
 		giftData.GiftName = productName
+		giftData.OriginFrame = "Shop"
 		local frame = Frames.get("GiftPlayerChoose")
 		local main = frame:WaitForChild("Main")
 		local holder = main:WaitForChild("Holder")
@@ -314,6 +341,24 @@ function MonetizationController.SetProductGiftButton(button: GuiButton, productN
 		heading.Text = `- Gift "{productName}" To -`
 		UISignals.OpenFrame.Fire("GiftPlayerChoose")
 	end)
+end
+
+-- Opens the existing target picker for a fungible Theme Voucher. Selecting a
+-- player before the product prompt is UI state only: the Yes button prompts
+-- when the balance is zero, then requires a second post-receipt SEND click.
+function MonetizationController.StartVoucherGiftPrompt(originFrame: Frames.FrameName)
+	giftData.GiftType = "Voucher"
+	giftData.GiftName = "Theme Voucher"
+	giftData.OriginFrame = originFrame
+	voucherTransferPending = false
+	voucherActiveRequestId = nil
+	updateVoucherConfirmLabel()
+	local frame = Frames.get("GiftPlayerChoose")
+	local main = frame:WaitForChild("Main")
+	local holder = main:WaitForChild("Holder")
+	local heading = holder:WaitForChild("HeadngText") :: TextLabel
+	heading.Text = '- Gift "Theme Voucher" To -'
+	UISignals.OpenFrame.Fire("GiftPlayerChoose")
 end
 
 local function sanitizeUsername(text: string): string
@@ -360,7 +405,14 @@ local function onPlayerSelected(userId: number, username: string, _displayName: 
 
 	local confirmFrame = Frames.get("GiftConfirm")
 	local areYouSure = confirmFrame:WaitForChild("AreYouSureText") :: TextLabel
-	areYouSure.Text = `Are you sure you want to gift "{giftData.GiftName}" to {username}?`
+	if giftData.GiftType == "Voucher" then
+		areYouSure.Text = `Send 1 Theme Voucher to {username}?`
+	else
+		areYouSure.Text = `Are you sure you want to gift "{giftData.GiftName}" to {username}?`
+	end
+	voucherTransferPending = false
+	voucherActiveRequestId = nil
+	updateVoucherConfirmLabel()
 
 	UISignals.OpenFrame.Fire("GiftConfirm", false)
 end
@@ -428,6 +480,17 @@ function MonetizationController.Init()
 	Net.promptStart.listen(function()
 		openPromptAnimation()
 	end)
+	Net.voucherGiftResult.listen(function(result)
+		if not voucherTransferPending or result.requestId ~= voucherActiveRequestId then
+			return
+		end
+		voucherTransferPending = false
+		voucherActiveRequestId = nil
+		updateVoucherConfirmLabel()
+		if result.ok and Frames.get("GiftConfirm").Visible then
+			UISignals.CloseFrame.Fire(true)
+		end
+	end)
 end
 
 function MonetizationController.Start()
@@ -449,6 +512,14 @@ function MonetizationController.Start()
 		end
 	end)
 
+	DataController.observe({ "UISystem", "Vouchers" }, function(value: any)
+		if type(value) ~= "number" then
+			return
+		end
+		voucherCount = math.max(0, math.floor(value))
+		updateVoucherConfirmLabel()
+	end)
+
 	local giftPlayerChooseFrame = Frames.get("GiftPlayerChoose")
 	local giftConfirmFrame = Frames.get("GiftConfirm")
 	local main = giftPlayerChooseFrame:WaitForChild("Main")
@@ -468,7 +539,7 @@ function MonetizationController.Start()
 	local top = giftPlayerChooseFrame:WaitForChild("Top")
 	local closeButton = top:WaitForChild("Close") :: GuiButton
 	closeButton.MouseButton1Click:Connect(function()
-		UISignals.OpenFrame.Fire("Shop")
+		UISignals.OpenFrame.Fire(giftData.OriginFrame)
 	end)
 
 	local friendsOk, friendPages = pcall(function()
@@ -521,10 +592,34 @@ function MonetizationController.Start()
 	end)
 
 	local yesButton = giftConfirmFrame:WaitForChild("Yes") :: GuiButton
+	local yesText = yesButton:FindFirstChild("TextLabel")
+	if yesText ~= nil and yesText:IsA("TextLabel") then
+		voucherConfirmLabel = yesText
+	end
 	yesButton.MouseButton1Click:Connect(function()
+		local giftType = giftData.GiftType
+		if giftType == "Voucher" then
+			if voucherTransferPending then
+				return
+			end
+			-- With no balance this asks the server to open the gift-voucher
+			-- product. The selected target remains client-only until the player
+			-- clicks SEND after the receipt increments Vouchers.
+			local requestId = HttpService:GenerateGUID(false)
+			if voucherCount > 0 then
+				voucherTransferPending = true
+				voucherActiveRequestId = requestId
+				updateVoucherConfirmLabel()
+			end
+			Net.voucherGift.send({
+				targetUserId = giftData.GiftTarget,
+				requestId = requestId,
+			})
+			return
+		end
 		Net.giftStart.send({
 			targetUserId = giftData.GiftTarget,
-			itemKind = giftData.GiftType,
+			itemKind = giftType,
 			itemName = giftData.GiftName,
 		})
 		local purchaseConnection: RBXScriptConnection
@@ -535,6 +630,7 @@ function MonetizationController.Start()
 			end
 		end)
 	end)
+	updateVoucherConfirmLabel()
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(closePromptAnimation)
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(_, passId: number, purchased: boolean)

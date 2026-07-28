@@ -557,19 +557,16 @@ function UIKitController.OpenFrame(frameName: Frames.FrameName, noBlur: boolean?
 	end
 end
 
---[[
-	Drives the HUD cash counter from DataController.observe({"Coins"})
-	instead of leaderstats.Cash (PORT-SPEC.md §1c) -- CoinsService owns
-	currency, and DataController is the one source of truth for it on the
-	client.
-]]
-local function initCashDisplay()
+-- Shared HUD counter driver for Cash and Theme Vouchers. Both authored
+-- ImageLabels expose lowercase main/shadow labels plus identical transaction
+-- badge templates.
+local function initCounterDisplay(labelName: string, path: { string | number })
 	local main = playerGui:WaitForChild("Main")
 	local hud = main:WaitForChild("HUD")
 	local left = hud:WaitForChild("Left")
-	local cashLabel = left:WaitForChild("Icon")
-	local mainLabel = cashLabel:WaitForChild("main") :: TextLabel
-	local shadowLabel = cashLabel:WaitForChild("shadow") :: TextLabel
+	local counterLabel = left:WaitForChild(labelName)
+	local mainLabel = counterLabel:WaitForChild("main") :: TextLabel
+	local shadowLabel = counterLabel:WaitForChild("shadow") :: TextLabel
 	local transactionRoot = mainLabel:WaitForChild("Transactions")
 	local addTemplate = transactionRoot:WaitForChild("Add") :: Frame
 	local subTemplate = transactionRoot:WaitForChild("Subtract") :: Frame
@@ -578,13 +575,13 @@ local function initCashDisplay()
 
 	local activeRender: RBXScriptConnection? = nil
 
-	local function setCashLabel(amount: number)
+	local function setCounterLabel(amount: number)
 		local formatted = Format.FormatNumber(amount)
 		mainLabel.Text = formatted
 		shadowLabel.Text = formatted
 	end
 
-	local function tweenCashValue(from: number, to: number, duration: number)
+	local function tweenCounterValue(from: number, to: number, duration: number)
 		if activeRender ~= nil then
 			activeRender:Disconnect()
 			activeRender = nil
@@ -594,10 +591,10 @@ local function initCashDisplay()
 		local connection: RBXScriptConnection
 		connection = RunService.RenderStepped:Connect(function()
 			local alpha = math.clamp((os.clock() - startTime) / duration, 0, 1)
-			setCashLabel(math.floor(from + (to - from) * alpha))
+			setCounterLabel(math.floor(from + (to - from) * alpha))
 
 			if alpha >= 1 then
-				setCashLabel(to)
+				setCounterLabel(to)
 				connection:Disconnect()
 				if activeRender == connection then
 					activeRender = nil
@@ -640,24 +637,24 @@ local function initCashDisplay()
 		badge:Destroy()
 	end
 
-	DataController.observe({ "Coins" }, function(coins: any, old: any?)
-		if type(coins) ~= "number" then
+	DataController.observe(path, function(value: any, old: any?)
+		if type(value) ~= "number" then
 			return
 		end
 		if type(old) ~= "number" then
 			-- First fire (old == nil): set immediately, no transaction badge
 			-- for "the value we started with".
-			setCashLabel(coins)
+			setCounterLabel(value)
 			return
 		end
 
-		local diff = coins - old
+		local diff = value - old
 		if diff == 0 then
 			return
 		end
 
 		task.spawn(showTransactionBadge, diff)
-		tweenCashValue(old, coins, 0.5)
+		tweenCounterValue(old, value, 0.5)
 	end)
 end
 
@@ -718,7 +715,8 @@ function UIKitController.Start()
 		setupItem(item)
 	end
 
-	initCashDisplay()
+	initCounterDisplay("Icon", { "Coins" })
+	initCounterDisplay("Vouchers", { "UISystem", "Vouchers" })
 	watchLoadingScreenHandshake()
 
 	log.info("ready")

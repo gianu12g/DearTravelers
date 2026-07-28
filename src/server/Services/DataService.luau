@@ -46,12 +46,35 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 1
+local DATA_VERSION = 2
 local MAX_PROCESSED_PURCHASE_IDS = 200
+local MAX_PROCESSED_VOUCHER_TRANSFER_IDS = 500
+local MAX_VOUCHERS = 2 ^ 31 - 1
 -- Comfortably above CosmeticsCatalog's current id count for any slot --
 -- a bound exists only to keep a corrupted profile from growing unbounded,
 -- not because owning every cosmetic is a real limit.
 local MAX_OWNED_COSMETICS = 512
+-- Bound for the legacy paid-gift intent ring below.
+local MAX_PENDING_INTENTS = 3
+
+-- Entry shapes exported so MonetizationService can type its own reads/writes
+-- against the same persisted structures rather than inferring them from
+-- TEMPLATE's typeof.
+export type PendingGiftEntry = {
+	Kind: string,
+	ItemName: string,
+	TargetUserId: number,
+	ProductId: number,
+	StartedAt: number,
+}
+export type PendingVoucherTransferEntry = {
+	TransferId: string,
+	TargetUserId: number,
+	-- Correlates the eventual server result with the exact confirmation that
+	-- queued this transfer. Older pre-release entries are repaired to use
+	-- TransferId as a harmless fallback that no current client will match.
+	RequestId: string,
+}
 
 local TEMPLATE = {
 	Version = DATA_VERSION,
@@ -135,10 +158,32 @@ local TEMPLATE = {
 		-- are appended before a receipt is acknowledged and are only considered
 		-- durable after Profile:Save() has completed successfully.
 		ProcessedPurchaseIds = {} :: { string },
-		-- Gift intent is persisted before opening Roblox's purchase prompt. A
-		-- receipt may arrive after a teleport, reconnect, or server shutdown, so
-		-- an in-memory cache is not sufficient to identify its recipient.
-		PendingGift = { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 },
+		-- ThemeShop developer products grant this fungible balance, never a
+		-- preselected cosmetic. It may be redeemed by the owner or transferred
+		-- through the durable outbox below.
+		Vouchers = 0,
+		-- Transfer ids received through ProfileStore messages. This makes
+		-- sender outbox retries idempotent after a crash between enqueueing the
+		-- message and durably removing the outbox entry.
+		ProcessedVoucherTransferIds = {} :: { string },
+		-- Monetary outbox: a voucher is deducted in the same mutation that
+		-- appends this entry, then the whole state is saved before MessageAsync.
+		-- Entries are never age/count-evicted; successful enqueue removes them.
+		PendingVoucherTransfers = {} :: { PendingVoucherTransferEntry },
+		-- A bounded ring (MAX_PENDING_INTENTS) of recent gift intents, each
+		-- persisted before opening Roblox's purchase prompt. A receipt may
+		-- arrive after a teleport, reconnect, or server shutdown, so an
+		-- in-memory cache is not sufficient to identify its recipient. Per-entry
+		-- StartedAt (os.time()) lets hasPendingGift treat an entry older than
+		-- MonetizationService's grace window as absent rather than a permanent
+		-- lock: a disconnect/crash with the Roblox prompt open otherwise leaves
+		-- it there forever, since neither a receipt nor
+		-- PromptProductPurchaseFinished can fire for a session that never
+		-- resumes. The ring (rather than one record) exists because a stale
+		-- entry treated as "absent" past the grace window can still have a
+		-- receipt redelivered for it later -- a single slot would have already
+		-- been overwritten by the player's next purchase by then.
+		PendingGifts = {} :: { PendingGiftEntry },
 	},
 
 	--[[
@@ -147,10 +192,10 @@ local TEMPLATE = {
 		DataController.observe and server-side by CosmeticsService (theme
 		attribute stamp; MergeService resolves SquishyBeamId to its matching
 		Assets.VFX.LaunchBeams model when a launch is accepted, and MergePopId
-		to its Assets.VFX.Merge burst when a merge commits). No
-		version bump -- Reconcile() backfills this whole subtree onto existing
-		profiles, and repairProfileData below enforces the one invariant
-		Reconcile can't: equipped id must be owned.
+		to its Assets.VFX.Merge burst when a merge commits). Reconcile()
+		backfills this whole subtree onto existing profiles, and
+		repairProfileData below enforces the one invariant Reconcile can't:
+		equipped id must be owned.
 	]]
 	Cosmetics = {
 		KeycapThemeId = CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID,
@@ -170,6 +215,20 @@ export type PlayerData = typeof(TEMPLATE)
 -- deleted when the store was bumped to PlayerData_v1.3; every profile in the
 -- new store starts at Version 1; index N migrates N -> N+1 going forward.
 local MIGRATIONS: { (data: any) -> () } = {}
+
+-- v1 routed the two shared ThemeShop product ids through pre-prompt
+-- PendingCosmetic(s) records. Those records prove only that a prompt opened,
+-- not that Robux was spent, so they must never be converted into free
+-- vouchers. Any genuinely late receipt is safe: v2 grants its voucher using
+-- ProductId/PurchaseId alone. ProcessedPurchaseIds remains untouched so a
+-- purchase already fulfilled by v1 cannot be paid out again.
+MIGRATIONS[1] = function(data: any)
+	local uiSystem = data.UISystem
+	if type(uiSystem) == "table" then
+		uiSystem.PendingCosmetic = nil
+		uiSystem.PendingCosmetics = nil
+	end
+end
 
 local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.3"
 -- Studio writes to a separate DataStore, so persistence can be tested across
@@ -335,6 +394,110 @@ local function finiteNumber(value: any, minimum: number, maximum: number, fallba
 	return math.clamp(value, minimum, maximum)
 end
 
+local function isValidPendingGiftEntry(entry: any): boolean
+	return type(entry) == "table"
+		and (entry.Kind == "Pass" or entry.Kind == "Product")
+		and type(entry.ItemName) == "string"
+		and #entry.ItemName > 0
+		and #entry.ItemName <= 64
+		and type(entry.TargetUserId) == "number"
+		and entry.TargetUserId > 0
+		and entry.TargetUserId < math.huge
+		and entry.TargetUserId == math.floor(entry.TargetUserId)
+		and type(entry.ProductId) == "number"
+		and entry.ProductId > 0
+		and entry.ProductId < math.huge
+		and entry.ProductId == math.floor(entry.ProductId)
+end
+
+local function repairPendingVoucherTransfers(value: any): { PendingVoucherTransferEntry }
+	local repaired: { PendingVoucherTransferEntry } = {}
+	local seen: { [string]: true } = {}
+	if type(value) ~= "table" then
+		return repaired
+	end
+	for _, entry in value do
+		if type(entry) ~= "table" then
+			continue
+		end
+		local transferId = entry.TransferId
+		local targetUserId = entry.TargetUserId
+		local rawRequestId = entry.RequestId
+		if
+			type(transferId) == "string"
+			and #transferId > 0
+			and #transferId <= 128
+			and not seen[transferId]
+			and type(targetUserId) == "number"
+			and targetUserId > 0
+			and targetUserId < math.huge
+			and targetUserId == math.floor(targetUserId)
+		then
+			seen[transferId] = true
+			local requestId = if type(rawRequestId) == "string" and #rawRequestId > 0 and #rawRequestId <= 128
+				then rawRequestId
+				else transferId
+			table.insert(repaired, {
+				TransferId = transferId,
+				TargetUserId = targetUserId,
+				RequestId = requestId,
+			})
+		end
+	end
+	return repaired
+end
+
+--[[
+	Sanitizes the PendingGifts ring: validates each entry's shape, folds in
+	`legacy` (the pre-ring single PendingGift record, if this profile still has
+	one -- repairProfileData nils it out after this runs so the migration only
+	ever fires once), backfills a zero StartedAt, and caps the result to
+	MAX_PENDING_INTENTS keeping the newest entries.
+
+	StartedAt == 0 only ever happens for a just-migrated legacy entry or
+	genuinely corrupted data -- persistGiftIntent always writes a real
+	os.time(). Stamping it fresh here is a ONE-TIME grace window: a legacy
+	entry's real StartedAt was backfilled to 0 by repairTypes (no such field
+	existed under the old schema's own repair path), and 0 would otherwise
+	compute as already-expired the instant it's read, discarding the window
+	entirely on the very load meant to preserve it. Once stamped, the entry
+	round-trips through this same function on every later load with its real
+	StartedAt intact, so it is never re-armed.
+]]
+local function repairPendingGifts(value: any, legacy: any): { PendingGiftEntry }
+	local combined: { any } = {}
+	if type(legacy) == "table" then
+		table.insert(combined, legacy)
+	end
+	if type(value) == "table" then
+		for _, entry in value do
+			table.insert(combined, entry)
+		end
+	end
+
+	local sanitized: { PendingGiftEntry } = {}
+	for _, entry in combined do
+		if isValidPendingGiftEntry(entry) then
+			local startedAt = finiteInteger(entry.StartedAt, 0, 2 ^ 53 - 1, 0)
+			table.insert(sanitized, {
+				Kind = entry.Kind,
+				ItemName = entry.ItemName,
+				TargetUserId = entry.TargetUserId,
+				ProductId = entry.ProductId,
+				StartedAt = if startedAt == 0 then os.time() else startedAt,
+			})
+		end
+	end
+	if #sanitized > MAX_PENDING_INTENTS then
+		local newest = table.create(MAX_PENDING_INTENTS)
+		for index = #sanitized - MAX_PENDING_INTENTS + 1, #sanitized do
+			table.insert(newest, sanitized[index])
+		end
+		return newest
+	end
+	return sanitized
+end
+
 local function repairProfileData(data: any)
 	repairTypes(data, TEMPLATE)
 
@@ -373,7 +536,11 @@ local function repairProfileData(data: any)
 		cosmetics.MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 	end
 	local uiSystem = data.UISystem
+	uiSystem.Vouchers = finiteInteger(uiSystem.Vouchers, 0, MAX_VOUCHERS, 0)
 	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)
+	uiSystem.ProcessedVoucherTransferIds =
+		compactStringArray(uiSystem.ProcessedVoucherTransferIds, MAX_PROCESSED_VOUCHER_TRANSFER_IDS)
+	uiSystem.PendingVoucherTransfers = repairPendingVoucherTransfers(uiSystem.PendingVoucherTransfers)
 	uiSystem.Packs = compactStringArray(uiSystem.Packs, 100)
 	uiSystem.RedeemedCodes = compactStringArray(uiSystem.RedeemedCodes, 500)
 	uiSystem.PlaytimeRewards.ClaimedRewards = denseBooleanArray(uiSystem.PlaytimeRewards.ClaimedRewards, 7)
@@ -388,23 +555,20 @@ local function repairProfileData(data: any)
 	end
 	uiSystem.GiftedPasses = giftedPasses
 
-	local pendingGift = uiSystem.PendingGift
-	local emptyIntent = pendingGift.Kind == ""
-		and pendingGift.ItemName == ""
-		and pendingGift.TargetUserId == 0
-		and pendingGift.ProductId == 0
-	local validIntent = (pendingGift.Kind == "Pass" or pendingGift.Kind == "Product")
-		and #pendingGift.ItemName > 0
-		and #pendingGift.ItemName <= 64
-		and pendingGift.TargetUserId > 0
-		and pendingGift.TargetUserId < math.huge
-		and pendingGift.TargetUserId == math.floor(pendingGift.TargetUserId)
-		and pendingGift.ProductId > 0
-		and pendingGift.ProductId < math.huge
-		and pendingGift.ProductId == math.floor(pendingGift.ProductId)
-	if not emptyIntent and not validIntent then
-		uiSystem.PendingGift = { Kind = "", ItemName = "", TargetUserId = 0, ProductId = 0 }
-	end
+	--[[
+		Legacy pre-ring schema (single PendingGift record) is no longer a
+		TEMPLATE key, so Reconcile() neither adds nor strips it.
+		repairPendingGifts folds a valid one-time record into the ring; the
+		legacy key is then dropped so this compatibility path never re-fires.
+
+		PendingCosmetic(s) are deliberately dropped, never converted into
+		vouchers: those records represent prompts, not confirmed payments.
+		Late confirmed payments are fulfilled from ProductId/PurchaseId alone.
+	]]
+	uiSystem.PendingGifts = repairPendingGifts(uiSystem.PendingGifts, uiSystem.PendingGift)
+	uiSystem.PendingGift = nil
+	uiSystem.PendingCosmetic = nil
+	uiSystem.PendingCosmetics = nil
 
 	data.Coins = finiteInteger(data.Coins, 0, EconomyConfig.MAX_COINS, 0)
 	data.Rebirths = RebirthConfig.sanitizeRebirths(data.Rebirths)

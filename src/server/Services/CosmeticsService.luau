@@ -8,9 +8,11 @@
 	validate the write and, for themes, apply the world-visible side effect
 	(the `Theme` attribute KeyCapsController already renders).
 
-	No purchase flow here (COSMETICS_PLAN.md "Out of scope") -- grant() is
-	the shop's future entry point; today nothing calls it but a later dev
-	console / bundle purchase.
+	No purchase flow here -- grant() is only the entry point. The ThemeShop
+	purchase/gift/cash flow (COSMETICS_PLAN.md) lives in
+	Services/UISystem/MonetizationService, which calls grant() after its own
+	receipt/cash validation; this service never needs to know a Robux or
+	Cash transaction happened, only that ownership should be recorded.
 
 	THEME RE-APPLY TIMING: `AssignedBase` is stamped on the Player by
 	BaseService.SafePlayerAdded with NO data gate (BaseService.luau's own
@@ -45,15 +47,6 @@ local equipLimiter = RateLimiter.new(2, 4)
 -- BaseService/MergeService's own attribute connections are (PlayerRemoving
 -- only hands us a Player).
 local assignedBaseConnections: { [Player]: RBXScriptConnection } = {}
-
-local function isValidIdForSlot(slot: CosmeticsCatalog.Slot, id: string): boolean
-	if slot == "KeycapThemes" then
-		return CosmeticsCatalog.isKeycapTheme(id)
-	elseif slot == "SquishyBeams" then
-		return CosmeticsCatalog.isSquishyBeam(id)
-	end
-	return CosmeticsCatalog.isMergePop(id)
-end
 
 --[[
 	Stamps every Key-tagged MeshPart under `player`'s base KeyCaps folder, and
@@ -97,7 +90,7 @@ end
 	the already-owned no-op case).
 ]]
 function CosmeticsService.grant(player: Player, slot: CosmeticsCatalog.Slot, id: string): boolean
-	if not isValidIdForSlot(slot, id) then
+	if not CosmeticsCatalog.isValidId(slot, id) then
 		log.warn(`grant() rejected unknown {slot} id "{id}" for {player.Name}`)
 		return false
 	end
@@ -192,7 +185,7 @@ function CosmeticsService.Init()
 			return
 		end
 
-		if not isValidIdForSlot(slot, id) then
+		if not CosmeticsCatalog.isValidId(slot, id) then
 			return
 		end
 

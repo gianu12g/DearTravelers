@@ -18,11 +18,24 @@ local log = Log.new("UINotificationService")
 local UINotificationService = {}
 
 function UINotificationService.SendNotification(player: Player, kind: string, message: string)
-	Net.notify.sendTo({ kind = kind, message = message }, player)
+	local ok, sendError = pcall(function()
+		Net.notify.sendTo({ kind = kind, message = message }, player)
+	end)
+	if not ok then
+		-- Notifications are best-effort presentation. A departed client or
+		-- transient networking error must never unwind a paid receipt/message
+		-- handler after its durable reward mutation.
+		log.warn(`notification send failed for {player.Name}: {tostring(sendError)}`)
+	end
 end
 
 function UINotificationService.EmitConfetti(player: Player)
-	Net.confettiEmit.sendTo(nil, player)
+	local ok, sendError = pcall(function()
+		Net.confettiEmit.sendTo(nil, player)
+	end)
+	if not ok then
+		log.warn(`confetti send failed for {player.Name}: {tostring(sendError)}`)
+	end
 end
 
 function UINotificationService.Start()

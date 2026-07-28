@@ -253,6 +253,41 @@ function CosmeticsCatalog.isMergePop(id: string): boolean
 	return mergePopIds[id] == true
 end
 
+-- The catalog list for `slot`. ThemeShopController and CosmeticsController
+-- both need this per-slot dispatch; kept here once rather than duplicated a
+-- third time (CosmeticsController already has its own local copy predating
+-- this one -- left as-is, not worth the churn of a drive-by rewrite).
+function CosmeticsCatalog.catalogForSlot(slot: Slot): { CatalogEntry }
+	if slot == "KeycapThemes" then
+		return CosmeticsCatalog.KeycapThemes
+	elseif slot == "SquishyBeams" then
+		return CosmeticsCatalog.SquishyBeams
+	end
+	return CosmeticsCatalog.MergePops
+end
+
+-- The unequip/never-purchasable id for `slot`. See catalogForSlot's comment.
+function CosmeticsCatalog.defaultIdForSlot(slot: Slot): string
+	if slot == "KeycapThemes" then
+		return CosmeticsCatalog.DEFAULT_KEYCAP_THEME_ID
+	elseif slot == "SquishyBeams" then
+		return CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID
+	end
+	return CosmeticsCatalog.DEFAULT_MERGE_POP_ID
+end
+
+-- One catalog-membership check across all three slots, for callers (the
+-- ThemeShop purchase/gift flow) that only have `slot` as a runtime value,
+-- not as three separate isKeycapTheme/isSquishyBeam/isMergePop call sites.
+function CosmeticsCatalog.isValidId(slot: Slot, id: string): boolean
+	if slot == "KeycapThemes" then
+		return CosmeticsCatalog.isKeycapTheme(id)
+	elseif slot == "SquishyBeams" then
+		return CosmeticsCatalog.isSquishyBeam(id)
+	end
+	return CosmeticsCatalog.isMergePop(id)
+end
+
 -- Boot-time guard: the defaults are unequip targets (COSMETICS_PLAN.md
 -- "Decisions") and must always resolve to a real catalog entry. The squishy
 -- default is sourced from MergeConfig, owned elsewhere, so it can drift out

@@ -39,6 +39,7 @@ export type FrameName =
 	| "Settings"
 	| "FriendInvite"
 	| "Cosmetics"
+	| "ThemeShop"
 	| "Rebirth"
 	| "Upgrades"
 
@@ -55,6 +56,7 @@ local STUDIO_NAMES: { [FrameName]: string } = {
 	Settings = "Settings",
 	FriendInvite = "Friends",
 	Cosmetics = "Cosmetics",
+	ThemeShop = "ThemeShop",
 	Rebirth = "Rebirth",
 	Upgrades = "Upgrades",
 }

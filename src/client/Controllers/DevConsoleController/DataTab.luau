@@ -31,7 +31,9 @@ local NOISY_PATH_PREFIXES = {
 	"UISystem.RedeemedCodes",
 	"UISystem.GiftedPasses",
 	"UISystem.Packs",
-	"UISystem.PendingGift",
+	"UISystem.PendingGifts",
+	"UISystem.ProcessedVoucherTransferIds",
+	"UISystem.PendingVoucherTransfers",
 	"UISystem.FriendsReward.JoinedFriends",
 }
 
