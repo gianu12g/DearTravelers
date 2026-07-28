@@ -22,8 +22,8 @@
 	    attributes, PromotionController) -- never from Init().
 ]]
 
-local MarketplaceService = game:GetService("MarketplaceService")
 local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
@@ -418,14 +418,14 @@ local function onPlayerSelected(userId: number, username: string, _displayName: 
 end
 
 local function createPlayerFrame(
-	scrollFrame: ScrollingFrame,
+	holder: Frame,
 	template: Frame,
 	userId: number,
 	username: string,
 	displayName: string,
 	isFriend: boolean?
 )
-	if scrollFrame:FindFirstChild(tostring(userId)) ~= nil then
+	if holder:FindFirstChild(tostring(userId)) ~= nil then
 		return
 	end
 
@@ -473,7 +473,7 @@ local function createPlayerFrame(
 		frame:SetAttribute("Friend", true)
 	end
 
-	frame.Parent = scrollFrame
+	frame.Parent = holder
 end
 
 function MonetizationController.Init()
@@ -522,9 +522,35 @@ function MonetizationController.Start()
 
 	local giftPlayerChooseFrame = Frames.get("GiftPlayerChoose")
 	local giftConfirmFrame = Frames.get("GiftConfirm")
-	local main = giftPlayerChooseFrame:WaitForChild("Main")
-	local scrollFrame = main:WaitForChild("Holder") :: ScrollingFrame
-	local template = scrollFrame:WaitForChild("Template") :: Frame
+	local scrollFrame = giftPlayerChooseFrame:WaitForChild("Main") :: ScrollingFrame
+	local holder = scrollFrame:WaitForChild("Holder") :: Frame
+	local template = holder:WaitForChild("Template") :: Frame
+
+	-- Studio authored this list around a fixed CanvasSize.Y scale of 6.5,
+	-- with both Holder and its rows sized as percentages of that canvas. Turn
+	-- those already-resolved row heights into offsets before removing the
+	-- fixed canvas; otherwise AutomaticSize would be circular (row height
+	-- depends on holder height while holder height depends on its rows).
+	local function freezeHeight(gui: GuiObject)
+		local height = gui.AbsoluteSize.Y
+		if height > 0 then
+			gui.Size = UDim2.new(gui.Size.X.Scale, gui.Size.X.Offset, 0, height)
+		end
+	end
+	freezeHeight(template)
+	local heading = holder:FindFirstChild("HeadngText")
+	if heading ~= nil and heading:IsA("GuiObject") then
+		freezeHeight(heading)
+	end
+
+	holder.AnchorPoint = Vector2.new(holder.AnchorPoint.X, 0)
+	holder.Position = UDim2.new(holder.Position.X.Scale, holder.Position.X.Offset, 0, 0)
+	holder.Size = UDim2.new(holder.Size.X.Scale, holder.Size.X.Offset, 0, 0)
+	holder.AutomaticSize = Enum.AutomaticSize.Y
+	scrollFrame.CanvasSize = UDim2.new()
+	scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scrollFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+
 	template.Parent = nil
 
 	local confirmButton = giftPlayerChooseFrame:WaitForChild("Confirm") :: GuiButton
@@ -555,7 +581,7 @@ function MonetizationController.Start()
 				break
 			end
 			for _, item in page do
-				createPlayerFrame(scrollFrame, template, item.Id, item.Username, item.DisplayName, true)
+				createPlayerFrame(holder, template, item.Id, item.Username, item.DisplayName, true)
 			end
 			if pages.IsFinished then
 				break
@@ -571,16 +597,16 @@ function MonetizationController.Start()
 
 	for _, other in Players:GetPlayers() do
 		if other ~= player then
-			createPlayerFrame(scrollFrame, template, other.UserId, other.Name, other.DisplayName, false)
+			createPlayerFrame(holder, template, other.UserId, other.Name, other.DisplayName, false)
 		end
 	end
 
 	Players.PlayerAdded:Connect(function(other)
-		createPlayerFrame(scrollFrame, template, other.UserId, other.Name, other.DisplayName, false)
+		createPlayerFrame(holder, template, other.UserId, other.Name, other.DisplayName, false)
 	end)
 
 	Players.PlayerRemoving:Connect(function(other)
-		local entry = scrollFrame:FindFirstChild(tostring(other.UserId))
+		local entry = holder:FindFirstChild(tostring(other.UserId))
 		if entry == nil then
 			return
 		end
