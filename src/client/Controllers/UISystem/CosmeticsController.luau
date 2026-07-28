@@ -9,7 +9,7 @@
 	Equip is fire-and-forget: Net.cosmeticEquip carries no result packet, and
 	the accepted (or silently rejected) equip is visible only via
 	DataController.observe on the replicated Cosmetics fields, which is what
-	actually drives every re-render below.
+	drives the targeted card updates below.
 
 	No Init() -- Frames.get yields, and there is no unsolicited early-push
 	race to guard against here (same reasoning as WheelSpinController's own
@@ -59,9 +59,9 @@ local function defaultIdForSlot(slot: CosmeticsCatalog.Slot): string
 	return CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 end
 
--- The one place that decides EquipButton.PriceTag.Text -- shared by the full
--- render() and the in-place equip update, so the two paths cannot drift
--- apart on what a card should say.
+-- The one place that decides EquipButton.PriceTag.Text -- shared by pooled
+-- card configuration and in-place equip updates so the two paths cannot
+-- drift apart.
 local function equipButtonLabel(id: string, equippedId: string, defaultId: string): string
 	if id ~= equippedId then
 		return "Equip"
@@ -154,6 +154,30 @@ function CosmeticsController.Start()
 		SquishyBeams = CosmeticsCatalog.DEFAULT_SQUISHY_BEAM_ID,
 		MergePops = CosmeticsCatalog.DEFAULT_MERGE_POP_ID,
 	}
+	type CardView = {
+		Slot: CosmeticsCatalog.Slot,
+		Id: string,
+		Root: Frame,
+		Title: TextLabel?,
+		Gradient: UIGradient?,
+		DefaultGradientColor: ColorSequence?,
+		Icon: ImageLabel?,
+		DefaultIconImage: string,
+		EquipPriceTag: TextLabel?,
+	}
+	local cardPool: { CardView } = {}
+	local activeCardsById: { [string]: CardView } = {}
+	local hasRendered = false
+	local gradientCache: {
+		KeycapThemes: { [string]: ColorSequence },
+		SquishyBeams: { [string]: ColorSequence },
+		MergePops: { [string]: ColorSequence },
+	} =
+		{
+			KeycapThemes = {},
+			SquishyBeams = {},
+			MergePops = {},
+		}
 
 	-- Not equipped -> equip it. Equipped and already the default -> no-op
 	-- (the default is never unequipped from). Equipped and NOT the default
@@ -169,165 +193,236 @@ function CosmeticsController.Start()
 		end
 	end
 
-	-- Clones `template` once per owned entry in the active slot, in catalog
-	-- order. Never touches the template original (Parent stays Holder,
-	-- Visible stays false) or the Holder's own UIListLayout.
-	local function render()
-		-- Holder's ScrollingFrame uses AutomaticCanvasSize=Y, so destroying
-		-- every card collapses the canvas and clamps CanvasPosition to 0 --
-		-- save/restore across the rebuild so an open menu doesn't yank the
-		-- player back to the top. Restored next resumption cycle (task.defer),
-		-- once the new cards' layout has actually recomputed the canvas;
-		-- Roblox clamps the assignment to the valid range itself.
-		local savedCanvasPosition = scrollFrame.CanvasPosition
-
-		for _, child in holder:GetChildren() do
-			if child ~= template and child:IsA("Frame") then
-				child:Destroy()
-			end
+	-- Card Instances and their button connections are pooled. Tab switches
+	-- reconfigure the pool; live grants add/remove only the changed cards.
+	local function gradientFor(slot: CosmeticsCatalog.Slot, id: string): ColorSequence?
+		local cached = gradientCache[slot][id]
+		if cached ~= nil then
+			return cached
 		end
 
-		local slot: CosmeticsCatalog.Slot = activeSlot
-		local owned = ownedIds[slot]
-		local equippedId = equippedIds[slot]
-		local defaultId = defaultIdForSlot(slot)
-		local layoutOrder = 0
-
-		for _, entry in catalogForSlot(slot) do
-			if not owned[entry.Id] then
-				continue
-			end
-			layoutOrder += 1
-
-			local card = template:Clone() :: Frame
-			card.Name = entry.Id
-			card.Visible = true
-			card.LayoutOrder = layoutOrder
-
-			local title = card:FindFirstChild("Title")
-			if title ~= nil and title:IsA("TextLabel") then
-				title.Text = entry.DisplayName
-			end
-			local purchase = card:FindFirstChild("Purchase")
-			if purchase ~= nil and purchase:IsA("GuiObject") then
-				purchase.Visible = false
-				-- Stripped before this card is ever parented (below), so
-				-- UIKitController's DescendantAdded wiring never sees the
-				-- attribute and never spawns Purchase's Shine effect inside
-				-- this hidden subtree -- race-free by construction, not by
-				-- timing. The card Icon's own Float effect is untouched.
-				clearEffectAttribute(purchase)
-				for _, descendant in purchase:GetDescendants() do
-					clearEffectAttribute(descendant)
-				end
-			end
-
-			local gradient = card:FindFirstChild("UIGradient")
-			if gradient ~= nil and gradient:IsA("UIGradient") then
-				local sequence: ColorSequence?
-				if slot == "KeycapThemes" then
-					local colors = KeyCapsController.getThemeColors(entry.Id)
-					sequence = if colors ~= nil then colorSequenceFromTheme(colors) else nil
-				elseif slot == "SquishyBeams" then
-					sequence = colorSequenceFromBeam(entry.Id)
-				else
-					sequence = colorSequenceFromMergePop(entry.Id)
-				end
-				if sequence ~= nil then
-					gradient.Color = sequence
-				end
-			end
-
-			local icon = card:FindFirstChild("Icon")
-			if icon ~= nil and icon:IsA("ImageLabel") then
-				if slot == "KeycapThemes" then
-					local iconId = Images.ThemeIcons[entry.Id]
-					if iconId ~= nil then
-						icon.Image = `rbxassetid://{iconId}`
-					end
-				else
-					icon.Visible = false
-					-- VFX cards are permanently gradient-only. Strip the
-					-- template's Float effect before parenting so UIKit never
-					-- starts an invisible infinite tween for this hidden icon.
-					clearEffectAttribute(icon)
-					for _, descendant in icon:GetDescendants() do
-						clearEffectAttribute(descendant)
-					end
-				end
-			end
-
-			local equipButton = card:FindFirstChild("EquipButton")
-			if equipButton ~= nil and equipButton:IsA("GuiButton") then
-				local priceTag = equipButton:FindFirstChild("PriceTag")
-				if priceTag ~= nil and priceTag:IsA("TextLabel") then
-					priceTag.Text = equipButtonLabel(entry.Id, equippedId, defaultId)
-				end
-				equipButton.MouseButton1Click:Connect(function()
-					onEquipButtonClicked(slot, entry.Id)
-				end)
-			end
-
-			card.Parent = holder
+		local sequence: ColorSequence?
+		if slot == "KeycapThemes" then
+			local colors = KeyCapsController.getThemeColors(id)
+			sequence = if colors ~= nil then colorSequenceFromTheme(colors) else nil
+		elseif slot == "SquishyBeams" then
+			sequence = colorSequenceFromBeam(id)
+		else
+			sequence = colorSequenceFromMergePop(id)
 		end
-
-		task.defer(function()
-			scrollFrame.CanvasPosition = savedCanvasPosition
-		end)
+		if sequence ~= nil then
+			gradientCache[slot][id] = sequence
+		end
+		return sequence
 	end
 
-	-- Updates just `id`'s card (if the active slot even has one owned/rendered
-	-- for it -- the other tab, or an unowned id, means no-op) in place: same
-	-- label decision render() uses, no destroy/rebuild, no scroll disturbance.
 	local function updateEquipButtonLabel(id: string)
-		local card = holder:FindFirstChild(id)
+		local card = activeCardsById[id]
 		if card == nil then
 			return
 		end
-		local equipButton = card:FindFirstChild("EquipButton")
-		if equipButton == nil or not equipButton:IsA("GuiButton") then
-			return
-		end
-		local priceTag = equipButton:FindFirstChild("PriceTag")
-		if priceTag == nil or not priceTag:IsA("TextLabel") then
+		local priceTag = card.EquipPriceTag
+		if priceTag == nil then
 			return
 		end
 		local slot: CosmeticsCatalog.Slot = activeSlot
 		priceTag.Text = equipButtonLabel(id, equippedIds[slot], defaultIdForSlot(slot))
 	end
 
-	-- {"Cosmetics","Owned"} fires once per server tableInsert -- grant-all
-	-- does hundreds in one burst, which would otherwise mean hundreds of full
-	-- render()s. Coalesce to one: set a dirty flag, defer a single render,
-	-- and let any observer fires arriving before that deferred call runs
-	-- just keep the flag set instead of scheduling a second one.
-	local ownedRenderPending = false
-	local function scheduleRender()
-		if ownedRenderPending then
+	local function createCardView(): CardView
+		local root = template:Clone() :: Frame
+		root.Visible = false
+
+		local titleInstance = root:FindFirstChild("Title")
+		local title = if titleInstance ~= nil and titleInstance:IsA("TextLabel") then titleInstance else nil
+		local gradientInstance = root:FindFirstChild("UIGradient")
+		local gradient = if gradientInstance ~= nil and gradientInstance:IsA("UIGradient")
+			then gradientInstance
+			else nil
+		local iconInstance = root:FindFirstChild("Icon")
+		local icon = if iconInstance ~= nil and iconInstance:IsA("ImageLabel") then iconInstance else nil
+
+		-- Purchase remains permanently hidden in Cosmetics. Strip its effect
+		-- before the pooled card is first parented so UIKit never starts the
+		-- hidden Shine tween.
+		local purchase = root:FindFirstChild("Purchase")
+		if purchase ~= nil and purchase:IsA("GuiObject") then
+			purchase.Visible = false
+			clearEffectAttribute(purchase)
+			for _, descendant in purchase:GetDescendants() do
+				clearEffectAttribute(descendant)
+			end
+		end
+
+		local equipButtonInstance = root:FindFirstChild("EquipButton")
+		local equipButton = if equipButtonInstance ~= nil and equipButtonInstance:IsA("GuiButton")
+			then equipButtonInstance
+			else nil
+		local equipPriceTag: TextLabel? = nil
+		if equipButton ~= nil then
+			local priceTag = equipButton:FindFirstChild("PriceTag")
+			if priceTag ~= nil and priceTag:IsA("TextLabel") then
+				equipPriceTag = priceTag
+			end
+		end
+
+		local card: CardView = {
+			Slot = "KeycapThemes",
+			Id = "",
+			Root = root,
+			Title = title,
+			Gradient = gradient,
+			DefaultGradientColor = if gradient ~= nil then gradient.Color else nil,
+			Icon = icon,
+			DefaultIconImage = if icon ~= nil then icon.Image else "",
+			EquipPriceTag = equipPriceTag,
+		}
+		if equipButton ~= nil then
+			equipButton.MouseButton1Click:Connect(function()
+				onEquipButtonClicked(card.Slot, card.Id)
+			end)
+		end
+		return card
+	end
+
+	local function configureCard(
+		card: CardView,
+		slot: CosmeticsCatalog.Slot,
+		entry: CosmeticsCatalog.CatalogEntry,
+		catalogIndex: number
+	)
+		local needsStaticUpdate = card.Slot ~= slot or card.Id ~= entry.Id
+		card.Slot = slot
+		card.Id = entry.Id
+		card.Root.LayoutOrder = catalogIndex
+		if needsStaticUpdate then
+			card.Root.Name = entry.Id
+
+			local title = card.Title
+			if title ~= nil then
+				title.Text = entry.DisplayName
+			end
+
+			local gradient = card.Gradient
+			if gradient ~= nil then
+				gradient.Color = gradientFor(slot, entry.Id) or card.DefaultGradientColor or gradient.Color
+			end
+
+			local icon = card.Icon
+			if icon ~= nil then
+				if slot == "KeycapThemes" then
+					icon.Visible = true
+					local iconId = Images.ThemeIcons[entry.Id]
+					icon.Image = if iconId ~= nil then `rbxassetid://{iconId}` else card.DefaultIconImage
+				else
+					icon.Visible = false
+				end
+			end
+		end
+
+		local priceTag = card.EquipPriceTag
+		if priceTag ~= nil then
+			priceTag.Text = equipButtonLabel(entry.Id, equippedIds[slot], defaultIdForSlot(slot))
+		end
+		if card.Root.Parent == nil then
+			card.Root.Parent = holder
+		end
+		card.Root.Visible = true
+	end
+
+	local function nextInactiveCard(): CardView
+		for _, card in cardPool do
+			if not card.Root.Visible then
+				return card
+			end
+		end
+		local card = createCardView()
+		table.insert(cardPool, card)
+		return card
+	end
+
+	local function renderSlot()
+		local savedCanvasPosition = scrollFrame.CanvasPosition
+		for _, card in cardPool do
+			card.Root.Visible = false
+		end
+		table.clear(activeCardsById)
+
+		local slot: CosmeticsCatalog.Slot = activeSlot
+		local owned = ownedIds[slot]
+		for catalogIndex, entry in catalogForSlot(slot) do
+			if not owned[entry.Id] then
+				continue
+			end
+			local card = nextInactiveCard()
+			configureCard(card, slot, entry, catalogIndex)
+			activeCardsById[entry.Id] = card
+		end
+		hasRendered = true
+
+		task.defer(function()
+			scrollFrame.CanvasPosition = savedCanvasPosition
+		end)
+	end
+
+	local function reconcileActiveOwnership()
+		local slot: CosmeticsCatalog.Slot = activeSlot
+		local owned = ownedIds[slot]
+
+		for id, card in activeCardsById do
+			if not owned[id] then
+				card.Root.Visible = false
+				activeCardsById[id] = nil
+			end
+		end
+
+		for catalogIndex, entry in catalogForSlot(slot) do
+			if owned[entry.Id] and activeCardsById[entry.Id] == nil then
+				local card = nextInactiveCard()
+				configureCard(card, slot, entry, catalogIndex)
+				activeCardsById[entry.Id] = card
+			end
+		end
+	end
+
+	-- A grant-all can fire the ownership observer hundreds of times. Coalesce
+	-- each burst, then reconcile only added/removed cards. The first callback
+	-- performs the one required initial pool render.
+	local ownedRefreshPending = false
+	local function scheduleOwnershipRefresh()
+		if ownedRefreshPending then
 			return
 		end
-		ownedRenderPending = true
+		ownedRefreshPending = true
 		task.defer(function()
-			ownedRenderPending = false
-			render()
+			ownedRefreshPending = false
+			if hasRendered then
+				reconcileActiveOwnership()
+			else
+				renderSlot()
+			end
 		end)
 	end
 
 	keysButton.MouseButton1Click:Connect(function()
-		activeSlot = "KeycapThemes"
-		render()
+		if activeSlot ~= "KeycapThemes" or not hasRendered then
+			activeSlot = "KeycapThemes"
+			renderSlot()
+		end
 	end)
 	beamsButton.MouseButton1Click:Connect(function()
-		activeSlot = "SquishyBeams"
-		render()
+		if activeSlot ~= "SquishyBeams" or not hasRendered then
+			activeSlot = "SquishyBeams"
+			renderSlot()
+		end
 	end)
 	mergePopButton.MouseButton1Click:Connect(function()
-		activeSlot = "MergePops"
-		render()
+		if activeSlot ~= "MergePops" or not hasRendered then
+			activeSlot = "MergePops"
+			renderSlot()
+		end
 	end)
 
-	-- Re-renders (debounced -- see scheduleRender) so a live grant() shows up
-	-- while the menu is already open.
 	DataController.observe({ "Cosmetics", "Owned" }, function(value: any)
 		if type(value) ~= "table" then
 			return
@@ -338,12 +433,10 @@ function CosmeticsController.Start()
 		ownedIds.KeycapThemes = toIdSet(if type(keycapThemes) == "table" then keycapThemes else {})
 		ownedIds.SquishyBeams = toIdSet(if type(squishyBeams) == "table" then squishyBeams else {})
 		ownedIds.MergePops = toIdSet(if type(mergePops) == "table" then mergePops else {})
-		scheduleRender()
+		scheduleOwnershipRefresh()
 	end)
 
-	-- In place, NOT a re-render -- see updateEquipButtonLabel. At 131 cards a
-	-- full render() per equip (destroy + reclone + rebuild everything) is
-	-- wasted work for a change that only ever affects two cards.
+	-- Equip changes continue to patch only the previous and current labels.
 	DataController.observe({ "Cosmetics", "KeycapThemeId" }, function(value: any)
 		if type(value) ~= "string" then
 			return

@@ -52,19 +52,10 @@ local PREVIEW_DURATION = 15
 local ThemeShopController = {}
 
 local SHOP_DIVIDER_TEXT_BY_SLOT: { [CosmeticsCatalog.Slot]: string } = {
-	KeycapThemes = "- Key Theme Shop -",
+	KeycapThemes = "Owned Themes",
 	SquishyBeams = "- Beam Theme Shop -",
 	MergePops = "- Merge Pop Theme Shop -",
 }
-
--- Purchase's ShineContainer descendant carries Ui-Effect = Shine in the
--- template, same as Cosmetics' Purchase button. Only stripped from controls
--- this controller hides; Gift remains visible because vouchers are fungible.
-local function clearEffectAttribute(instance: Instance)
-	if instance:GetAttribute("Ui-Effect") ~= nil then
-		instance:SetAttribute("Ui-Effect", nil)
-	end
-end
 
 --[[
 	Every Ui-* attribute UIKitController.setupItem attaches purchase/gift/
@@ -162,15 +153,10 @@ end
 
 -- pcall-wrapped per quality-gate.md (GetProductInfoAsync can throw). Called
 -- once per voucher product, from the end of Start() -- AFTER every
--- frame/button/observer
--- is already wired up, so a throttled Marketplace call never leaves the shop
--- unusable while it's in flight (see Start()'s own comment on the ordering).
--- render() itself must still stay yield-free (it destroys the holder's
--- children before rebuilding, and a yield in that window lets a second
--- render(), e.g. from a tab click racing an owned-items update, observe an
--- empty holder and append a full second catalog on top) -- this function is
--- never called FROM render(), only before/after it, so that holds regardless
--- of where in Start() it's called from. Every cosmetic shares these voucher
+-- frame/button/observer is already wired up, so a throttled Marketplace call
+-- never leaves the shop unusable while it's in flight (see Start()'s own
+-- comment on the ordering). renderSlot() stays yield-free so observers
+-- cannot see a half-reconfigured pool. Every cosmetic shares these voucher
 -- prices, so a successful fetch never needs refetching; a failed fetch keeps
 -- the " ?" placeholder for the session rather than retrying (and therefore
 -- yielding) on a later render.
@@ -249,12 +235,9 @@ function ThemeShopController.Start()
 	local holder = scrollFrame:WaitForChild("Holder") :: Frame
 	local template = holder:WaitForChild("ThemeTemplate1") :: Frame
 
-	-- Defensive: render()'s destroy loop below already skips OwnedText by
-	-- name (never by LayoutOrder), but if this ever drifted to a nonzero
-	-- LayoutOrder in the template -- accidentally, in a future edit -- the
-	-- unowned-before/owned-after split (unownedOrder < 0 < ownedOrder) would
-	-- silently break. Forced once here rather than trusted to stay authored
-	-- correctly.
+	-- Pooled unowned cards sort below zero and owned cards above zero. Force
+	-- the divider to the boundary once rather than relying on its authored
+	-- LayoutOrder never drifting.
 	local ownedText = holder:FindFirstChild("OwnedText")
 	if ownedText ~= nil and ownedText:IsA("GuiObject") then
 		ownedText.LayoutOrder = 0
@@ -262,10 +245,41 @@ function ThemeShopController.Start()
 
 	local activeSlot: CosmeticsCatalog.Slot = "KeycapThemes"
 	local voucherCount = 0
+	local voucherCountText = "0"
 	local ownedIds: {
 		KeycapThemes: { [string]: true },
 		SquishyBeams: { [string]: true },
 		MergePops: { [string]: true },
+	} =
+		{
+			KeycapThemes = {},
+			SquishyBeams = {},
+			MergePops = {},
+		}
+
+	type CardView = {
+		Slot: CosmeticsCatalog.Slot,
+		Id: string,
+		CatalogIndex: number,
+		IsOwned: boolean,
+		Root: Frame,
+		Title: TextLabel?,
+		Gradient: UIGradient?,
+		DefaultGradientColor: ColorSequence?,
+		Icon: ImageLabel?,
+		DefaultIconImage: string,
+		PurchasePriceTag: TextLabel?,
+		CashPriceTag: TextLabel?,
+		GiftPriceTag: TextLabel?,
+		VoucherMainLabel: TextLabel?,
+		VoucherShadowLabel: TextLabel?,
+	}
+	local activeCards: { CardView } = {}
+	local cardPool: { CardView } = {}
+	local gradientCache: {
+		KeycapThemes: { [string]: ColorSequence },
+		SquishyBeams: { [string]: ColorSequence },
+		MergePops: { [string]: ColorSequence },
 	} =
 		{
 			KeycapThemes = {},
@@ -450,174 +464,310 @@ function ThemeShopController.Start()
 	end
 
 	--[[
-		Clones `template` once per catalog entry in the active slot -- every
-		entry, unlike CosmeticsController's owned-only menu. Never touches the
-		template original (Parent stays Holder, Visible stays false in
-		Studio) or the Holder's own UIListLayout.
+		Every card Instance and button connection is pooled. A tab switch
+		reconfigures the existing pool and only grows it when the destination
+		catalog is larger than any catalog visited so far. It never destroys
+		and reclones the whole holder.
 
 		Unowned cards sort before OwnedText (LayoutOrder < 0, catalog order
 		preserved); owned cards sort after it (LayoutOrder > 0, catalog order
-		preserved) -- OwnedText itself (LayoutOrder 0) never needs touching.
+		preserved). LayoutOrder derives directly from CatalogIndex so one
+		ownership change only has to move one card; the whole section does not
+		need renumbering. OwnedText itself stays at LayoutOrder 0.
 	]]
-	local function render()
+	local function gradientFor(slot: CosmeticsCatalog.Slot, id: string): ColorSequence?
+		local cached = gradientCache[slot][id]
+		if cached ~= nil then
+			return cached
+		end
+
+		local sequence: ColorSequence?
+		if slot == "KeycapThemes" then
+			local colors = KeyCapsController.getThemeColors(id)
+			sequence = if colors ~= nil then colorSequenceFromTheme(colors) else nil
+		elseif slot == "SquishyBeams" then
+			sequence = colorSequenceFromBeam(id)
+		else
+			sequence = colorSequenceFromMergePop(id)
+		end
+		if sequence ~= nil then
+			gradientCache[slot][id] = sequence
+		end
+		return sequence
+	end
+
+	local function updatePurchasePrice(card: CardView)
+		local priceTag = card.PurchasePriceTag
+		if priceTag == nil then
+			return
+		end
+		priceTag.Text = if card.IsOwned
+			then voucherRobuxPrice
+			elseif voucherCount > 0 then "Use Voucher"
+			else voucherRobuxPrice
+	end
+
+	local function updateCashPrice(card: CardView)
+		local priceTag = card.CashPriceTag
+		if priceTag == nil then
+			return
+		end
+		local cashPrice = if card.IsOwned
+			then CosmeticsShopConfig.VOUCHER_CASH_PRICE
+			else CosmeticsShopConfig.CASH_PRICE[card.Slot]
+		priceTag.Text = formatCashPrice(cashPrice)
+	end
+
+	local function updateGiftPrice(card: CardView)
+		local priceTag = card.GiftPriceTag
+		if priceTag ~= nil then
+			priceTag.Text = if voucherCount > 0 then "Gift Voucher" else giftVoucherRobuxPrice
+		end
+	end
+
+	local function applyOwnership(card: CardView, isOwned: boolean)
+		card.IsOwned = isOwned
+		card.Root.LayoutOrder = if isOwned then card.CatalogIndex else -1000000 + card.CatalogIndex
+		updatePurchasePrice(card)
+		updateCashPrice(card)
+	end
+
+	local function refreshActiveOwnership()
+		local owned = ownedIds[activeSlot]
+		for _, card in activeCards do
+			local isOwned = owned[card.Id] == true
+			if isOwned ~= card.IsOwned then
+				applyOwnership(card, isOwned)
+			end
+		end
+	end
+
+	local function refreshActiveVoucherPresentation()
+		for _, card in activeCards do
+			local mainLabel = card.VoucherMainLabel
+			if mainLabel ~= nil then
+				mainLabel.Text = voucherCountText
+			end
+			local shadowLabel = card.VoucherShadowLabel
+			if shadowLabel ~= nil then
+				shadowLabel.Text = voucherCountText
+			end
+			updatePurchasePrice(card)
+			updateGiftPrice(card)
+		end
+	end
+
+	local function refreshActiveRobuxPrices()
+		for _, card in activeCards do
+			updatePurchasePrice(card)
+			updateGiftPrice(card)
+		end
+	end
+
+	local function createCardView(): CardView
+		local root = template:Clone() :: Frame
+		root.Visible = false
+
+		local titleInstance = root:FindFirstChild("Title")
+		local title = if titleInstance ~= nil and titleInstance:IsA("TextLabel") then titleInstance else nil
+		local gradientInstance = root:FindFirstChild("UIGradient")
+		local gradient = if gradientInstance ~= nil and gradientInstance:IsA("UIGradient")
+			then gradientInstance
+			else nil
+		local iconInstance = root:FindFirstChild("Icon")
+		local icon = if iconInstance ~= nil and iconInstance:IsA("ImageLabel") then iconInstance else nil
+
+		local purchaseButtonInstance = root:FindFirstChild("Purchase")
+		local purchaseButton = if purchaseButtonInstance ~= nil and purchaseButtonInstance:IsA("GuiButton")
+			then purchaseButtonInstance
+			else nil
+		local cashButtonInstance = root:FindFirstChild("CashPurchase")
+		local cashButton = if cashButtonInstance ~= nil and cashButtonInstance:IsA("GuiButton")
+			then cashButtonInstance
+			else nil
+		local giftButtonInstance = root:FindFirstChild("Gift")
+		local giftButton = if giftButtonInstance ~= nil and giftButtonInstance:IsA("GuiButton")
+			then giftButtonInstance
+			else nil
+		local previewButtonInstance = root:FindFirstChild("Preview")
+		local previewButton = if previewButtonInstance ~= nil and previewButtonInstance:IsA("GuiButton")
+			then previewButtonInstance
+			else nil
+
+		local purchasePriceTag: TextLabel? = nil
+		local cashPriceTag: TextLabel? = nil
+		local giftPriceTag: TextLabel? = nil
+		local voucherMainLabel: TextLabel? = nil
+		local voucherShadowLabel: TextLabel? = nil
+
+		if purchaseButton ~= nil then
+			purchaseButton.Visible = true
+			local priceTag = purchaseButton:FindFirstChild("PriceTag")
+			if priceTag ~= nil and priceTag:IsA("TextLabel") then
+				purchasePriceTag = priceTag
+			end
+			local voucherDisplay = purchaseButton:FindFirstChild("Vouchers")
+			local hasVoucherDisplay = voucherDisplay ~= nil and voucherDisplay:IsA("GuiObject")
+			if hasVoucherDisplay then
+				local display = voucherDisplay :: GuiObject
+				display.Visible = true
+				local mainLabel = display:FindFirstChild("main")
+				local shadowLabel = display:FindFirstChild("shadow")
+				if mainLabel ~= nil and mainLabel:IsA("TextLabel") then
+					voucherMainLabel = mainLabel
+				end
+				if shadowLabel ~= nil and shadowLabel:IsA("TextLabel") then
+					voucherShadowLabel = shadowLabel
+				end
+			end
+			if purchasePriceTag ~= nil then
+				purchasePriceTag.Visible = not hasVoucherDisplay
+			end
+		end
+
+		if cashButton ~= nil then
+			cashButton.Visible = true
+			local priceTag = cashButton:FindFirstChild("PriceTag")
+			if priceTag ~= nil and priceTag:IsA("TextLabel") then
+				cashPriceTag = priceTag
+			end
+		end
+
+		if giftButton ~= nil then
+			local priceTag = giftButton:FindFirstChild("PriceTag")
+			if priceTag ~= nil and priceTag:IsA("TextLabel") then
+				giftPriceTag = priceTag
+			end
+		end
+
+		local card: CardView = {
+			Slot = "KeycapThemes",
+			Id = "",
+			CatalogIndex = 0,
+			IsOwned = false,
+			Root = root,
+			Title = title,
+			Gradient = gradient,
+			DefaultGradientColor = if gradient ~= nil then gradient.Color else nil,
+			Icon = icon,
+			DefaultIconImage = if icon ~= nil then icon.Image else "",
+			PurchasePriceTag = purchasePriceTag,
+			CashPriceTag = cashPriceTag,
+			GiftPriceTag = giftPriceTag,
+			VoucherMainLabel = voucherMainLabel,
+			VoucherShadowLabel = voucherShadowLabel,
+		}
+
+		if purchaseButton ~= nil then
+			purchaseButton.MouseButton1Click:Connect(function()
+				Net.voucherPurchase.send({
+					slot = card.Slot,
+					id = card.Id,
+				})
+			end)
+		end
+		if cashButton ~= nil then
+			cashButton.MouseButton1Click:Connect(function()
+				Net.cosmeticCashBuy.send({ slot = card.Slot, id = card.Id })
+			end)
+		end
+		if giftButton ~= nil then
+			giftButton.MouseButton1Click:Connect(function()
+				MonetizationController.StartVoucherGiftPrompt("ThemeShop")
+			end)
+		end
+		if previewButton ~= nil then
+			previewButton.MouseButton1Click:Connect(function()
+				if card.Slot == "KeycapThemes" then
+					previewKeycapTheme(card.Id)
+				elseif card.Slot == "SquishyBeams" then
+					previewSquishyBeam(card.Id)
+				else
+					previewMergePop(card.Id)
+				end
+			end)
+		end
+
+		-- This only runs once per pooled Instance, before its first parenting.
+		-- Tab switches cannot accumulate UIKit marketplace connections.
+		clearMonetizationAttributesDeep(root)
+		return card
+	end
+
+	local function configureCard(
+		card: CardView,
+		slot: CosmeticsCatalog.Slot,
+		entry: CosmeticsCatalog.CatalogEntry,
+		catalogIndex: number
+	)
+		local needsStaticUpdate = card.Slot ~= slot or card.Id ~= entry.Id
+		card.Slot = slot
+		card.Id = entry.Id
+		card.CatalogIndex = catalogIndex
+		if needsStaticUpdate then
+			card.Root.Name = entry.Id
+
+			local title = card.Title
+			if title ~= nil then
+				title.Text = entry.DisplayName
+			end
+
+			local gradient = card.Gradient
+			if gradient ~= nil then
+				gradient.Color = gradientFor(slot, entry.Id) or card.DefaultGradientColor or gradient.Color
+			end
+
+			local icon = card.Icon
+			if icon ~= nil then
+				if slot == "KeycapThemes" then
+					icon.Visible = true
+					local iconId = Images.ThemeIcons[entry.Id]
+					icon.Image = if iconId ~= nil then `rbxassetid://{iconId}` else card.DefaultIconImage
+				else
+					icon.Visible = false
+				end
+			end
+		end
+
+		local mainLabel = card.VoucherMainLabel
+		if mainLabel ~= nil then
+			mainLabel.Text = voucherCountText
+		end
+		local shadowLabel = card.VoucherShadowLabel
+		if shadowLabel ~= nil then
+			shadowLabel.Text = voucherCountText
+		end
+
+		applyOwnership(card, ownedIds[slot][entry.Id] == true)
+		updateGiftPrice(card)
+		if card.Root.Parent == nil then
+			card.Root.Parent = holder
+		end
+		card.Root.Visible = true
+	end
+
+	local function renderSlot()
 		if ownedText ~= nil and ownedText:IsA("TextLabel") then
 			ownedText.Text = SHOP_DIVIDER_TEXT_BY_SLOT[activeSlot]
 		end
 
 		local savedCanvasPosition = scrollFrame.CanvasPosition
 
-		-- Skipped by name, not just by class: OwnedText is currently a
-		-- TextLabel (not a Frame, so child:IsA("Frame") already excludes it),
-		-- but the unowned/owned split below depends on this divider surviving
-		-- every rebuild regardless of what type it's authored as.
-		for _, child in holder:GetChildren() do
-			if child ~= template and child.Name ~= "OwnedText" and child:IsA("Frame") then
-				child:Destroy()
-			end
-		end
+		table.clear(activeCards)
 
 		local slot: CosmeticsCatalog.Slot = activeSlot
-		local owned = ownedIds[slot]
-		local unownedOrder = -1000000
-		local ownedOrder = 0
-		-- Fetched once per voucher product in Start(), not here -- every card
-		-- in every slot shares them, and render() must stay yield-free (see
-		-- robuxPriceText's comment).
-		local unownedPurchaseText = if voucherCount > 0 then "Use Voucher" else voucherRobuxPrice
-		local giftText = if voucherCount > 0 then "Gift Voucher" else giftVoucherRobuxPrice
-
-		for _, entry in CosmeticsCatalog.catalogForSlot(slot) do
-			local isOwned = owned[entry.Id] == true
-
-			local card = template:Clone() :: Frame
-			card.Name = entry.Id
-			card.Visible = true
-			if isOwned then
-				ownedOrder += 1
-				card.LayoutOrder = ownedOrder
-			else
-				unownedOrder += 1
-				card.LayoutOrder = unownedOrder
+		local catalog = CosmeticsCatalog.catalogForSlot(slot)
+		for catalogIndex, entry in CosmeticsCatalog.catalogForSlot(slot) do
+			local card = cardPool[catalogIndex]
+			if card == nil then
+				card = createCardView()
+				table.insert(cardPool, card)
 			end
-
-			local title = card:FindFirstChild("Title")
-			if title ~= nil and title:IsA("TextLabel") then
-				title.Text = entry.DisplayName
-			end
-
-			local gradient = card:FindFirstChild("UIGradient")
-			if gradient ~= nil and gradient:IsA("UIGradient") then
-				local sequence: ColorSequence?
-				if slot == "KeycapThemes" then
-					local colors = KeyCapsController.getThemeColors(entry.Id)
-					sequence = if colors ~= nil then colorSequenceFromTheme(colors) else nil
-				elseif slot == "SquishyBeams" then
-					sequence = colorSequenceFromBeam(entry.Id)
-				else
-					sequence = colorSequenceFromMergePop(entry.Id)
-				end
-				if sequence ~= nil then
-					gradient.Color = sequence
-				end
-			end
-
-			local icon = card:FindFirstChild("Icon")
-			if icon ~= nil and icon:IsA("ImageLabel") then
-				if slot == "KeycapThemes" then
-					local iconId = Images.ThemeIcons[entry.Id]
-					if iconId ~= nil then
-						icon.Image = `rbxassetid://{iconId}`
-					end
-				else
-					icon.Visible = false
-					clearEffectAttribute(icon)
-					for _, descendant in icon:GetDescendants() do
-						clearEffectAttribute(descendant)
-					end
-				end
-			end
-
-			local purchaseButton = card:FindFirstChild("Purchase")
-			local cashButton = card:FindFirstChild("CashPurchase")
-			local giftButton = card:FindFirstChild("Gift")
-			local previewButton = card:FindFirstChild("Preview")
-
-			-- Purchase remains useful on owned cards: after a confirmation
-			-- click, it explicitly buys another generic voucher instead of
-			-- trying to redeem one for a cosmetic the player already has.
-			if purchaseButton ~= nil and purchaseButton:IsA("GuiButton") then
-				purchaseButton.Visible = true
-				local priceTag = purchaseButton:FindFirstChild("PriceTag")
-				local voucherDisplay = purchaseButton:FindFirstChild("Vouchers")
-				local hasVoucherDisplay = voucherDisplay ~= nil and voucherDisplay:IsA("GuiObject")
-				if hasVoucherDisplay then
-					local display = voucherDisplay :: GuiObject
-					display.Visible = true
-					local voucherText = Format.FormatNumber(voucherCount)
-					local mainLabel = display:FindFirstChild("main")
-					local shadowLabel = display:FindFirstChild("shadow")
-					if mainLabel ~= nil and mainLabel:IsA("TextLabel") then
-						mainLabel.Text = voucherText
-					end
-					if shadowLabel ~= nil and shadowLabel:IsA("TextLabel") then
-						shadowLabel.Text = voucherText
-					end
-				end
-				if priceTag ~= nil and priceTag:IsA("TextLabel") then
-					priceTag.Text = if isOwned then voucherRobuxPrice else unownedPurchaseText
-					priceTag.Visible = not hasVoucherDisplay
-				end
-				purchaseButton.MouseButton1Click:Connect(function()
-					Net.voucherPurchase.send({
-						slot = slot,
-						id = entry.Id,
-					})
-				end)
-			end
-
-			-- CashPurchase also remains available. Confirming an already-owned
-			-- cosmetic spends the voucher cash price and pays one voucher
-			-- instead, so the transaction never becomes a duplicate no-op.
-			if cashButton ~= nil and cashButton:IsA("GuiButton") then
-				cashButton.Visible = true
-				local priceTag = cashButton:FindFirstChild("PriceTag")
-				if priceTag ~= nil and priceTag:IsA("TextLabel") then
-					local cashPrice = if isOwned
-						then CosmeticsShopConfig.VOUCHER_CASH_PRICE
-						else CosmeticsShopConfig.CASH_PRICE[slot]
-					priceTag.Text = formatCashPrice(cashPrice)
-				end
-				cashButton.MouseButton1Click:Connect(function()
-					Net.cosmeticCashBuy.send({ slot = slot, id = entry.Id })
-				end)
-			end
-
-			-- A gift is one fungible voucher, not this card's cosmetic, so the
-			-- action remains useful even when the local player owns the card.
-			if giftButton ~= nil and giftButton:IsA("GuiButton") then
-				local priceTag = giftButton:FindFirstChild("PriceTag")
-				if priceTag ~= nil and priceTag:IsA("TextLabel") then
-					priceTag.Text = giftText
-				end
-				giftButton.MouseButton1Click:Connect(function()
-					MonetizationController.StartVoucherGiftPrompt("ThemeShop")
-				end)
-			end
-
-			if previewButton ~= nil and previewButton:IsA("GuiButton") then
-				previewButton.MouseButton1Click:Connect(function()
-					if slot == "KeycapThemes" then
-						previewKeycapTheme(entry.Id)
-					elseif slot == "SquishyBeams" then
-						previewSquishyBeam(entry.Id)
-					else
-						previewMergePop(entry.Id)
-					end
-				end)
-			end
-
-			clearMonetizationAttributesDeep(card)
-			card.Parent = holder
+			configureCard(card, slot, entry, catalogIndex)
+			table.insert(activeCards, card)
+		end
+		for index = #catalog + 1, #cardPool do
+			cardPool[index].Root.Visible = false
 		end
 
 		task.defer(function()
@@ -625,10 +775,10 @@ function ThemeShopController.Start()
 		end)
 	end
 
-	-- No bare render() here -- ownedIds is empty until the
+	-- No bare renderSlot() here -- ownedIds is empty until the
 	-- DataController.observe callback below fires, which it does immediately
 	-- with the current value (DataController.observe replays on registration),
-	-- same as CosmeticsController's own Start(). A bare render() first would
+	-- same as CosmeticsController's own Start(). A bare renderSlot() first would
 	-- paint every card, including free defaults, as unowned for one frame.
 	-- No clearPreview() here (unlike each preview*() function's own call at
 	-- its start, still needed for "a new preview replaces the old one") -- a
@@ -637,29 +787,41 @@ function ThemeShopController.Start()
 	-- PREVIEW_DURATION so the player can keep looking at their base
 	-- regardless of which tab is open.
 	keysButton.MouseButton1Click:Connect(function()
-		activeSlot = "KeycapThemes"
-		render()
+		if activeSlot ~= "KeycapThemes" or #activeCards == 0 then
+			activeSlot = "KeycapThemes"
+			renderSlot()
+		end
 	end)
 	beamsButton.MouseButton1Click:Connect(function()
-		activeSlot = "SquishyBeams"
-		render()
+		if activeSlot ~= "SquishyBeams" or #activeCards == 0 then
+			activeSlot = "SquishyBeams"
+			renderSlot()
+		end
 	end)
 	mergePopButton.MouseButton1Click:Connect(function()
-		activeSlot = "MergePops"
-		render()
+		if activeSlot ~= "MergePops" or #activeCards == 0 then
+			activeSlot = "MergePops"
+			renderSlot()
+		end
 	end)
 
-	-- {"Cosmetics","Owned"} fires once per server tableInsert -- same
-	-- burst-coalescing debounce as CosmeticsController.scheduleRender.
-	local ownedRenderPending = false
-	local function scheduleRender()
-		if ownedRenderPending then
+	-- {"Cosmetics","Owned"} can fire once per server tableInsert. Coalesce a
+	-- burst, then diff the active CardViews and patch only cards whose
+	-- ownership actually changed. The first callback still performs the one
+	-- required initial slot render.
+	local ownedRefreshPending = false
+	local function scheduleOwnershipRefresh()
+		if ownedRefreshPending then
 			return
 		end
-		ownedRenderPending = true
+		ownedRefreshPending = true
 		task.defer(function()
-			ownedRenderPending = false
-			render()
+			ownedRefreshPending = false
+			if #activeCards == 0 then
+				renderSlot()
+			else
+				refreshActiveOwnership()
+			end
 		end)
 	end
 
@@ -673,15 +835,32 @@ function ThemeShopController.Start()
 		ownedIds.KeycapThemes = toIdSet(if type(keycapThemes) == "table" then keycapThemes else {})
 		ownedIds.SquishyBeams = toIdSet(if type(squishyBeams) == "table" then squishyBeams else {})
 		ownedIds.MergePops = toIdSet(if type(mergePops) == "table" then mergePops else {})
-		scheduleRender()
+		scheduleOwnershipRefresh()
 	end)
+
+	local voucherRefreshPending = false
+	local function scheduleVoucherRefresh()
+		if voucherRefreshPending or #activeCards == 0 then
+			return
+		end
+		voucherRefreshPending = true
+		task.defer(function()
+			voucherRefreshPending = false
+			refreshActiveVoucherPresentation()
+		end)
+	end
 
 	DataController.observe({ "UISystem", "Vouchers" }, function(value: any)
 		if type(value) ~= "number" then
 			return
 		end
-		voucherCount = math.max(0, math.floor(value))
-		scheduleRender()
+		local nextVoucherCount = math.max(0, math.floor(value))
+		if nextVoucherCount == voucherCount then
+			return
+		end
+		voucherCount = nextVoucherCount
+		voucherCountText = Format.FormatNumber(voucherCount)
+		scheduleVoucherRefresh()
 	end)
 
 	-- No frame Visible-changed cancellation here (deliberately -- Frame close,
@@ -694,14 +873,14 @@ function ThemeShopController.Start()
 	-- (mainGui.Enabled = false) rather than this frame's Visible.
 	--
 	-- Fetched last, after every frame/button/observer above is already wired
-	-- (see robuxPriceText's own comment) -- patches the placeholder into
-	-- every already-rendered PriceTag with one re-render if it lands.
+	-- (see robuxPriceText's own comment) -- patches only the relevant text
+	-- labels in the existing CardViews if either placeholder changes.
 	local fetchedVoucherPrice = robuxPriceText(CosmeticsShopConfig.VOUCHER_PRODUCT_ID)
 	local fetchedGiftVoucherPrice = robuxPriceText(CosmeticsShopConfig.GIFT_VOUCHER_PRODUCT_ID)
 	if fetchedVoucherPrice ~= voucherRobuxPrice or fetchedGiftVoucherPrice ~= giftVoucherRobuxPrice then
 		voucherRobuxPrice = fetchedVoucherPrice
 		giftVoucherRobuxPrice = fetchedGiftVoucherPrice
-		render()
+		refreshActiveRobuxPrices()
 	end
 
 	log.info("ready")
