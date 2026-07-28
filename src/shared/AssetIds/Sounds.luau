@@ -39,7 +39,7 @@ local Sounds = {
 	MergeSquishyA = { Id = 125536824124728, Start = 0.1 }, -- squishy merge pop -- MergeVfxController (random pick)
 	MergeSquishyB = { Id = 125536824124728, Start = 0.1 }, -- squishy merge pop -- MergeVfxController (random pick)
 	SquishyLand = { Id = 130134863677489, Start = 0 }, -- launch touchdown thud -- MergeService.Launch
-	SquishyPop = { Id = 125375534049465, Start = 0.1 }, -- launcher-only impact pop -- LaunchVfxController
+	SquishyPop = { Id = 125375534049465, Start = 0.1 }, -- proximity launch impact pop -- LaunchVfxController
 	MusicLifeInAnElevator = { Id = 1841647093 }, -- "Life in an Elevator" -- ambient playlist
 	MusicRelaxedScene = { Id = 1848354536 }, -- "Relaxed Scene" -- ambient playlist
 	MusicShiawase = { Id = 5409360995 }, -- "Dion Timmer - Shiawase" -- ambient playlist

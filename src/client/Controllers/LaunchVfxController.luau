@@ -7,9 +7,9 @@
 	the one-shot cannot race a newly-replicated server clone. Every emitter stays
 	disabled; its authored EmitCount and EmitDelay attributes drive the burst.
 
-	The explosion pop is also created here, but from a separate packet sent
-	only to the player who launched. Other observers still see the impact
-	particles without hearing a globally replicated server Sound.
+	The explosion pop rides the same broadcast and is instantiated locally at
+	the impact position with short 3D rolloff. Nearby observers hear it, while
+	distant players do not hear a map-wide replicated Sound.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -28,6 +28,8 @@ local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 local log = Log.new("LaunchVfxController")
 local VFX_LINGER = 0.5
 local EXPLOSION_SOUND_VOLUME = 2
+local EXPLOSION_SOUND_MIN_DISTANCE = 8
+local EXPLOSION_SOUND_MAX_DISTANCE = 80
 local SOUND_LIFETIME = 10
 local VFX_SCALE_OPTIONS: VfxScaler.Options = {
 	motion = true,
@@ -39,14 +41,16 @@ local launchVfxFolder = ReplicatedStorage.Assets.VFX.LaunchExplosion
 
 local LaunchVfxController = {}
 
-local function playExplosionSound()
+local function playExplosionSound(anchor: BasePart)
 	local sound = Instance.new("Sound")
 	sound.Name = "LaunchExplosionSound"
 	sound.Volume = EXPLOSION_SOUND_VOLUME
+	sound.RollOffMode = Enum.RollOffMode.InverseTapered
+	sound.RollOffMinDistance = EXPLOSION_SOUND_MIN_DISTANCE
+	sound.RollOffMaxDistance = EXPLOSION_SOUND_MAX_DISTANCE
 	sound.SoundGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 	SoundKit.apply(sound, Sounds.SquishyPop)
-	sound.Parent = SoundService
-	Debris:AddItem(sound, SOUND_LIFETIME)
+	sound.Parent = anchor
 	sound:Play()
 end
 
@@ -74,7 +78,8 @@ local function playExplosion(template: Attachment, position: Vector3)
 	explosion.Parent = anchor
 	scaleLaunchVfx(explosion, MergeConfig.LAUNCH_EXPLOSION_VFX_SCALE_MULTIPLIER)
 
-	Debris:AddItem(anchor, AuthoredVfx.emitBurst(explosion) + VFX_LINGER)
+	playExplosionSound(anchor)
+	Debris:AddItem(anchor, math.max(AuthoredVfx.emitBurst(explosion) + VFX_LINGER, SOUND_LIFETIME))
 end
 
 local function playGroundHit(template: BasePart, position: Vector3)
@@ -115,7 +120,6 @@ function LaunchVfxController.Init()
 	Net.mergeLaunchVfx.listen(function(data)
 		play(data.templateName, Vector3.new(data.worldX, data.worldY, data.worldZ))
 	end)
-	Net.mergeLaunchExplosionSound.listen(playExplosionSound)
 end
 
 function LaunchVfxController.Start()

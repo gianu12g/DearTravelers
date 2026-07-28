@@ -30,7 +30,6 @@ local LaunchEffects = require(script.Parent.LaunchEffects)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
-local Net = require(ReplicatedStorage.Shared.Net)
 local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local Sounds = require(ReplicatedStorage.Shared.AssetIds.Sounds)
 local Spawning = require(script.Parent.Spawning)
@@ -485,13 +484,11 @@ end
 
 -- Explosion fires during the landing rebound at explosionPosAtt. GroundHit is
 -- sent separately at touchdown, before the landing squash begins.
-local function explodeDroppedSquishy(player: Player, launch: Types.LaunchState, position: Vector3)
+local function explodeDroppedSquishy(launch: Types.LaunchState, position: Vector3)
 	local explosionPosition = launchVfxPoint(launch, LAUNCH_EXPLOSION_ATTACHMENT_NAME, position)
 	LaunchEffects.hideLaunchVisual(launch)
-	-- The particles remain visible to every observer, but the pop is private
-	-- to the player who initiated the launch. A server-created Sound under
-	-- this replicated projectile made every client hear it.
-	Net.mergeLaunchExplosionSound.sendTo(nil, player)
+	-- Every client renders both the particles and spatial pop from this event.
+	-- The sound is locally created at explosionPosition with short rolloff.
 	Vfx.spawnLaunchImpactVfx(explosionPosition)
 end
 
@@ -597,7 +594,7 @@ local function runLaunch(player: Player, launch: Types.LaunchState, targetPositi
 		LAUNCH_IMPACT_SQUASH_HOLD,
 		LAUNCH_IMPACT_SQUASH_OUT,
 		function()
-			explodeDroppedSquishy(player, launch, targetPosition)
+			explodeDroppedSquishy(launch, targetPosition)
 		end
 	)
 	if not impactSquishOk then
