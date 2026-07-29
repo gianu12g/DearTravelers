@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Rotating 3-slot promo carousel on the HUD's right side
-	(PlayerGui.Main.HUD.Right.SideItem1-3). Ported from the source's
+	(PlayerGui.Main.HUD.Right.SideProducts.SideItem1-3). Ported from the source's
 	Controllers/PromotionController.luau, and avoids repeating the same items
 	back-to-back. Configured passes remain visible after purchase so the HUD
 	always keeps all three authored slots.
@@ -147,11 +147,12 @@ function PromotionController.Start()
 	local main = playerGui:WaitForChild("Main")
 	local hud = main:WaitForChild("HUD")
 	local right = hud:WaitForChild("Right")
+	local sideProducts = right:WaitForChild("SideProducts")
 
 	local items: { [number]: GuiObject } = {
-		[1] = right:WaitForChild("SideItem1") :: GuiObject,
-		[2] = right:WaitForChild("SideItem2") :: GuiObject,
-		[3] = right:WaitForChild("SideItem3") :: GuiObject,
+		[1] = sideProducts:WaitForChild("SideItem1") :: GuiObject,
+		[2] = sideProducts:WaitForChild("SideItem2") :: GuiObject,
+		[3] = sideProducts:WaitForChild("SideItem3") :: GuiObject,
 	}
 
 	local activePromotions: { [number]: ActivePromotion } = {

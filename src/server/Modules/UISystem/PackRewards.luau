@@ -7,22 +7,36 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
+local CosmeticsService = require(ServerStorage.Services.CosmeticsService)
 local Log = require(ReplicatedStorage.Shared.Log)
 
 local log = Log.new("PackRewards")
 
-local function stub(packName: string): (Player) -> boolean
-	return function(player: Player)
-		-- STUB: replace with the real reward for the "{packName}" pack.
-		log.debug(`pack reward stub "{packName}" for {player.Name}`)
-		return false
+local ARCADE_THEMES_PACK = {
+	"CandyCircuit",
+	"NeonGrid",
+	"AcidPulse",
+	"SolarFlare",
+	"BlueReactor",
+}
+
+local function grantArcadeThemesPack(player: Player): boolean
+	-- grant() is idempotent for themes the player already owns. If a later
+	-- grant fails, Roblox can safely retry the receipt: successful earlier
+	-- grants remain owned and become no-ops on the next attempt.
+	for _, themeId in ARCADE_THEMES_PACK do
+		if not CosmeticsService.grant(player, "KeycapThemes", themeId) then
+			log.warn(`failed to grant keycap theme "{themeId}" to {player.Name}`)
+			return false
+		end
 	end
+	return true
 end
 
 local PackRewards: { [string]: (Player) -> boolean } = {
-	["Starter Pack"] = stub("Starter Pack"),
-	["Secret Pack"] = stub("Secret Pack"),
+	["Arcade Themes Pack"] = grantArcadeThemesPack,
 }
 
 return PackRewards

@@ -28,7 +28,6 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserService = game:GetService("UserService")
-local Workspace = game:GetService("Workspace")
 
 local DataController = require(script.Parent.Parent.DataController)
 local Frames = require(script.Parent.Parent.Parent.UI.UISystem.Frames)
@@ -42,7 +41,6 @@ local UISignals = require(script.Parent.Parent.Parent.UI.UISystem.UISignals)
 local log = Log.new("MonetizationController")
 
 local player = Players.LocalPlayer
-local camera = Workspace.CurrentCamera
 
 type ItemType = "Pass" | "Product" | "Pack"
 
@@ -52,13 +50,8 @@ local INFO_TYPE: { [ItemType]: Enum.InfoType } = {
 	Pack = Enum.InfoType.Product,
 }
 
-local PROMPT_TWEEN_INFO = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local FOV_OPEN = 50
-local FOV_CLOSE = 70
-local BLUR_SIZE = 40
-
 type GiftData = {
-	GiftType: "Pass" | "Product" | "Voucher",
+	GiftType: "Pass" | "Product" | "Pack" | "Voucher",
 	GiftName: string,
 	GiftTarget: number,
 	-- Which frame opened the picker, so its Close button returns there
@@ -80,6 +73,17 @@ local priceCache: { [ItemType]: { [number]: number } } = {
 	Product = {},
 	Pack = {},
 }
+
+type PackConfigEntry = {
+	Enabled: boolean,
+	ProductID: number,
+	GiftID: number?,
+	ExpectedPrice: number?,
+	ExpectedGiftPrice: number?,
+}
+
+local PacksByName = (PacksConfig :: any) :: { [string]: PackConfigEntry }
+local warnedPackPrices: { [string]: true } = {}
 
 -- Local mirror of the two replicated ownership tables, refreshed by
 -- DataController.observe in Start(). GiftedPasses is a map (passName ->
@@ -127,8 +131,54 @@ local function fetchPrice(id: number, itemType: ItemType): number?
 	return nil
 end
 
+local function isPackPriceLive(packName: string, packConfig: PackConfigEntry): boolean
+	local expectedPrice = packConfig.ExpectedPrice
+	if expectedPrice == nil then
+		return true
+	end
+
+	local actualPrice = fetchPrice(packConfig.ProductID, "Pack")
+	if actualPrice == expectedPrice then
+		return true
+	end
+
+	if not warnedPackPrices[packName] then
+		warnedPackPrices[packName] = true
+		log.warn(
+			`pack "{packName}" expects {expectedPrice} Robux, but Roblox returned {actualPrice or "no price"}; purchase disabled`
+		)
+	end
+	return false
+end
+
+local function isPackGiftPriceLive(packName: string, packConfig: PackConfigEntry): boolean
+	local giftId = packConfig.GiftID
+	local expectedPrice = packConfig.ExpectedGiftPrice
+	if giftId == nil or giftId <= 0 then
+		return false
+	end
+	if expectedPrice == nil then
+		return true
+	end
+
+	local actualPrice = fetchPrice(giftId, "Pack")
+	if actualPrice == expectedPrice then
+		return true
+	end
+
+	local warningKey = packName .. ":gift"
+	if not warnedPackPrices[warningKey] then
+		warnedPackPrices[warningKey] = true
+		log.warn(
+			`pack gift "{packName}" expects {expectedPrice} Robux, but Roblox returned {actualPrice or "no price"}; gift disabled`
+		)
+	end
+	return false
+end
+
 function MonetizationController.GetPrice(itemType: ItemType, itemName: string): number?
 	local id: number?
+	local expectedPrice: number?
 	if itemType == "Pass" then
 		local passConfig = PassesConfig[itemName]
 		id = if passConfig ~= nil then passConfig.PassID else nil
@@ -136,8 +186,9 @@ function MonetizationController.GetPrice(itemType: ItemType, itemName: string): 
 		local productConfig = ProductsConfig[itemName]
 		id = if productConfig ~= nil then productConfig.ProductID else nil
 	else
-		local packConfig = PacksConfig[itemName]
+		local packConfig = PacksByName[itemName]
 		id = if packConfig ~= nil then packConfig.ProductID else nil
+		expectedPrice = if packConfig ~= nil then packConfig.ExpectedPrice else nil
 	end
 
 	if id == nil then
@@ -145,7 +196,11 @@ function MonetizationController.GetPrice(itemType: ItemType, itemName: string): 
 		return nil
 	end
 
-	return fetchPrice(id, itemType)
+	local marketplacePrice = fetchPrice(id, itemType)
+	if itemType == "Pack" and expectedPrice ~= nil then
+		return expectedPrice
+	end
+	return marketplacePrice
 end
 
 function MonetizationController.IsPassOwned(passName: string): boolean
@@ -175,16 +230,7 @@ local function openPromptAnimation()
 	local promptUi = fullGui:WaitForChild("PromptUi") :: Frame
 	promptUi.Visible = true
 	mainGui.Enabled = false
-
-	if camera ~= nil then
-		TweenService:Create(camera, PROMPT_TWEEN_INFO, { FieldOfView = FOV_OPEN }):Play()
-	end
-
-	local blur = game:GetService("Lighting"):FindFirstChildOfClass("BlurEffect")
-	if blur ~= nil then
-		blur.Enabled = true
-		TweenService:Create(blur, PROMPT_TWEEN_INFO, { Size = BLUR_SIZE }):Play()
-	end
+	UISignals.PromptVisibilityChanged.Fire(true)
 end
 
 local function closePromptAnimation()
@@ -194,19 +240,7 @@ local function closePromptAnimation()
 	local promptUi = fullGui:WaitForChild("PromptUi") :: Frame
 	promptUi.Visible = false
 	mainGui.Enabled = true
-
-	if camera ~= nil then
-		TweenService:Create(camera, PROMPT_TWEEN_INFO, { FieldOfView = FOV_CLOSE }):Play()
-	end
-
-	local blur = game:GetService("Lighting"):FindFirstChildOfClass("BlurEffect")
-	if blur ~= nil then
-		local blurTween = TweenService:Create(blur, PROMPT_TWEEN_INFO, { Size = 0 })
-		blurTween.Completed:Once(function()
-			blur.Enabled = false
-		end)
-		blurTween:Play()
-	end
+	UISignals.PromptVisibilityChanged.Fire(false)
 end
 
 function MonetizationController.StartPassPrompt(passName: string)
@@ -230,9 +264,12 @@ function MonetizationController.StartProductPrompt(productName: string)
 end
 
 function MonetizationController.StartPackPrompt(packName: string)
-	local packConfig = PacksConfig[packName]
+	local packConfig = PacksByName[packName]
 	if packConfig == nil or not packConfig.Enabled then
 		log.warn(`StartPackPrompt: unknown pack "{packName}"`)
+		return
+	end
+	if not isPackPriceLive(packName, packConfig) then
 		return
 	end
 	MarketplaceService:PromptProductPurchase(player, packConfig.ProductID)
@@ -290,19 +327,24 @@ function MonetizationController.SetProductButton(button: GuiButton, productName:
 end
 
 function MonetizationController.SetPackButton(button: GuiButton, packName: string)
-	local packConfig = PacksConfig[packName]
+	local packConfig = PacksByName[packName]
 	if packConfig == nil or not packConfig.Enabled then
 		button.Visible = false
 		return
 	end
 	table.insert(packButtons, { button = button, name = packName })
+	if MonetizationController.IsPackOwned(packName) then
+		applyOwnedState(button)
+		return
+	end
+	if not isPackPriceLive(packName, packConfig) then
+		button.Active = false
+		button.Selectable = false
+		return
+	end
 	button.MouseButton1Click:Connect(function()
 		MonetizationController.StartPackPrompt(packName)
 	end)
-
-	if MonetizationController.IsPackOwned(packName) then
-		applyOwnedState(button)
-	end
 end
 
 function MonetizationController.SetPassGiftButton(button: GuiButton, passName: string)
@@ -343,12 +385,36 @@ function MonetizationController.SetProductGiftButton(button: GuiButton, productN
 	end)
 end
 
--- Opens the existing target picker for a fungible Theme Voucher. Selecting a
+function MonetizationController.SetPackGiftButton(button: GuiButton, packName: string)
+	local packConfig = PacksByName[packName]
+	if packConfig == nil or not packConfig.Enabled or packConfig.GiftID == nil then
+		button.Visible = false
+		return
+	end
+	if not isPackGiftPriceLive(packName, packConfig) then
+		button.Active = false
+		button.Selectable = false
+		return
+	end
+	button.MouseButton1Click:Connect(function()
+		giftData.GiftType = "Pack"
+		giftData.GiftName = packName
+		giftData.OriginFrame = "Shop"
+		local frame = Frames.get("GiftPlayerChoose")
+		local main = frame:WaitForChild("Main")
+		local holder = main:WaitForChild("Holder")
+		local heading = holder:WaitForChild("HeadngText") :: TextLabel
+		heading.Text = `- Gift "{packName}" To -`
+		UISignals.OpenFrame.Fire("GiftPlayerChoose")
+	end)
+end
+
+-- Opens the existing target picker for a fungible Theme Ticket. Selecting a
 -- player before the product prompt is UI state only: the Yes button prompts
 -- when the balance is zero, then requires a second post-receipt SEND click.
 function MonetizationController.StartVoucherGiftPrompt(originFrame: Frames.FrameName)
 	giftData.GiftType = "Voucher"
-	giftData.GiftName = "Theme Voucher"
+	giftData.GiftName = "Theme Ticket"
 	giftData.OriginFrame = originFrame
 	voucherTransferPending = false
 	voucherActiveRequestId = nil
@@ -357,7 +423,7 @@ function MonetizationController.StartVoucherGiftPrompt(originFrame: Frames.Frame
 	local main = frame:WaitForChild("Main")
 	local holder = main:WaitForChild("Holder")
 	local heading = holder:WaitForChild("HeadngText") :: TextLabel
-	heading.Text = '- Gift "Theme Voucher" To -'
+	heading.Text = '- Gift "Theme Ticket" To -'
 	UISignals.OpenFrame.Fire("GiftPlayerChoose")
 end
 
@@ -406,7 +472,7 @@ local function onPlayerSelected(userId: number, username: string, _displayName: 
 	local confirmFrame = Frames.get("GiftConfirm")
 	local areYouSure = confirmFrame:WaitForChild("AreYouSureText") :: TextLabel
 	if giftData.GiftType == "Voucher" then
-		areYouSure.Text = `Send 1 Theme Voucher to {username}?`
+		areYouSure.Text = `Send 1 Theme Ticket to {username}?`
 	else
 		areYouSure.Text = `Are you sure you want to gift "{giftData.GiftName}" to {username}?`
 	end
@@ -417,20 +483,45 @@ local function onPlayerSelected(userId: number, username: string, _displayName: 
 	UISignals.OpenFrame.Fire("GiftConfirm", false)
 end
 
+type GiftPlayerSection = "Server" | "Friend"
+
+local GIFT_SERVER_ENTRY_ORDER = 20
+local GIFT_FRIEND_ENTRY_ORDER = 40
+
+local function updateServerEmptyState(holder: Frame)
+	local emptyText = holder:FindFirstChild("ServerEmptyText")
+	if emptyText == nil or not emptyText:IsA("GuiObject") then
+		return
+	end
+
+	local hasServerPlayer = false
+	for _, child in holder:GetChildren() do
+		if child:IsA("Frame") and child:GetAttribute("GiftSection") == "Server" then
+			hasServerPlayer = true
+			break
+		end
+	end
+	emptyText.Visible = not hasServerPlayer
+end
+
 local function createPlayerFrame(
 	holder: Frame,
 	template: Frame,
 	userId: number,
 	username: string,
 	displayName: string,
-	isFriend: boolean?
+	section: GiftPlayerSection
 )
-	if holder:FindFirstChild(tostring(userId)) ~= nil then
+	local entryName = `{section}_{userId}`
+	if holder:FindFirstChild(entryName) ~= nil then
 		return
 	end
 
 	local frame = template:Clone()
-	frame.Name = tostring(userId)
+	frame.Name = entryName
+	frame.LayoutOrder = if section == "Server" then GIFT_SERVER_ENTRY_ORDER else GIFT_FRIEND_ENTRY_ORDER
+	frame:SetAttribute("GiftSection", section)
+	frame:SetAttribute("GiftUserId", userId)
 	local displayLabel = frame:WaitForChild("DisplayUser") :: TextLabel
 	local mainLabel = frame:WaitForChild("MainUser") :: TextLabel
 	displayLabel.Text = displayName
@@ -460,20 +551,10 @@ local function createPlayerFrame(
 		end)
 	end
 
-	local inServer = Players:GetPlayerByUserId(userId) ~= nil
-	if inServer and isFriend then
-		frame.LayoutOrder = 1
-	elseif inServer then
-		frame.LayoutOrder = 2
-	elseif isFriend then
-		frame.LayoutOrder = 3
-	end
-
-	if isFriend then
-		frame:SetAttribute("Friend", true)
-	end
-
 	frame.Parent = holder
+	if section == "Server" then
+		updateServerEmptyState(holder)
+	end
 end
 
 function MonetizationController.Init()
@@ -542,6 +623,21 @@ function MonetizationController.Start()
 	if heading ~= nil and heading:IsA("GuiObject") then
 		freezeHeight(heading)
 	end
+	local serverHeading = holder:FindFirstChild("PlayersInServerText")
+	if serverHeading ~= nil and serverHeading:IsA("GuiObject") then
+		freezeHeight(serverHeading)
+		serverHeading.LayoutOrder = 10
+	end
+	local serverEmptyText = holder:FindFirstChild("ServerEmptyText")
+	if serverEmptyText ~= nil and serverEmptyText:IsA("GuiObject") then
+		freezeHeight(serverEmptyText)
+		serverEmptyText.LayoutOrder = GIFT_SERVER_ENTRY_ORDER
+	end
+	local friendsHeading = holder:FindFirstChild("FriendsText")
+	if friendsHeading ~= nil and friendsHeading:IsA("GuiObject") then
+		freezeHeight(friendsHeading)
+		friendsHeading.LayoutOrder = 30
+	end
 
 	holder.AnchorPoint = Vector2.new(holder.AnchorPoint.X, 0)
 	holder.Position = UDim2.new(holder.Position.X.Scale, holder.Position.X.Offset, 0, 0)
@@ -568,6 +664,27 @@ function MonetizationController.Start()
 		UISignals.OpenFrame.Fire(giftData.OriginFrame)
 	end)
 
+	for _, other in Players:GetPlayers() do
+		if other ~= player then
+			createPlayerFrame(holder, template, other.UserId, other.Name, other.DisplayName, "Server")
+		end
+	end
+	updateServerEmptyState(holder)
+
+	Players.PlayerAdded:Connect(function(other)
+		if other ~= player then
+			createPlayerFrame(holder, template, other.UserId, other.Name, other.DisplayName, "Server")
+		end
+	end)
+
+	Players.PlayerRemoving:Connect(function(other)
+		local serverEntry = holder:FindFirstChild(`Server_{other.UserId}`)
+		if serverEntry ~= nil then
+			serverEntry:Destroy()
+		end
+		updateServerEmptyState(holder)
+	end)
+
 	local friendsOk, friendPages = pcall(function()
 		return Players:GetFriendsAsync(player.UserId)
 	end)
@@ -581,7 +698,7 @@ function MonetizationController.Start()
 				break
 			end
 			for _, item in page do
-				createPlayerFrame(holder, template, item.Id, item.Username, item.DisplayName, true)
+				createPlayerFrame(holder, template, item.Id, item.Username, item.DisplayName, "Friend")
 			end
 			if pages.IsFinished then
 				break
@@ -594,28 +711,6 @@ function MonetizationController.Start()
 			end
 		end
 	end
-
-	for _, other in Players:GetPlayers() do
-		if other ~= player then
-			createPlayerFrame(holder, template, other.UserId, other.Name, other.DisplayName, false)
-		end
-	end
-
-	Players.PlayerAdded:Connect(function(other)
-		createPlayerFrame(holder, template, other.UserId, other.Name, other.DisplayName, false)
-	end)
-
-	Players.PlayerRemoving:Connect(function(other)
-		local entry = holder:FindFirstChild(tostring(other.UserId))
-		if entry == nil then
-			return
-		end
-		if entry:GetAttribute("Friend") then
-			entry.LayoutOrder = 3
-		else
-			entry:Destroy()
-		end
-	end)
 
 	local yesButton = giftConfirmFrame:WaitForChild("Yes") :: GuiButton
 	local yesText = yesButton:FindFirstChild("TextLabel")

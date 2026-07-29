@@ -30,8 +30,8 @@
 	leave while the purchase prompt is open without losing the gift.
 ]]
 
-local MarketplaceService = game:GetService("MarketplaceService")
 local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
@@ -79,7 +79,12 @@ local MAX_PENDING_INTENTS = 3
 
 type PassEntry = { Enabled: boolean, PassID: number, GiftID: number? }
 type ProductEntry = { ProductID: number, GiftID: number? }
-type PackEntry = { Enabled: boolean, ProductID: number }
+type PackEntry = {
+	Enabled: boolean,
+	ProductID: number,
+	GiftID: number?,
+	ExpectedGiftPrice: number?,
+}
 
 --[[
 	Shared/UISystem/Config/{Passes,Products,Packs}.luau are each typed via
@@ -97,12 +102,7 @@ local ProductsByName = (Products :: any) :: { [string]: ProductEntry }
 local PacksByName = (Packs :: any) :: { [string]: PackEntry }
 
 type ProductInfo = {
-	kind: "PassGift"
-		| "ProductPurchase"
-		| "ProductGift"
-		| "PackPurchase"
-		| "VoucherPurchase"
-		| "Unknown",
+	kind: "PassGift" | "ProductPurchase" | "ProductGift" | "PackPurchase" | "PackGift" | "VoucherPurchase" | "Unknown",
 	name: string,
 }
 
@@ -224,7 +224,7 @@ local function getProductInfo(productId: number): ProductInfo
 		productId == CosmeticsShopConfig.VOUCHER_PRODUCT_ID
 		or productId == CosmeticsShopConfig.GIFT_VOUCHER_PRODUCT_ID
 	then
-		return { kind = "VoucherPurchase", name = "Theme Voucher" }
+		return { kind = "VoucherPurchase", name = "Theme Ticket" }
 	end
 
 	for passName, passInfo in PassesByName do
@@ -242,6 +242,8 @@ local function getProductInfo(productId: number): ProductInfo
 	for packName, packInfo in PacksByName do
 		if packInfo.ProductID == productId then
 			return { kind = "PackPurchase", name = packName }
+		elseif packInfo.GiftID == productId then
+			return { kind = "PackGift", name = packName }
 		end
 	end
 	return { kind = "Unknown", name = "" }
@@ -368,7 +370,7 @@ local function giveCosmeticGift(target: Player, slot: CosmeticsCatalog.Slot, id:
 	return true, false
 end
 
-local function givePack(player: Player, packName: string): boolean
+local function givePack(player: Player, packName: string, isGift: boolean, gifterUserId: number?): boolean
 	local data = DataService.getData(player)
 	if data == nil then
 		return false
@@ -389,8 +391,12 @@ local function givePack(player: Player, packName: string): boolean
 	table.insert(updated, packName)
 	DataService.set(player, { "UISystem", "Packs" }, updated)
 
-	UINotificationService.SendNotification(player, "Success", `Purchased {packName} successfully`)
-	UINotificationService.EmitConfetti(player)
+	if isGift then
+		notifyGiftSent(player, gifterUserId, packName)
+	else
+		UINotificationService.SendNotification(player, "Success", `Purchased {packName} successfully`)
+		UINotificationService.EmitConfetti(player)
+	end
 	return true
 end
 
@@ -448,7 +454,7 @@ end
 -- during that yield, not a stale snapshot from before it.
 local function persistGiftIntent(
 	gifter: Player,
-	kind: "Pass" | "Product",
+	kind: "Pass" | "Product" | "Pack",
 	itemName: string,
 	targetUserId: number,
 	productId: number
@@ -561,6 +567,53 @@ local function startProductGift(gifter: Player, productName: string, targetUserI
 	MarketplaceService:PromptProductPurchase(gifter, giftProductId)
 end
 
+local function startPackGift(gifter: Player, packName: string, targetUserId: number)
+	if hasPendingGift(gifter) then
+		UINotificationService.SendNotification(gifter, "Error", "Your previous purchase is still resolving")
+		return
+	end
+
+	local packInfo = PacksByName[packName]
+	local giftProductId = if packInfo ~= nil then packInfo.GiftID else nil
+	if giftProductId == nil or giftProductId <= 0 then
+		UINotificationService.SendNotification(gifter, "Error", "That pack can't be gifted")
+		return
+	end
+
+	local target = Players:GetPlayerByUserId(targetUserId)
+	local targetData = if target ~= nil then DataService.getData(target) else nil
+	if targetData == nil then
+		UINotificationService.SendNotification(gifter, "Error", "That player is no longer available")
+		return
+	end
+	if table.find(targetData.UISystem.Packs, packName) ~= nil then
+		UINotificationService.SendNotification(gifter, "Error", "Player already owns this pack")
+		return
+	end
+
+	local expectedPrice = packInfo.ExpectedGiftPrice
+	if expectedPrice ~= nil then
+		local ok, productInfo = pcall(function()
+			return MarketplaceService:GetProductInfoAsync(giftProductId, Enum.InfoType.Product)
+		end)
+		if not ok or productInfo == nil or productInfo.PriceInRobux ~= expectedPrice then
+			UINotificationService.SendNotification(gifter, "Error", "That pack gift is not available yet")
+			return
+		end
+	end
+
+	if hasPendingGift(gifter) then
+		UINotificationService.SendNotification(gifter, "Error", "Your previous purchase is still resolving")
+		return
+	end
+	if not persistGiftIntent(gifter, "Pack", packName, targetUserId, giftProductId) then
+		UINotificationService.SendNotification(gifter, "Error", "Gift could not be prepared. Please try again.")
+		return
+	end
+	Net.promptStart.sendTo(nil, gifter)
+	MarketplaceService:PromptProductPurchase(gifter, giftProductId)
+end
+
 local function onGiftStart(data: { targetUserId: number, itemKind: string, itemName: string }, player: Player)
 	local targetUserId = data.targetUserId
 	local itemKind = data.itemKind
@@ -573,7 +626,7 @@ local function onGiftStart(data: { targetUserId: number, itemKind: string, itemN
 		UINotificationService.SendNotification(player, "Error", "You can't gift yourself")
 		return
 	end
-	if itemKind ~= "Pass" and itemKind ~= "Product" then
+	if itemKind ~= "Pass" and itemKind ~= "Product" and itemKind ~= "Pack" then
 		return
 	end
 	if typeof(itemName) ~= "string" or #itemName == 0 or #itemName > MAX_ITEM_NAME_LENGTH then
@@ -596,7 +649,7 @@ local function onGiftStart(data: { targetUserId: number, itemKind: string, itemN
 			return
 		end
 		startPassGift(player, itemName, targetUserId)
-	else
+	elseif itemKind == "Product" then
 		if ProductsByName[itemName] == nil then
 			return
 		end
@@ -607,6 +660,19 @@ local function onGiftStart(data: { targetUserId: number, itemKind: string, itemN
 			return
 		end
 		startProductGift(player, itemName, targetUserId)
+	else
+		local packInfo = PacksByName[itemName]
+		if packInfo == nil or not packInfo.Enabled then
+			UINotificationService.SendNotification(player, "Error", "That pack is not available yet")
+			return
+		end
+		if fromAdmin then
+			if target == nil or not givePack(target, itemName, true, player.UserId) then
+				UINotificationService.SendNotification(player, "Error", "The admin gift could not be granted")
+			end
+			return
+		end
+		startPackGift(player, itemName, targetUserId)
 	end
 end
 
@@ -807,7 +873,7 @@ flushPendingVoucherTransfers = function(player: Player)
 			DataService.saveAndAwait(player, function(savedData: any)
 				return savedVoucherTransferAbsent(savedData, entry.TransferId)
 			end, 30)
-			UINotificationService.SendNotification(player, "Success", "Theme Voucher sent successfully")
+			UINotificationService.SendNotification(player, "Success", "Theme Ticket sent successfully")
 			UINotificationService.EmitConfetti(player)
 			Net.voucherGiftResult.sendTo({ ok = true, requestId = entry.RequestId }, player)
 		end
@@ -829,7 +895,7 @@ local function queueVoucherTransfer(player: Player, targetUserId: number, reques
 		return
 	end
 	if #data.UISystem.PendingVoucherTransfers > 0 then
-		UINotificationService.SendNotification(player, "Error", "Your previous voucher gift is still resolving")
+		UINotificationService.SendNotification(player, "Error", "Your previous ticket gift is still resolving")
 		Net.voucherGiftResult.sendTo({ ok = false, requestId = requestId }, player)
 		flushPendingVoucherTransfers(player)
 		return
@@ -853,18 +919,18 @@ local function queueVoucherTransfer(player: Player, targetUserId: number, reques
 		return savedVoucherTransferExists(savedData, entry.TransferId, targetUserId, requestId)
 	end, 30)
 	if not durable then
-		UINotificationService.SendNotification(player, "Error", "Your voucher gift is queued and still syncing")
+		UINotificationService.SendNotification(player, "Error", "Your ticket gift is queued and still syncing")
 		Net.voucherGiftResult.sendTo({ ok = false, requestId = requestId }, player)
 		scheduleVoucherTransferRetry(player)
 		return
 	end
-	UINotificationService.SendNotification(player, "Success", "Theme Voucher gift queued")
+	UINotificationService.SendNotification(player, "Success", "Theme Ticket gift queued")
 	task.spawn(flushPendingVoucherTransfers, player)
 end
 
 local function runVoucherAction(player: Player, action: () -> ()): boolean
 	if voucherActionBusy[player] then
-		UINotificationService.SendNotification(player, "Error", "Your voucher action is still resolving")
+		UINotificationService.SendNotification(player, "Error", "Your ticket action is still resolving")
 		return false
 	end
 	voucherActionBusy[player] = true
@@ -872,7 +938,7 @@ local function runVoucherAction(player: Player, action: () -> ()): boolean
 	voucherActionBusy[player] = nil
 	if not ok then
 		log.error(`voucher action failed for {player.Name}: {tostring(actionError)}`)
-		UINotificationService.SendNotification(player, "Error", "Voucher action failed. Please try again.")
+		UINotificationService.SendNotification(player, "Error", "Ticket action failed. Please try again.")
 		return false
 	end
 	return true
@@ -896,7 +962,7 @@ local function onVoucherPurchase(data: { slot: string, id: string }, player: Pla
 				ownedVoucherPurchaseConfirmations,
 				player,
 				`{slot}:{id}`,
-				`You already own {cosmeticLabel(slot, id)}. Click Purchase again within {OWNED_PURCHASE_CONFIRM_SECONDS}s to buy 1 Theme Voucher.`
+				`You already own {cosmeticLabel(slot, id)}. Click Purchase again within {OWNED_PURCHASE_CONFIRM_SECONDS}s to buy 1 Theme Ticket.`
 			)
 			if not confirmed then
 				return
@@ -953,7 +1019,7 @@ local function onCosmeticCashBuy(data: { slot: string, id: string }, player: Pla
 			ownedCashPurchaseConfirmations,
 			player,
 			`{slot}:{id}`,
-			`You already own {cosmeticLabel(slot, id)}. Click Cash Purchase again within {OWNED_PURCHASE_CONFIRM_SECONDS}s to buy 1 Theme Voucher.`
+			`You already own {cosmeticLabel(slot, id)}. Click Cash Purchase again within {OWNED_PURCHASE_CONFIRM_SECONDS}s to buy 1 Theme Ticket.`
 		)
 		if not confirmed then
 			return
@@ -962,9 +1028,7 @@ local function onCosmeticCashBuy(data: { slot: string, id: string }, player: Pla
 		ownedCashPurchaseConfirmations[player] = nil
 	end
 
-	local cost = if alreadyOwned
-		then CosmeticsShopConfig.VOUCHER_CASH_PRICE
-		else CosmeticsShopConfig.CASH_PRICE[slot]
+	local cost = if alreadyOwned then CosmeticsShopConfig.VOUCHER_CASH_PRICE else CosmeticsShopConfig.CASH_PRICE[slot]
 	if not CoinsService.trySpend(player, cost) then
 		UINotificationService.SendNotification(player, "Error", "You don't have enough cash")
 		return
@@ -975,7 +1039,7 @@ local function onCosmeticCashBuy(data: { slot: string, id: string }, player: Pla
 		UINotificationService.SendNotification(
 			player,
 			"Success",
-			`You already owned {cosmeticLabel(slot, id)}, so you received 1 Theme Voucher`
+			`You already owned {cosmeticLabel(slot, id)}, so you received 1 Theme Ticket`
 		)
 		UINotificationService.EmitConfetti(player)
 		return
@@ -1007,7 +1071,7 @@ local function findPendingGiftEntry(
 	info: ProductInfo,
 	productId: number
 ): (number?, DataService.PendingGiftEntry?)
-	local expectedKind = if info.kind == "PassGift" then "Pass" else "Product"
+	local expectedKind = if info.kind == "PassGift" then "Pass" elseif info.kind == "PackGift" then "Pack" else "Product"
 	for index, entry in data.UISystem.PendingGifts do
 		if
 			entry.Kind == expectedKind
@@ -1095,7 +1159,7 @@ local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player)
 	-- yields, so another prompt may append/remove ring entries before the
 	-- receipt finishes.
 	local matchedGiftEntry: DataService.PendingGiftEntry? = nil
-	if info.kind == "PassGift" or info.kind == "ProductGift" then
+	if info.kind == "PassGift" or info.kind == "ProductGift" or info.kind == "PackGift" then
 		local index, entry = findPendingGiftEntry(data, info, receiptInfo.ProductId)
 		if index == nil or entry == nil then
 			warnReceiptOnce(
@@ -1108,7 +1172,10 @@ local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player)
 		granted = DataService.messagePlayer(entry.TargetUserId, {
 			Kind = GIFT_MESSAGE_KIND,
 			PurchaseId = receiptInfo.PurchaseId,
-			RewardKind = if info.kind == "PassGift" then "Pass" else "Product",
+			RewardKind = if info.kind == "PassGift"
+				then "Pass"
+				elseif info.kind == "PackGift" then "Pack"
+				else "Product",
 			ItemName = info.name,
 			GifterUserId = player.UserId,
 		})
@@ -1119,7 +1186,7 @@ local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player)
 	else
 		granted = if info.kind == "ProductPurchase"
 			then giveProduct(player, info.name, false, nil, true)
-			else givePack(player, info.name)
+			else givePack(player, info.name, false, nil)
 	end
 
 	if not granted then
@@ -1140,7 +1207,7 @@ local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player)
 	end
 	DataService.setValues(player, { "UISystem" }, uiUpdates)
 	if info.kind == "VoucherPurchase" then
-		UINotificationService.SendNotification(player, "Success", "Purchased 1 Theme Voucher")
+		UINotificationService.SendNotification(player, "Success", "Purchased 1 Theme Ticket")
 		UINotificationService.EmitConfetti(player)
 	end
 
@@ -1180,7 +1247,7 @@ local function onGiftMessage(player: Player, message: { [string]: any }): boolea
 		type(purchaseId) ~= "string"
 		or #purchaseId == 0
 		or #purchaseId > 128
-		or (rewardKind ~= "Pass" and rewardKind ~= "Product" and rewardKind ~= "Cosmetic")
+		or (rewardKind ~= "Pass" and rewardKind ~= "Product" and rewardKind ~= "Pack" and rewardKind ~= "Cosmetic")
 		or not isValidUserId(gifterUserId)
 	then
 		log.warn(`discarding malformed paid-gift message for {player.Name}`)
@@ -1212,8 +1279,7 @@ local function onGiftMessage(player: Player, message: { [string]: any }): boolea
 		if hasProcessedPurchase(data, purchaseId) then
 			return true
 		end
-		local granted, duplicateVoucher =
-			giveCosmeticGift(player, slotValue :: CosmeticsCatalog.Slot, itemId)
+		local granted, duplicateVoucher = giveCosmeticGift(player, slotValue :: CosmeticsCatalog.Slot, itemId)
 		if not granted then
 			return false
 		end
@@ -1225,7 +1291,7 @@ local function onGiftMessage(player: Player, message: { [string]: any }): boolea
 				Vouchers = data.UISystem.Vouchers + 1,
 				ProcessedPurchaseIds = appendProcessedPurchase(data, purchaseId),
 			})
-			notifyGiftSent(player, gifterUserId, "a Theme Voucher because you already owned that cosmetic")
+			notifyGiftSent(player, gifterUserId, "a Theme Ticket because you already owned that cosmetic")
 			UINotificationService.EmitConfetti(player)
 		else
 			DataService.set(player, { "UISystem", "ProcessedPurchaseIds" }, appendProcessedPurchase(data, purchaseId))
@@ -1250,6 +1316,12 @@ local function onGiftMessage(player: Player, message: { [string]: any }): boolea
 
 	local granted = if rewardKind == "Pass"
 		then PassesByName[itemName] ~= nil and givePass(player, itemName, true, gifterUserId, true)
+		elseif rewardKind == "Pack" then PacksByName[itemName] ~= nil and givePack(
+			player,
+			itemName,
+			true,
+			gifterUserId
+		)
 		else ProductsByName[itemName] ~= nil and giveProduct(player, itemName, true, gifterUserId, true)
 	if not granted then
 		return false
@@ -1262,12 +1334,7 @@ end
 local function onVoucherTransferMessage(player: Player, message: { [string]: any }): boolean
 	local transferId = message.TransferId
 	local gifterUserId = message.GifterUserId
-	if
-		type(transferId) ~= "string"
-		or #transferId == 0
-		or #transferId > 128
-		or not isValidUserId(gifterUserId)
-	then
+	if type(transferId) ~= "string" or #transferId == 0 or #transferId > 128 or not isValidUserId(gifterUserId) then
 		log.warn(`discarding malformed voucher-transfer message for {player.Name}`)
 		return true
 	end
@@ -1284,7 +1351,7 @@ local function onVoucherTransferMessage(player: Player, message: { [string]: any
 		Vouchers = data.UISystem.Vouchers + 1,
 		ProcessedVoucherTransferIds = appendProcessedVoucherTransfer(data, transferId),
 	})
-	UINotificationService.SendNotification(player, "Success", "Someone sent you a Theme Voucher")
+	UINotificationService.SendNotification(player, "Success", "Someone sent you a Theme Ticket")
 	UINotificationService.EmitConfetti(player)
 	return true
 end

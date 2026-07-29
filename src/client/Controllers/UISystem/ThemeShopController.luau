@@ -96,6 +96,34 @@ local function clearMonetizationAttributesDeep(root: Instance)
 	end
 end
 
+-- Opening Roblox's native purchase prompt disables Main before the pressed
+-- button receives MouseLeave/MouseButton1Up. Reset both Roblox's built-in
+-- AutoButtonColor state and UIKit's authored Expand size when that prompt
+-- closes, so a cancelled purchase returns to a neutral button immediately.
+local function resetPurchaseButtonVisual(button: GuiButton)
+	if button.Parent == nil then
+		return
+	end
+
+	local originalSize = button:GetAttribute("OriginalSize")
+	if typeof(originalSize) == "UDim2" then
+		button:TweenSize(originalSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.1, true)
+	end
+
+	local wasActive = button.Active
+	local usedAutoButtonColor = button.AutoButtonColor
+	button.Active = false
+	button.AutoButtonColor = false
+
+	task.defer(function()
+		if button.Parent == nil then
+			return
+		end
+		button.Active = wasActive
+		button.AutoButtonColor = usedAutoButtonColor
+	end)
+end
+
 -- Format.FormatNumber's "%.2f%s" always leaves exactly two decimal digits
 -- ahead of the suffix letters (if any) -- "10.00M", not "10M". Trim the
 -- trailing zero decimals, then a bare trailing dot, without disturbing the
@@ -246,6 +274,7 @@ function ThemeShopController.Start()
 	local activeSlot: CosmeticsCatalog.Slot = "KeycapThemes"
 	local voucherCount = 0
 	local voucherCountText = "0"
+	local pendingVoucherPromptButton: GuiButton? = nil
 	local ownedIds: {
 		KeycapThemes: { [string]: true },
 		SquishyBeams: { [string]: true },
@@ -503,7 +532,7 @@ function ThemeShopController.Start()
 		end
 		priceTag.Text = if card.IsOwned
 			then voucherRobuxPrice
-			elseif voucherCount > 0 then "Use Voucher"
+			elseif voucherCount > 0 then "Use Ticket"
 			else voucherRobuxPrice
 	end
 
@@ -521,7 +550,7 @@ function ThemeShopController.Start()
 	local function updateGiftPrice(card: CardView)
 		local priceTag = card.GiftPriceTag
 		if priceTag ~= nil then
-			priceTag.Text = if voucherCount > 0 then "Gift Voucher" else giftVoucherRobuxPrice
+			priceTag.Text = if voucherCount > 0 then "Gift Ticket" else giftVoucherRobuxPrice
 		end
 	end
 
@@ -606,7 +635,7 @@ function ThemeShopController.Start()
 			if priceTag ~= nil and priceTag:IsA("TextLabel") then
 				purchasePriceTag = priceTag
 			end
-			local voucherDisplay = purchaseButton:FindFirstChild("Vouchers")
+			local voucherDisplay = purchaseButton:FindFirstChild("Tickets")
 			local hasVoucherDisplay = voucherDisplay ~= nil and voucherDisplay:IsA("GuiObject")
 			if hasVoucherDisplay then
 				local display = voucherDisplay :: GuiObject
@@ -660,6 +689,7 @@ function ThemeShopController.Start()
 
 		if purchaseButton ~= nil then
 			purchaseButton.MouseButton1Click:Connect(function()
+				pendingVoucherPromptButton = purchaseButton
 				Net.voucherPurchase.send({
 					slot = card.Slot,
 					id = card.Id,
@@ -861,6 +891,18 @@ function ThemeShopController.Start()
 		voucherCount = nextVoucherCount
 		voucherCountText = Format.FormatNumber(voucherCount)
 		scheduleVoucherRefresh()
+	end)
+
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId, productId)
+		if userId ~= player.UserId or productId ~= CosmeticsShopConfig.VOUCHER_PRODUCT_ID then
+			return
+		end
+
+		local button = pendingVoucherPromptButton
+		pendingVoucherPromptButton = nil
+		if button ~= nil then
+			resetPurchaseButtonVisual(button)
+		end
 	end)
 
 	-- No frame Visible-changed cancellation here (deliberately -- Frame close,

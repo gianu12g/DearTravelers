@@ -13,10 +13,10 @@
 	and no spinResult) so the button can't get stuck disabled forever.
 
 	{"UISystem","Spins"} is a plain number in the DataService TEMPLATE
-	(PORT-SPEC.md §2), not the source's {Spins, NextFreeSpin} pair -- there
-	is no NextFreeSpin timestamp in the replicated shape, so the
-	"next free spin in..." countdown label is left untouched (whatever
-	Studio authored it with) rather than invented. Flagged as a follow-up.
+	(PORT-SPEC.md §2), not the source's {Spins, NextFreeSpin} pair. The
+	countdown derives from the replicated accumulated Playtime value and
+	ticks locally between its server flushes. This matches WheelSpinService's
+	existing free-spin cadence without changing or duplicating its grant logic.
 ]]
 
 local Players = game:GetService("Players")
@@ -25,8 +25,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
 
 local DataController = require(script.Parent.Parent.DataController)
+local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Frames = require(script.Parent.Parent.Parent.UI.UISystem.Frames)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MonetizationController = require(script.Parent.MonetizationController)
@@ -137,9 +139,34 @@ function WheelSpinController.Start()
 	local pointer = frame:WaitForChild("Pointer") :: GuiObject
 	local tickSound = frame:WaitForChild("Tick") :: Sound
 	local rewardSound = frame:WaitForChild("Reward") :: Sound
+	local freeSpinLabel = frame:WaitForChild("FreeSpin") :: TextLabel
 	local sfxGroup = SoundService:FindFirstChild("SFX") :: SoundGroup?
 	tickSound.SoundGroup = sfxGroup
 	rewardSound.SoundGroup = sfxGroup
+
+	local playtimeBaseline = 0
+	local playtimeCapturedAt = Workspace:GetServerTimeNow()
+	local playtimeReady = false
+	local lastFreeSpinText = ""
+	local countdownUpdateAccumulator = 0
+
+	local function updateFreeSpinCountdown()
+		local text = "Next FREE spin in --:--"
+		if playtimeReady then
+			local elapsedSinceCapture = math.max(0, Workspace:GetServerTimeNow() - playtimeCapturedAt)
+			local estimatedPlaytime = playtimeBaseline + elapsedSinceCapture
+			local interval = WheelSpinConfig.FreeSpinInterval
+			local remaining = interval - (estimatedPlaytime % interval)
+			text = `Next FREE spin in {Format.FormatCountdown(remaining)}`
+		end
+
+		if text ~= lastFreeSpinText then
+			lastFreeSpinText = text
+			freeSpinLabel.Text = text
+		end
+	end
+
+	updateFreeSpinCountdown()
 
 	Net.spinResult.listen(function(data)
 		requestPending = false
@@ -191,6 +218,16 @@ function WheelSpinController.Start()
 		updateSpinLabel(spinButton)
 	end)
 
+	DataController.observe({ "UISystem", "Playtime" }, function(value: any)
+		if type(value) ~= "number" then
+			return
+		end
+		playtimeBaseline = math.max(0, value)
+		playtimeCapturedAt = Workspace:GetServerTimeNow()
+		playtimeReady = true
+		updateFreeSpinCountdown()
+	end)
+
 	spinButton.MouseButton1Click:Connect(function()
 		if isSpinning or requestPending then
 			return
@@ -203,6 +240,11 @@ function WheelSpinController.Start()
 	end)
 
 	RunService.Heartbeat:Connect(function(delta)
+		countdownUpdateAccumulator += delta
+		if countdownUpdateAccumulator >= 0.1 then
+			countdownUpdateAccumulator %= 0.1
+			updateFreeSpinCountdown()
+		end
 		if isSpinning then
 			return
 		end

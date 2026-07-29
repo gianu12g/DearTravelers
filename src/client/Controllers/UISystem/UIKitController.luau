@@ -57,6 +57,7 @@ local TWEEN_DURATION = 0.2
 local BLUR_SIZE = 50
 local FOV_OPEN = 50
 local FOV_CLOSE = 70
+local SHOP_SCROLL_BOTTOM_PADDING = 15
 
 local blur = Instance.new("BlurEffect")
 blur.Name = "UIKitBlur"
@@ -65,6 +66,11 @@ blur.Enabled = false
 blur.Parent = Lighting
 
 local currentFrame: Frames.FrameName? = nil
+local currentFrameUsesBlur = false
+local promptOverlayOpen = false
+local activeBlurTween: Tween? = nil
+local activeFovTween: Tween? = nil
+local frameTransitionIds: { [GuiObject]: number } = {}
 
 local UIKitController = {}
 
@@ -98,18 +104,54 @@ local function makeSound(item: Instance, entry: Sounds.Entry): Sound
 end
 
 local function tweenBlur(targetSize: number, targetFov: number)
+	local previousBlurTween = activeBlurTween
+	activeBlurTween = nil
+	if previousBlurTween ~= nil then
+		previousBlurTween:Cancel()
+	end
+	local previousFovTween = activeFovTween
+	activeFovTween = nil
+	if previousFovTween ~= nil then
+		previousFovTween:Cancel()
+	end
+
 	blur.Enabled = true
 
-	TweenService:Create(blur, TweenInfo.new(TWEEN_DURATION, Enum.EasingStyle.Quad), { Size = targetSize }):Play()
-	TweenService:Create(camera, TweenInfo.new(0.3, Enum.EasingStyle.Quint), { FieldOfView = targetFov }):Play()
+	local blurTween =
+		TweenService:Create(blur, TweenInfo.new(TWEEN_DURATION, Enum.EasingStyle.Quad), { Size = targetSize })
+	local fovTween =
+		TweenService:Create(camera, TweenInfo.new(0.3, Enum.EasingStyle.Quint), { FieldOfView = targetFov })
+	activeBlurTween = blurTween
+	activeFovTween = fovTween
 
-	if targetSize == 0 then
-		blur:GetPropertyChangedSignal("Size"):Once(function()
-			if blur.Size == 0 then
-				blur.Enabled = false
-			end
-		end)
-	end
+	blurTween.Completed:Once(function()
+		if activeBlurTween ~= blurTween then
+			return
+		end
+		activeBlurTween = nil
+		if targetSize == 0 then
+			blur.Enabled = false
+		end
+	end)
+	fovTween.Completed:Once(function()
+		if activeFovTween == fovTween then
+			activeFovTween = nil
+		end
+	end)
+
+	blurTween:Play()
+	fovTween:Play()
+end
+
+local function refreshWorldEffects()
+	local shouldBlur = promptOverlayOpen or (currentFrame ~= nil and currentFrameUsesBlur)
+	tweenBlur(if shouldBlur then BLUR_SIZE else 0, if shouldBlur then FOV_OPEN else FOV_CLOSE)
+end
+
+local function nextFrameTransition(frame: GuiObject): number
+	local transitionId = (frameTransitionIds[frame] or 0) + 1
+	frameTransitionIds[frame] = transitionId
+	return transitionId
 end
 
 local function scaleUDim2(u: UDim2, rate: number): UDim2
@@ -161,6 +203,20 @@ local function backgroundScroll(item: GuiObject, axis: "X" | "Y")
 	end)
 end
 
+local function resolveFloatTiming(item: GuiObject, authoredSpeed: number, authoredDelay: number): (number, number)
+	local ancestor: Instance? = item.Parent
+	while ancestor ~= nil do
+		if ancestor:GetAttribute("Ui-Float-Sync") == true then
+			local syncedSpeed = attributeNumber(ancestor, "Ui-Float-Speed") or authoredSpeed
+			local syncedDelay = attributeNumber(ancestor, "Ui-Float-Delay") or 0
+			return math.max(syncedSpeed, 0.01), syncedDelay
+		end
+		ancestor = ancestor.Parent
+	end
+
+	return math.max(authoredSpeed, 0.01), authoredDelay
+end
+
 -- Ui-Effect handlers. Each reads whatever Ui-Effect-* attributes it needs
 -- directly off `item` -- the source never routed a shared "rate" through
 -- this group (only Scale/Hover/Click do that), so neither does this port.
@@ -202,19 +258,27 @@ local Effects: { [string]: (GuiObject) -> () } = {
 
 	Float = function(item)
 		local rate = attributeNumber(item, "Ui-Effect-Rate") or 6
-		local delay = attributeNumber(item, "Ui-Effect-Delay") or 0
-		local speed = attributeNumber(item, "Ui-Effect-Speed") or 2
+		local authoredDelay = attributeNumber(item, "Ui-Effect-Delay") or 0
+		local authoredSpeed = attributeNumber(item, "Ui-Effect-Speed") or 2
+		local speed, delay = resolveFloatTiming(item, authoredSpeed, authoredDelay)
 		local originPos = item.Position
+		local period = speed * 2
 
-		task.delay(delay, function()
+		-- Derive the position from the shared server clock instead of starting
+		-- an independent tween per icon. Items with the same speed/delay now
+		-- stay phase-locked even if their controllers initialize on different
+		-- frames or they stream in later.
+		local connection: RBXScriptConnection
+		connection = RunService.RenderStepped:Connect(function()
 			if item.Parent == nil then
+				connection:Disconnect()
 				return
 			end
-			TweenService:Create(
-				item,
-				TweenInfo.new(speed, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-				{ Position = originPos + UDim2.fromOffset(0, rate) }
-			):Play()
+
+			local cycle = (Workspace:GetServerTimeNow() - delay) % period
+			local alpha = if cycle <= speed then cycle / speed else (period - cycle) / speed
+			local eased = TweenService:GetValue(alpha, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+			item.Position = originPos + UDim2.fromOffset(0, rate * eased)
 		end)
 	end,
 
@@ -281,6 +345,94 @@ local HoverEffects: { [string]: (GuiObject, number?) -> () } = {
 		end)
 		item.MouseLeave:Connect(function()
 			item:TweenSize(original, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.1, true)
+		end)
+	end,
+
+	ExpandReveal = function(item, rate)
+		local parent = item.Parent
+		if parent == nil then
+			return
+		end
+
+		local targetName = attributeString(item, "Ui-Hover-Target")
+		local labelName = attributeString(item, "Ui-Hover-Label")
+		if targetName == nil or labelName == nil then
+			return
+		end
+
+		local target = parent:FindFirstChild(targetName)
+		local label = parent:FindFirstChild(labelName)
+		if target == nil or not target:IsA("GuiObject") or label == nil or not label:IsA("TextLabel") then
+			return
+		end
+
+		cacheOriginalSize(target)
+		local originalSize = target:GetAttribute("OriginalSize")
+		if typeof(originalSize) ~= "UDim2" then
+			return
+		end
+
+		local expandRate = rate or 1.08
+		local originalZIndex = target.ZIndex
+		local labelStroke = label:FindFirstChildOfClass("UIStroke")
+		local revealId = 0
+
+		label.Visible = false
+		label.TextTransparency = 1
+		if labelStroke ~= nil then
+			labelStroke.Transparency = 1
+		end
+
+		item.MouseEnter:Connect(function()
+			revealId += 1
+			target.ZIndex = math.max(originalZIndex, label.ZIndex + 1)
+			target:TweenSize(
+				scaleUDim2(originalSize, expandRate),
+				Enum.EasingDirection.Out,
+				Enum.EasingStyle.Quad,
+				0.1,
+				true
+			)
+
+			label.Visible = true
+			TweenService:Create(
+				label,
+				TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ TextTransparency = 0 }
+			):Play()
+			if labelStroke ~= nil then
+				TweenService:Create(
+					labelStroke,
+					TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+					{ Transparency = 0 }
+				):Play()
+			end
+		end)
+
+		item.MouseLeave:Connect(function()
+			revealId += 1
+			local thisRevealId = revealId
+			target.ZIndex = originalZIndex
+			target:TweenSize(originalSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.1, true)
+
+			TweenService:Create(
+				label,
+				TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ TextTransparency = 1 }
+			):Play()
+			if labelStroke ~= nil then
+				TweenService:Create(
+					labelStroke,
+					TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+					{ Transparency = 1 }
+				):Play()
+			end
+
+			task.delay(0.08, function()
+				if revealId == thisRevealId then
+					label.Visible = false
+				end
+			end)
 		end)
 	end,
 }
@@ -363,7 +515,7 @@ local MarketplaceAttrs: { [string]: (GuiObject, string) -> () } = {
 	["Ui-Product-Robux"] = function(item, value)
 		local price = MonetizationController.GetPrice("Product", value)
 		local textItem = item :: any
-		local prefix = attributeString(item, "Ui-Price-Prefix") or " "
+		local prefix = attributeString(item, "Ui-Price-Prefix") or (utf8.char(0xE002) .. " ")
 		local suffix = attributeString(item, "Ui-Price-Suffix") or ""
 		textItem.Text = prefix .. tostring(price or "?") .. suffix
 	end,
@@ -377,7 +529,7 @@ local MarketplaceAttrs: { [string]: (GuiObject, string) -> () } = {
 	["Ui-Pass-Robux"] = function(item, value)
 		local price = MonetizationController.GetPrice("Pass", value)
 		local textItem = item :: any
-		local prefix = attributeString(item, "Ui-Price-Prefix") or " "
+		local prefix = attributeString(item, "Ui-Price-Prefix") or (utf8.char(0xE002) .. " ")
 		local suffix = attributeString(item, "Ui-Price-Suffix") or ""
 		textItem.Text = prefix .. tostring(price or "?") .. suffix
 	end,
@@ -394,6 +546,12 @@ local MarketplaceAttrs: { [string]: (GuiObject, string) -> () } = {
 		end
 	end,
 
+	["Ui-Gift-Pack"] = function(item, value)
+		if item:IsA("GuiButton") then
+			MonetizationController.SetPackGiftButton(item, value)
+		end
+	end,
+
 	["Ui-Pack"] = function(item, value)
 		if item:IsA("GuiButton") then
 			MonetizationController.SetPackButton(item, value)
@@ -403,7 +561,9 @@ local MarketplaceAttrs: { [string]: (GuiObject, string) -> () } = {
 	["Ui-Pack-Robux"] = function(item, value)
 		local price = MonetizationController.GetPrice("Pack", value)
 		local textItem = item :: any
-		textItem.Text = " " .. tostring(price or "?")
+		local prefix = attributeString(item, "Ui-Price-Prefix") or (utf8.char(0xE002) .. " ")
+		local suffix = attributeString(item, "Ui-Price-Suffix") or ""
+		textItem.Text = prefix .. tostring(price or "?") .. suffix
 	end,
 }
 
@@ -513,26 +673,29 @@ function UIKitController.CloseCurrentFrame(tween: boolean)
 		return
 	end
 
-	local frame = Frames.get(currentFrame)
+	local closingFrameName = currentFrame
+	local frame = Frames.get(closingFrameName)
 	currentFrame = nil
+	currentFrameUsesBlur = false
+	local transitionId = nextFrameTransition(frame)
 
 	if tween then
 		frame:TweenPosition(
 			UDim2.fromScale(frame.Position.X.Scale, 0.6),
 			Enum.EasingDirection.In,
 			Enum.EasingStyle.Quad,
-			TWEEN_DURATION
+			TWEEN_DURATION,
+			true
 		)
 		task.delay(TWEEN_DURATION, function()
-			frame.Visible = false
+			if frameTransitionIds[frame] == transitionId and currentFrame ~= closingFrameName then
+				frame.Visible = false
+			end
 		end)
-
-		if blur.Enabled then
-			tweenBlur(0, FOV_CLOSE)
-		end
 	else
 		frame.Visible = false
 	end
+	refreshWorldEffects()
 end
 
 function UIKitController.OpenFrame(frameName: Frames.FrameName, noBlur: boolean?)
@@ -543,29 +706,29 @@ function UIKitController.OpenFrame(frameName: Frames.FrameName, noBlur: boolean?
 	UIKitController.CloseCurrentFrame(false)
 
 	local frame = Frames.get(frameName)
+	nextFrameTransition(frame)
 	frame.Position = UDim2.fromScale(frame.Position.X.Scale, 0.6)
 	frame.Visible = true
 	frame:TweenPosition(
 		UDim2.fromScale(frame.Position.X.Scale, 0.5),
 		Enum.EasingDirection.Out,
 		Enum.EasingStyle.Quad,
-		TWEEN_DURATION
+		TWEEN_DURATION,
+		true
 	)
 	currentFrame = frameName
-
-	if not noBlur then
-		tweenBlur(BLUR_SIZE, FOV_OPEN)
-	end
+	currentFrameUsesBlur = not noBlur
+	refreshWorldEffects()
 end
 
--- Shared HUD counter driver for Cash and Theme Vouchers. Both authored
+-- Shared HUD counter driver for Cash and Theme Tickets. Both authored
 -- ImageLabels expose lowercase main/shadow labels plus identical transaction
 -- badge templates.
-local function initCounterDisplay(labelName: string, path: { string | number })
+local function initCounterDisplay(holderName: string, labelName: string, path: { string | number })
 	local main = playerGui:WaitForChild("Main")
 	local hud = main:WaitForChild("HUD")
-	local left = hud:WaitForChild("Left")
-	local counterLabel = left:WaitForChild(labelName)
+	local holder = hud:WaitForChild(holderName)
+	local counterLabel = holder:WaitForChild(labelName)
 	local mainLabel = counterLabel:WaitForChild("main") :: TextLabel
 	local shadowLabel = counterLabel:WaitForChild("shadow") :: TextLabel
 	local transactionRoot = mainLabel:WaitForChild("Transactions")
@@ -659,6 +822,53 @@ local function initCounterDisplay(labelName: string, path: { string | number })
 	end)
 end
 
+local function initShopScrollBounds()
+	local mainGui = playerGui:WaitForChild("Main")
+	local frames = mainGui:WaitForChild("Frames")
+	local shop = frames:WaitForChild("Shop")
+	local scrolling = shop:WaitForChild("MainScrollingFrame")
+	if not scrolling:IsA("ScrollingFrame") then
+		log.warn("Shop.MainScrollingFrame is not a ScrollingFrame")
+		return
+	end
+
+	local holder = scrolling:WaitForChild("Holder")
+	local layout = holder:FindFirstChildOfClass("UIListLayout")
+	if layout == nil then
+		log.warn("Shop.MainScrollingFrame.Holder has no UIListLayout")
+		return
+	end
+
+	-- The authored canvas is intentionally tall because the card heights use
+	-- scale values relative to it. Shrinking CanvasSize would also shrink every
+	-- shop card, so keep that layout canvas and clamp the user's scroll range
+	-- to the actual visible content instead.
+	scrolling.ElasticBehavior = Enum.ElasticBehavior.Never
+	local isClamping = false
+	local function clampToContent()
+		if isClamping then
+			return
+		end
+
+		local maxY =
+			math.max(0, layout.AbsoluteContentSize.Y - scrolling.AbsoluteWindowSize.Y + SHOP_SCROLL_BOTTOM_PADDING)
+		local current = scrolling.CanvasPosition
+		local clampedY = math.clamp(current.Y, 0, maxY)
+		if math.abs(clampedY - current.Y) < 0.01 then
+			return
+		end
+
+		isClamping = true
+		scrolling.CanvasPosition = Vector2.new(current.X, clampedY)
+		isClamping = false
+	end
+
+	scrolling:GetPropertyChangedSignal("CanvasPosition"):Connect(clampToContent)
+	scrolling:GetPropertyChangedSignal("AbsoluteWindowSize"):Connect(clampToContent)
+	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(clampToContent)
+	clampToContent()
+end
+
 --[[
 	Loading-screen handshake. LoadingScreen.client.luau runs in
 	ReplicatedFirst, before any Controller exists, so it cannot require this
@@ -709,6 +919,11 @@ function UIKitController.Init()
 	UISignals.CloseFrame.Connect(function(tween)
 		UIKitController.CloseCurrentFrame(tween)
 	end)
+
+	UISignals.PromptVisibilityChanged.Connect(function(isOpen)
+		promptOverlayOpen = isOpen
+		refreshWorldEffects()
+	end)
 end
 
 function UIKitController.Start()
@@ -716,8 +931,9 @@ function UIKitController.Start()
 		setupItem(item)
 	end
 
-	initCounterDisplay("Icon", { "Coins" })
-	initCounterDisplay("Vouchers", { "UISystem", "Vouchers" })
+	initShopScrollBounds()
+	initCounterDisplay("Left", "Cash", { "Coins" })
+	initCounterDisplay("Right", "Tickets", { "UISystem", "Vouchers" })
 	watchLoadingScreenHandshake()
 
 	log.info("ready")

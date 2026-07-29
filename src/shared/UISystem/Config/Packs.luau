@@ -8,14 +8,16 @@
 ]]
 
 local Packs = {
-	["Starter Pack"] = {
-		Enabled = false, -- Enable only after PackRewards implements the contents.
-		ProductID = 3596657710, -- Change this to whatever your product ID is
-	},
-
-	["Secret Pack"] = {
-		Enabled = false,
-		ProductID = 3596657806, -- Change this to whatever your product ID is
+	-- Limited shop offer. These products were originally authored as
+	-- "Secret Pack" (purchase) and "Starter Pack" (gift). Rename both in
+	-- Creator Dashboard and set both prices to 49 Robux. The client verifies
+	-- the live prices before enabling either button.
+	["Arcade Themes Pack"] = {
+		Enabled = true,
+		ProductID = 3596657806,
+		GiftID = 3596657710,
+		ExpectedPrice = 49,
+		ExpectedGiftPrice = 49,
 	},
 }
 

@@ -396,7 +396,7 @@ end
 
 local function isValidPendingGiftEntry(entry: any): boolean
 	return type(entry) == "table"
-		and (entry.Kind == "Pass" or entry.Kind == "Product")
+		and (entry.Kind == "Pass" or entry.Kind == "Product" or entry.Kind == "Pack")
 		and type(entry.ItemName) == "string"
 		and #entry.ItemName > 0
 		and #entry.ItemName <= 64
@@ -434,7 +434,9 @@ local function repairPendingVoucherTransfers(value: any): { PendingVoucherTransf
 			and targetUserId == math.floor(targetUserId)
 		then
 			seen[transferId] = true
-			local requestId = if type(rawRequestId) == "string" and #rawRequestId > 0 and #rawRequestId <= 128
+			local requestId = if type(rawRequestId) == "string"
+					and #rawRequestId > 0
+					and #rawRequestId <= 128
 				then rawRequestId
 				else transferId
 			table.insert(repaired, {

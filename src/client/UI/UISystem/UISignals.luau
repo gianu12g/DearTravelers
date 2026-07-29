@@ -21,12 +21,16 @@ local Signal = require(script.Parent.Signal)
 
 export type OpenFrameSignal = Signal.Signal<string, boolean?>
 export type CloseFrameSignal = Signal.Signal<boolean>
+export type PromptVisibilitySignal = Signal.Signal<boolean>
 
 local UISignals = {
 	-- (frameName, noBlur?)
 	OpenFrame = Signal.new() :: OpenFrameSignal,
 	-- (tween)
 	CloseFrame = Signal.new() :: CloseFrameSignal,
+	-- (isOpen) lets UIKitController preserve the current frame's blur while a
+	-- native Roblox purchase prompt temporarily hides the Main ScreenGui.
+	PromptVisibilityChanged = Signal.new() :: PromptVisibilitySignal,
 }
 
 return UISignals
