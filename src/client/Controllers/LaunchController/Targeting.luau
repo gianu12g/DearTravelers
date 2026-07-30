@@ -1,9 +1,8 @@
 --!strict
 --[[
 	Owns the launch-targeting state machine: the LaunchTargetingUI/
-	LaunchTargetMarkerUI instances, the base ownership NameLabel launch-mode
-	visuals, target selection, and the request/response round trip through
-	Net.mergeLaunchRequest / Net.mergeLaunchResult.
+	LaunchTargetMarkerUI instances, target selection, and the request/response
+	round trip through Net.mergeLaunchRequest / Net.mergeLaunchResult.
 ]]
 
 local Players = game:GetService("Players")
@@ -26,8 +25,6 @@ local WAIT_TIMEOUT = 10
 -- staying well under ~650 studs even on tall/portrait aspect ratios, so 2500
 -- reaches the map plane from any on-screen click with generous margin.
 local RAY_DISTANCE = 2500
-local BASE_LABEL_FORCEFIELD_PADDING = 6
-local BASE_LABEL_GAMEPLAY_SCALE = 0.5
 local TARGET_ICON_WIDTH_SCALE = 0.056
 local TARGET_ICON_DROP_DISTANCE = 46
 local TARGET_ICON_START_SCALE = 0.3
@@ -80,8 +77,6 @@ local hintText: TextLabel? = nil
 local hintRestPosition: UDim2? = nil
 local hintMotion: Motion.Handle? = nil
 
-local baseLabelLaunchSizes: { [BillboardGui]: UDim2 } = {}
-
 local function radiusDebugEnabled(): boolean
 	return player:GetAttribute(MergeConfig.LAUNCH_RADIUS_DEBUG_ATTRIBUTE) == true
 end
@@ -96,64 +91,6 @@ local function cancelHintMotion()
 	local rest = hintRestPosition
 	if label ~= nil and label.Parent ~= nil and rest ~= nil then
 		label.Position = rest
-	end
-end
-
--- The BillboardGuis remain parented to their base parts; this local property
--- change does not replicate back to the server or affect another player's
--- camera. A per-label LaunchViewSize attribute, when present, is the source of
--- truth for its full launch-view size; otherwise its first observed Size is
--- cached. Normal play uses BASE_LABEL_GAMEPLAY_SCALE. GameplayWorldOffsetY may
--- override the geometry-derived normal height for art-direction tweaks.
-function Targeting.setBaseLabelsLaunchMode(launchMode: boolean)
-	local mapLayout = Workspace:FindFirstChild("MapLayout")
-	local basesFolder = if mapLayout ~= nil then mapLayout:FindFirstChild("Bases") else nil
-	local forcefieldsFolder = if mapLayout ~= nil then mapLayout:FindFirstChild("BaseForcefields") else nil
-	if basesFolder == nil then
-		return
-	end
-
-	for _, baseInstance in basesFolder:GetChildren() do
-		if not baseInstance:IsA("BasePart") then
-			continue
-		end
-		local nameLabel = baseInstance:FindFirstChild("NameLabel")
-		if nameLabel == nil or not nameLabel:IsA("BillboardGui") then
-			continue
-		end
-
-		local configuredLaunchSize = nameLabel:GetAttribute("LaunchViewSize")
-		local launchSize = if typeof(configuredLaunchSize) == "UDim2" then configuredLaunchSize else nil
-		launchSize = launchSize or baseLabelLaunchSizes[nameLabel]
-		if launchSize == nil then
-			launchSize = nameLabel.Size
-			baseLabelLaunchSizes[nameLabel] = launchSize
-		end
-
-		if launchMode then
-			nameLabel.Size = launchSize
-			nameLabel.StudsOffsetWorldSpace = Vector3.zero
-			continue
-		end
-
-		nameLabel.Size = UDim2.new(
-			launchSize.X.Scale * BASE_LABEL_GAMEPLAY_SCALE,
-			launchSize.X.Offset * BASE_LABEL_GAMEPLAY_SCALE,
-			launchSize.Y.Scale * BASE_LABEL_GAMEPLAY_SCALE,
-			launchSize.Y.Offset * BASE_LABEL_GAMEPLAY_SCALE
-		)
-		local configuredOffset = nameLabel:GetAttribute("GameplayWorldOffsetY")
-		local offsetY = if typeof(configuredOffset) == "number" then configuredOffset else nil
-		if offsetY == nil and forcefieldsFolder ~= nil then
-			local forcefield = forcefieldsFolder:FindFirstChild(baseInstance.Name .. "Forcefield")
-			if forcefield ~= nil and forcefield:IsA("BasePart") then
-				offsetY = forcefield.Position.Y
-					+ forcefield.Size.Y / 2
-					- baseInstance.Position.Y
-					+ BASE_LABEL_FORCEFIELD_PADDING
-			end
-		end
-		nameLabel.StudsOffsetWorldSpace = Vector3.new(0, offsetY or 0, 0)
 	end
 end
 
@@ -292,7 +229,6 @@ local function destroyTargetingVisuals()
 	if hudGui ~= nil and hudGui.Parent ~= nil then
 		hudGui.Enabled = true
 	end
-	Targeting.setBaseLabelsLaunchMode(false)
 	Camera.releaseCameraOverview()
 end
 
@@ -317,17 +253,23 @@ end
 local function selectionAt(screenPosition: Vector2): TargetSelection?
 	local camera = Workspace.CurrentCamera
 	local mapLayout = Workspace:FindFirstChild("MapLayout")
-	if camera == nil or mapLayout == nil then
+	local baseplate = Workspace:FindFirstChild("Baseplate")
+	if camera == nil or mapLayout == nil or baseplate == nil or not baseplate:IsA("BasePart") then
 		return nil
 	end
 
 	local raycastParams = RaycastParams.new()
 	raycastParams.FilterType = Enum.RaycastFilterType.Include
-	raycastParams.FilterDescendantsInstances = { mapLayout }
+	raycastParams.FilterDescendantsInstances = { mapLayout, baseplate }
 
 	local unitRay = camera:ScreenPointToRay(screenPosition.X, screenPosition.Y)
 	local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * RAY_DISTANCE, raycastParams)
 	if result == nil then
+		return nil
+	end
+	local localPoint =
+		baseplate.CFrame:PointToObjectSpace(Vector3.new(result.Position.X, baseplate.Position.Y, result.Position.Z))
+	if math.abs(localPoint.X) > baseplate.Size.X / 2 or math.abs(localPoint.Z) > baseplate.Size.Z / 2 then
 		return nil
 	end
 	local resultCameraPoint = camera.CFrame:PointToObjectSpace(result.Position)
@@ -442,7 +384,6 @@ function Targeting.beginTargetingSession(
 	awaitingServer = false
 	playingAcceptedPlop = false
 	pendingSelection = nil
-	Targeting.setBaseLabelsLaunchMode(true)
 	Camera.takeOverCamera(overlayGui, nil)
 	setHint("Choose anywhere on the map")
 end

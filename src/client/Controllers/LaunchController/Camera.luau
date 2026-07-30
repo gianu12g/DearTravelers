@@ -40,59 +40,15 @@ local capturedCameraType: Enum.CameraType? = nil
 local cameraMotion: Motion.Handle? = nil
 local overviewPoseWarned = false
 
--- AABB half-extents of Workspace.MapLayout's BaseParts (~7,300 of them), used
--- to fit the computed overview height in resolveOverviewPose. The map is
--- static, so this is computed once on first use and cached for the rest of
--- the client session.
-local cachedMapHalfExtentX: number? = nil
-local cachedMapHalfExtentZ: number? = nil
-
--- The 8 sign combinations for a box's local-space corners, used to build a
--- world-space AABB out of arbitrarily rotated parts in computeMapHalfExtents.
-local CORNER_SIGNS = {
-	Vector3.new(-1, -1, -1),
-	Vector3.new(-1, -1, 1),
-	Vector3.new(-1, 1, -1),
-	Vector3.new(-1, 1, 1),
-	Vector3.new(1, -1, -1),
-	Vector3.new(1, -1, 1),
-	Vector3.new(1, 1, -1),
-	Vector3.new(1, 1, 1),
-}
-
---[[
-	Computes (and caches) the X/Z half-extents of the AABB of every BasePart
-	descendant of mapLayout. The map (~7,300 parts) is static for the whole
-	client session, so this walks the tree once and every later call just
-	returns the cached values.
-]]
-local function computeMapHalfExtents(mapLayout: Instance): (number, number)
-	if cachedMapHalfExtentX ~= nil and cachedMapHalfExtentZ ~= nil then
-		return cachedMapHalfExtentX, cachedMapHalfExtentZ
-	end
-
-	local minX, maxX = math.huge, -math.huge
-	local minZ, maxZ = math.huge, -math.huge
-	local foundPart = false
-	for _, descendant in mapLayout:GetDescendants() do
-		if descendant:IsA("BasePart") then
-			foundPart = true
-			local cframe = descendant.CFrame
-			local halfSize = descendant.Size * 0.5
-			for _, signs in CORNER_SIGNS do
-				local corner = cframe:PointToWorldSpace(halfSize * signs)
-				minX = math.min(minX, corner.X)
-				maxX = math.max(maxX, corner.X)
-				minZ = math.min(minZ, corner.Z)
-				maxZ = math.max(maxZ, corner.Z)
-			end
-		end
-	end
-
-	local halfExtentX = if foundPart then (maxX - minX) / 2 else 0
-	local halfExtentZ = if foundPart then (maxZ - minZ) / 2 else 0
-	cachedMapHalfExtentX = halfExtentX
-	cachedMapHalfExtentZ = halfExtentZ
+local function computeBaseplateHalfExtents(baseplate: BasePart): (number, number)
+	local halfSize = baseplate.Size / 2
+	local cframe = baseplate.CFrame
+	local halfExtentX = math.abs(cframe.RightVector.X) * halfSize.X
+		+ math.abs(cframe.UpVector.X) * halfSize.Y
+		+ math.abs(cframe.LookVector.X) * halfSize.Z
+	local halfExtentZ = math.abs(cframe.RightVector.Z) * halfSize.X
+		+ math.abs(cframe.UpVector.Z) * halfSize.Y
+		+ math.abs(cframe.LookVector.Z) * halfSize.Z
 	return halfExtentX, halfExtentZ
 end
 
@@ -104,7 +60,7 @@ end
 	Precedence:
 	1. LaunchOverviewCFrame/LaunchOverviewFieldOfView attributes on
 	   LaunchTargetingUI -- a manual override for future art direction.
-	2. A pose computed to fit Workspace.MapLayout under the live camera's
+	2. A pose computed to fit Workspace.Baseplate under the live camera's
 	   current FOV and aspect ratio, using the live camera's current FOV as
 	   the returned FOV too (so the takeover tween never fights a menu
 	   controller's own FieldOfView tween).
@@ -118,19 +74,18 @@ local function resolveOverviewPose(overrideSource: Instance?): (CFrame?, number?
 		end
 	end
 
-	local mapLayout = Workspace:FindFirstChild("MapLayout")
-	local centerMap = if mapLayout ~= nil then mapLayout:FindFirstChild("CenterMap") else nil
-	if mapLayout == nil or centerMap == nil or not centerMap:IsA("BasePart") then
+	local baseplate = Workspace:FindFirstChild("Baseplate")
+	if baseplate == nil or not baseplate:IsA("BasePart") then
 		return nil, nil
 	end
 
 	local liveCamera = Workspace.CurrentCamera
 	local fieldOfView = if liveCamera ~= nil then liveCamera.FieldOfView else 70
-	local center = centerMap.Position
+	local center = baseplate.Position
 
 	local height = FALLBACK_OVERVIEW_HEIGHT
 	if liveCamera ~= nil then
-		local halfExtentX, halfExtentZ = computeMapHalfExtents(mapLayout)
+		local halfExtentX, halfExtentZ = computeBaseplateHalfExtents(baseplate)
 		local halfTanV = math.tan(math.rad(fieldOfView) / 2)
 		local aspect = liveCamera.ViewportSize.X / math.max(1, liveCamera.ViewportSize.Y)
 		local halfTanH = halfTanV * aspect

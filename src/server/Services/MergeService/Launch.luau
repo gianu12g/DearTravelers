@@ -8,9 +8,9 @@
 
 	`liveBases`, `carries`, and `activeLaunches` are owned by init.luau and
 	handed to this module once via Launch.setup() -- see Spawning.luau's own
-	note on the same pattern. Launch never requires Carry.luau: it only reads
-	and clears `carries[player]` directly (the pickup -> launch hand-off),
-	which needs the shared table, not any of Carry's functions.
+	note on the same pattern. Launch never requires Carry.luau: it reads the
+	current CarryState while a separate temporary projectile performs the
+	drop, leaving the owned squishy welded to the player's character.
 ]]
 
 local Players = game:GetService("Players")
@@ -28,7 +28,6 @@ local LaunchEffects = require(script.Parent.LaunchEffects)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
-local Spawning = require(script.Parent.Spawning)
 local StatusUI = require(script.Parent.StatusUI)
 local Types = require(script.Parent.Types)
 local UINotificationService = require(script.Parent.Parent.UISystem.UINotificationService)
@@ -91,15 +90,11 @@ function Launch.cancelLaunch(player: Player)
 		return
 	end
 	activeLaunches[player] = nil
+	player:SetAttribute("CarryingLaunchActive", nil)
 	LaunchEffects.destroyLaunchBeams(launch)
-	-- Must run before reAnchorPart: that recomputes yOffset from tierDefFor's
-	-- ORIGINAL tier size, so a still-scaled root would settle at the wrong
-	-- height.
 	LaunchEffects.restoreLaunchScale(launch)
-
-	if liveBases[player] == launch.live and launch.part.Parent ~= nil then
-		Spawning.reAnchorPart(launch.live, launch.part, launch.entry)
-		Spawning.markDisarmed(launch.live, launch.part)
+	if launch.part.Parent ~= nil then
+		launch.part:Destroy()
 	end
 end
 
@@ -112,6 +107,10 @@ function Launch.startCooldown(player: Player, part: BasePart)
 	local readyAt = Workspace:GetServerTimeNow() + duration
 	part:SetAttribute("LaunchReadyAt", readyAt)
 	StatusUI.setLaunchCooldownCounter(part, duration)
+	local carry = carries[player]
+	if carry ~= nil and carry.part == part then
+		player:SetAttribute("CarryingLaunchReadyAt", readyAt)
+	end
 
 	task.spawn(function()
 		local lastWholeSeconds = -1
@@ -444,18 +443,15 @@ local function finishLaunch(player: Player, launch: Types.LaunchState, startCool
 		return
 	end
 	activeLaunches[player] = nil
+	player:SetAttribute("CarryingLaunchActive", nil)
 	LaunchEffects.destroyLaunchBeams(launch)
-	-- Must run before reAnchorPart: that recomputes yOffset from tierDefFor's
-	-- ORIGINAL tier size, so a still-scaled root would settle at the wrong
-	-- height.
 	LaunchEffects.restoreLaunchScale(launch)
+	if launch.part.Parent ~= nil then
+		launch.part:Destroy()
+	end
 
-	if liveBases[player] == launch.live and launch.part.Parent ~= nil then
-		Spawning.reAnchorPart(launch.live, launch.part, launch.entry)
-		Spawning.markDisarmed(launch.live, launch.part)
-		if startCooldown then
-			Launch.startCooldown(player, launch.part)
-		end
+	if startCooldown and liveBases[player] == launch.live and launch.sourcePart.Parent ~= nil then
+		Launch.startCooldown(player, launch.sourcePart)
 	end
 end
 
@@ -605,7 +601,8 @@ function Launch.launchCarried(player: Player, worldX: number, worldZ: number): (
 
 	local launch: Types.LaunchState = {
 		live = carry.live,
-		part = carry.part,
+		sourcePart = carry.part,
+		part = carry.part:Clone(),
 		entry = carry.entry,
 		beamTemplate = Vfx.equippedLaunchBeamTemplate(player),
 		beams = nil,
@@ -613,23 +610,29 @@ function Launch.launchCarried(player: Player, worldX: number, worldZ: number): (
 		sizeMultiplier = sizeMultiplier,
 		blockedByForcefield = nil,
 	}
+	launch.part.Name = "LaunchProjectile"
+	local clonedCarryWeld = launch.part:FindFirstChild("CarryWeld")
+	if clonedCarryWeld ~= nil then
+		clonedCarryWeld:Destroy()
+	end
+	launch.part.Anchored = true
+	launch.part.Massless = false
+	launch.part.CanCollide = false
+	launch.part.CanTouch = false
+	launch.part.CanQuery = false
+	launch.part.Parent = carry.live.objectsFolder
+
 	activeLaunches[player] = launch
-	carries[player] = nil
-	Types.clearCarryingAttributes(player)
-	carry.weld:Destroy()
-	carry.part.Anchored = true
-	carry.part.Massless = false
-	carry.part.CanCollide = false
-	carry.part.CanTouch = false
-	carry.part.CanQuery = false
+	player:SetAttribute("CarryingLaunchActive", true)
 
 	-- Teleport above the landing point and scale up here, before runLaunch's
 	-- spawn squish plays: applyLaunchScale must run before attachLaunchBeams
 	-- (beams read launch.part.Size to place their anchor, see its own header
 	-- note), which is why beams themselves attach later, in runLaunch.
 	local dropStart = targetPosition + Vector3.new(0, MergeConfig.LAUNCH_DROP_HEIGHT, 0)
-	carry.part.CFrame = CFrame.new(dropStart)
+	launch.part.CFrame = CFrame.new(dropStart)
 	LaunchEffects.applyLaunchScale(launch)
+	BaseService.endForcefieldForLaunch(player)
 
 	for _, recipient in Players:GetPlayers() do
 		local message: string

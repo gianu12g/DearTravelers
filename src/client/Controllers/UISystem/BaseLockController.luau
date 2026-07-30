@@ -45,10 +45,10 @@ local function assignedBasePart(): BasePart?
 	return if base ~= nil and base:IsA("BasePart") then base else nil
 end
 
-local function formatCooldown(seconds: number): string
+local function formatLockTime(seconds: number): string
 	local minutes = math.floor(seconds / 60)
 	local remainingSeconds = seconds % 60
-	return string.format("%d:%02d", minutes, remainingSeconds)
+	return string.format("%02d:%02d", minutes, remainingSeconds)
 end
 
 function BaseLockController.Start()
@@ -102,11 +102,11 @@ function BaseLockController.Start()
 		button.Interactable = hasBase and not targeting and not pending and not locked and cooldownSeconds == 0
 		if label ~= nil then
 			if locked then
-				label.Text = `LOCKED {formatCooldown(activeSeconds)}`
+				label.Text = `LOCKED ({formatLockTime(activeSeconds)})`
 			elseif cooldownSeconds > 0 then
-				label.Text = `COOLDOWN {formatCooldown(cooldownSeconds)}`
+				label.Text = `COOLDOWN ({cooldownSeconds}s)`
 			else
-				label.Text = "LOCK"
+				label.Text = "LOCK BASE"
 			end
 		end
 	end

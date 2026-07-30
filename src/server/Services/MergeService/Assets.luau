@@ -25,6 +25,7 @@ local WAIT_TIMEOUT = 10
 -- Populated once during Start(); read-only afterwards.
 local bases: { [string]: Types.BaseRecord } = {}
 local launchMapLayout: Instance? = nil
+local launchBaseplate: BasePart? = nil
 local launchMapBounds: Types.LaunchMapBounds? = nil
 local launchFallbackSurfaceY = 0
 local defaultLaunchBeamTemplate: Model? = nil
@@ -80,25 +81,38 @@ end
 
 function Assets.resolveLaunchTarget(worldX: number, worldZ: number, squishyHalfSize: number): Vector3?
 	local mapLayout = launchMapLayout
+	local baseplate = launchBaseplate
 	local bounds = launchMapBounds
-	if mapLayout == nil or bounds == nil or not Types.isFiniteNumber(worldX) or not Types.isFiniteNumber(worldZ) then
-		return nil
-	end
-	if worldX < bounds.minX - 1 or worldX > bounds.maxX + 1 or worldZ < bounds.minZ - 1 or worldZ > bounds.maxZ + 1 then
+	if
+		mapLayout == nil
+		or baseplate == nil
+		or bounds == nil
+		or not Types.isFiniteNumber(worldX)
+		or not Types.isFiniteNumber(worldZ)
+	then
 		return nil
 	end
 
-	local safeX = math.clamp(worldX, bounds.minX, bounds.maxX)
-	local safeZ = math.clamp(worldZ, bounds.minZ, bounds.maxZ)
-	local rayHeight = bounds.maxY + 50
+	local localPoint = baseplate.CFrame:PointToObjectSpace(Vector3.new(worldX, baseplate.Position.Y, worldZ))
+	if math.abs(localPoint.X) > baseplate.Size.X / 2 or math.abs(localPoint.Z) > baseplate.Size.Z / 2 then
+		return nil
+	end
+
+	local baseplateTop = baseplate.Position.Y + baseplate.Size.Y / 2
+	local baseplateBottom = baseplate.Position.Y - baseplate.Size.Y / 2
+	local rayHeight = math.max(bounds.maxY, baseplateTop) + 50
+	local rayBottom = math.min(bounds.minY, baseplateBottom) - 50
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Include
-	params.FilterDescendantsInstances = { mapLayout }
+	params.FilterDescendantsInstances = { mapLayout, baseplate }
 	params.IgnoreWater = false
-	local result =
-		Workspace:Raycast(Vector3.new(safeX, rayHeight, safeZ), Vector3.new(0, bounds.minY - rayHeight - 50, 0), params)
+	local result = Workspace:Raycast(
+		Vector3.new(worldX, rayHeight, worldZ),
+		Vector3.new(0, rayBottom - rayHeight, 0),
+		params
+	)
 	local surfaceY = if result ~= nil then result.Position.Y else launchFallbackSurfaceY
-	return Vector3.new(safeX, surfaceY + squishyHalfSize, safeZ)
+	return Vector3.new(worldX, surfaceY + squishyHalfSize, worldZ)
 end
 
 local function isMergePopTemplate(template: Instance): boolean
@@ -209,13 +223,19 @@ function Assets.load(): number?
 		return nil
 	end
 	launchMapLayout = mapLayout
+
+	local baseplateInstance = Workspace:WaitForChild("Baseplate", WAIT_TIMEOUT)
+	if baseplateInstance == nil or not baseplateInstance:IsA("BasePart") then
+		launchBaseplate = nil
+		log.error("Workspace.Baseplate is missing or not a BasePart -- launch targeting disabled")
+	else
+		launchBaseplate = baseplateInstance
+		launchFallbackSurfaceY = baseplateInstance.Position.Y + baseplateInstance.Size.Y / 2
+	end
+
 	launchMapBounds = calculateLaunchMapBounds(mapLayout)
 	if launchMapBounds == nil then
 		log.warn("MapLayout has no BaseParts -- launch targeting disabled")
-	end
-	local centerMap = mapLayout:FindFirstChild("CenterMap")
-	if centerMap ~= nil and centerMap:IsA("BasePart") then
-		launchFallbackSurfaceY = centerMap.Position.Y + centerMap.Size.Y / 2
 	end
 
 	local basesFolder = mapLayout:WaitForChild("Bases", WAIT_TIMEOUT)

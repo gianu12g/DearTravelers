@@ -40,7 +40,7 @@ local function valueDescription(key: UpgradeConfig.UpgradeKey, value: number): s
 	elseif key == "MaxSpawns" then
 		return `{value} max spawns`
 	else
-		return `a {UpgradeConfig.lockCooldownSeconds(value)} second base lock cooldown`
+		return `{UpgradeConfig.lockDurationSeconds(value)} seconds of base lock duration`
 	end
 end
 

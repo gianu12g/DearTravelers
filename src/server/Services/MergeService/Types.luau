@@ -106,6 +106,9 @@ export type LaunchScale = {
 
 export type LaunchState = {
 	live: LiveBase,
+	-- The real owned squishy remains welded to the player's character for the
+	-- whole launch. `part` below is only the temporary projectile clone.
+	sourcePart: BasePart,
 	part: BasePart,
 	entry: MergeObjectEntry,
 	-- Resolved from the owner's persisted SquishyBeamId when the launch is

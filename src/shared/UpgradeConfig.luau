@@ -28,9 +28,9 @@ UpgradeConfig.DEFAULT_MAX_SPAWNS = 6
 UpgradeConfig.MAX_MAX_SPAWNS = MergeConfig.MAX_OBJECTS
 UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL = 1
 UpgradeConfig.MAX_LOCK_BASE_LEVEL = 5
-UpgradeConfig.LOCK_DURATION_SECONDS = 20
-UpgradeConfig.DEFAULT_LOCK_COOLDOWN_SECONDS = 60
-UpgradeConfig.LOCK_COOLDOWN_REDUCTION_PER_LEVEL = 2
+UpgradeConfig.DEFAULT_LOCK_DURATION_SECONDS = 20
+UpgradeConfig.LOCK_DURATION_INCREASE_PER_LEVEL = 10
+UpgradeConfig.LOCK_COOLDOWN_SECONDS = 5
 
 -- Each upgrade buys a different kind of power, so one shared curve makes the
 -- cheap rows trivial long before the stronger rows feel earned.
@@ -38,7 +38,7 @@ UpgradeConfig.LOCK_COOLDOWN_REDUCTION_PER_LEVEL = 2
 -- SpawnTier stays the gentlest because rebirth resets it and higher spawn
 -- tiers are what let a run get moving. MaxSpawns compounds production and is
 -- deliberately the steepest economic purchase. LockBase grants no income,
--- but reducing how often a base is vulnerable should still require meaningful
+-- but extending how long a base stays protected should still require meaningful
 -- progress.
 UpgradeConfig.COST_CURVES = {
 	SpawnTier = {
@@ -152,13 +152,11 @@ function UpgradeConfig.nextValue(key: UpgradeKey, value: any): number?
 	return safeValue + 1
 end
 
-function UpgradeConfig.lockCooldownSeconds(lockBaseLevel: any): number
+function UpgradeConfig.lockDurationSeconds(lockBaseLevel: any): number
 	local level = UpgradeConfig.sanitizeValue("LockBase", lockBaseLevel)
 	local purchasedLevels = level - UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL
-	return math.max(
-		0,
-		UpgradeConfig.DEFAULT_LOCK_COOLDOWN_SECONDS - purchasedLevels * UpgradeConfig.LOCK_COOLDOWN_REDUCTION_PER_LEVEL
-	)
+	return UpgradeConfig.DEFAULT_LOCK_DURATION_SECONDS
+		+ purchasedLevels * UpgradeConfig.LOCK_DURATION_INCREASE_PER_LEVEL
 end
 
 return UpgradeConfig

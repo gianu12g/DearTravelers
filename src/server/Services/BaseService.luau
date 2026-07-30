@@ -157,6 +157,29 @@ local function invalidateForcefieldCycle(baseName: string)
 	record.part:SetAttribute("ForcefieldCooldownEndsAt", nil)
 end
 
+local function scheduleCooldownClear(
+	player: Player,
+	baseName: string,
+	record: BaseRecord,
+	generation: number,
+	cooldownEndsAt: number,
+	delaySeconds: number
+)
+	task.delay(delaySeconds, function()
+		if
+			record.lockGeneration ~= generation
+			or record.lockCooldownEndsAt ~= cooldownEndsAt
+			or assignments[baseName] ~= player
+			or playerBases[player] ~= baseName
+		then
+			return
+		end
+
+		record.lockCooldownEndsAt = 0
+		record.part:SetAttribute("ForcefieldCooldownEndsAt", nil)
+	end)
+end
+
 local function activateForcefield(player: Player, baseName: string): (boolean, string)
 	local record = bases[baseName]
 	if record == nil then
@@ -179,8 +202,8 @@ local function activateForcefield(player: Player, baseName: string): (boolean, s
 		return false, message
 	end
 
-	local durationSeconds = UpgradeConfig.LOCK_DURATION_SECONDS
-	local cooldownSeconds = UpgradeConfig.lockCooldownSeconds(data.Merge.LockBase)
+	local durationSeconds = UpgradeConfig.lockDurationSeconds(data.Merge.LockBase)
+	local cooldownSeconds = UpgradeConfig.LOCK_COOLDOWN_SECONDS
 	local generation = record.lockGeneration + 1
 	local expiresAt = now + durationSeconds
 	cooldownEndsAt = expiresAt + cooldownSeconds
@@ -201,18 +224,7 @@ local function activateForcefield(player: Player, baseName: string): (boolean, s
 		setForcefieldState(player, baseName, false)
 	end)
 
-	task.delay(durationSeconds + cooldownSeconds, function()
-		if
-			record.lockGeneration ~= generation
-			or assignments[baseName] ~= player
-			or playerBases[player] ~= baseName
-		then
-			return
-		end
-
-		record.lockCooldownEndsAt = 0
-		record.part:SetAttribute("ForcefieldCooldownEndsAt", nil)
-	end)
+	scheduleCooldownClear(player, baseName, record, generation, cooldownEndsAt, durationSeconds + cooldownSeconds)
 
 	return true, `Forcefield active for {durationSeconds} seconds`
 end
@@ -441,6 +453,37 @@ function BaseService.isForcefieldActive(player: Player): boolean
 	return record ~= nil and record.locked
 end
 
+-- A confirmed launch consumes the launcher's active protection. The old lock
+-- generation is invalidated so its delayed unlock/cooldown callbacks cannot
+-- affect this new cooldown, which begins at the launch commit time.
+function BaseService.endForcefieldForLaunch(player: Player): boolean
+	local baseName = playerBases[player]
+	local record = if baseName ~= nil then bases[baseName] else nil
+	if baseName == nil or record == nil or not record.locked then
+		return false
+	end
+
+	local unlocked = setForcefieldState(player, baseName, false)
+	if not unlocked then
+		return false
+	end
+
+	local generation = record.lockGeneration + 1
+	local cooldownSeconds = UpgradeConfig.LOCK_COOLDOWN_SECONDS
+	record.lockGeneration = generation
+	if cooldownSeconds <= 0 then
+		record.lockCooldownEndsAt = 0
+		record.part:SetAttribute("ForcefieldCooldownEndsAt", nil)
+		return true
+	end
+
+	local cooldownEndsAt = Workspace:GetServerTimeNow() + cooldownSeconds
+	record.lockCooldownEndsAt = cooldownEndsAt
+	record.part:SetAttribute("ForcefieldCooldownEndsAt", cooldownEndsAt)
+	scheduleCooldownClear(player, baseName, record, generation, cooldownEndsAt, cooldownSeconds)
+	return true
+end
+
 -- Resolves the center position where a vertically falling projectile first
 -- touches an active upper hemisphere. The forcefields stay CanQuery=false so
 -- ordinary map raycasts and character movement ignore them; launch combat
@@ -559,24 +602,33 @@ function BaseService.Start()
 		-- enables the billboard again as part of the synchronous claim state.
 		nameLabel.Enabled = false
 
-		-- BaseOwnerName may be nested inside the authored BaseOwnerAvatar.
-		local nameTextInstance = nameLabel:FindFirstChild("NameText", true)
-			or nameLabel:FindFirstChild("BaseOwnerName", true)
+		local baseOwnerInstance = nameLabel:FindFirstChild("BaseOwner")
+		if baseOwnerInstance == nil or not baseOwnerInstance:IsA("Frame") then
+			log.error(`{baseName}.NameLabel.BaseOwner is missing or not a Frame -- that base will never be assigned`)
+			continue
+		end
+		local baseOwner: Frame = baseOwnerInstance
+
+		local nameTextInstance = baseOwner:FindFirstChild("BaseOwnerName")
 		if nameTextInstance == nil or not nameTextInstance:IsA("TextLabel") then
 			log.error(
-				`{baseName}.NameLabel needs a NameText or BaseOwnerName TextLabel -- that base will never be assigned`
+				`{baseName}.NameLabel.BaseOwner.BaseOwnerName is missing or not a TextLabel -- that base will never be assigned`
 			)
 			continue
 		end
 		local nameText: TextLabel = nameTextInstance
-		local ownerAvatarInstance = nameLabel:FindFirstChild("BaseOwnerAvatar")
+		local ownerAvatarInstance = baseOwner:FindFirstChild("BaseOwnerAvatar")
 		local ownerAvatar: ImageLabel? = nil
 		if ownerAvatarInstance ~= nil then
 			if ownerAvatarInstance:IsA("ImageLabel") then
 				ownerAvatar = ownerAvatarInstance
 			else
-				log.warn(`{baseName}.NameLabel.BaseOwnerAvatar is not an ImageLabel -- avatar updates disabled`)
+				log.warn(
+					`{baseName}.NameLabel.BaseOwner.BaseOwnerAvatar is not an ImageLabel -- avatar updates disabled`
+				)
 			end
+		else
+			log.warn(`{baseName}.NameLabel.BaseOwner.BaseOwnerAvatar is missing -- avatar updates disabled`)
 		end
 
 		-- Owned by whatever system populates it, not this one -- existence

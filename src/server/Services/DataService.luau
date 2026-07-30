@@ -112,7 +112,7 @@ local TEMPLATE = {
 		-- transient MAX_OBJECTS + 1 entry MergeService.Spawning.tryDeadlockRescue
 		-- may append onto an already-full board (see that function's own
 		-- header). LockBase stores its upgrade level; each purchased level
-		-- shortens the post-lock cooldown.
+		-- extends the base lock duration.
 		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
 		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,
 		-- Trusted server time used to calculate the next offline-income grant.

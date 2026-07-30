@@ -172,11 +172,9 @@ function LaunchEffects.restoreLaunchScale(launch: Types.LaunchState)
 	end
 end
 
--- Hides only the launched object's presentation; its authoritative root,
--- entry, and launch state stay alive until finishLaunch returns it to the pad.
--- restoreLaunchScale owns the exact inverse using the values captured before
--- launch, so transparent authored pieces and fallback cube tiers both restore
--- correctly.
+-- Hides only the temporary projectile clone's presentation. Its root and
+-- launch state stay alive until finishLaunch restores the captured scale and
+-- destroys the clone; the real owned squishy never leaves the player's hand.
 function LaunchEffects.hideLaunchVisual(launch: Types.LaunchState)
 	local scale = launch.scale
 	if scale == nil then

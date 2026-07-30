@@ -82,11 +82,16 @@
 	Attribute is the cheap, no-persistence-needed way to tell the client
 	CarryController when to show its DROP button.
 
-	Every carry-ending path (drop, launch, merge, character removing, pad
-	deactivation) clears `carries[player]` and the attribute before doing
-	anything else, so a second signal arriving for the same player
+	Every carry-ending path (drop, merge, character removing, pad deactivation)
+	clears `carries[player]` and the attribute before doing anything else, so a
+	second signal arriving for the same player
 	(e.g. CharacterRemoving firing while a merge is also mid-Heartbeat) finds
 	nothing left to act on rather than double-processing.
+
+	Launch deliberately is not a carry-ending path: the owned part remains
+	welded to the character while a temporary clone performs the projectile
+	sequence. CarryingLaunchActive gates another launch until that clone is
+	cleaned up; the regular per-part cooldown begins afterwards.
 
 	No remotes in Phase 1: every decision was made on the server with Parts
 	replicating automatically. Phase 2 adds a no-payload "drop request"
@@ -97,7 +102,7 @@
 	damage, radius, drop, and return state.
 
 	DISARM/RE-ARM (walk-off-to-re-arm, no grab cooldowns): a part placed by
-	dropCarried, cancelCarry, finishLaunch, or commitMerge's result lands at or right next
+	dropCarried, cancelCarry, or commitMerge's result lands at or right next
 	to the owning player, so without this it would be instantly re-Touched
 	and re-picked-up -- the player could never actually put anything down.
 	markDisarmed adds the part to `live.disarmed`; the pickup Touched handler

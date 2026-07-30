@@ -80,9 +80,10 @@ function LaunchButton.updateLaunchCooldownDisplay()
 	end
 
 	local remaining = launchCooldownRemaining()
+	local launchActive = player:GetAttribute("CarryingLaunchActive") == true
 	local coolingDown = player:GetAttribute("CarryingTier") ~= nil and remaining > 0
-	button.Active = not coolingDown
-	button.Selectable = not coolingDown
+	button.Active = not coolingDown and not launchActive
+	button.Selectable = not coolingDown and not launchActive
 	label.Text = if coolingDown then Format.FormatCountdown(remaining) else readyLaunchText
 
 	local gradient = launchButtonGradient
@@ -99,7 +100,11 @@ function LaunchButton.updateLaunchCooldownDisplay()
 end
 
 local function beginTargeting()
-	if Targeting.isTargeting() or player:GetAttribute("CarryingTier") == nil then
+	if
+		Targeting.isTargeting()
+		or player:GetAttribute("CarryingTier") == nil
+		or player:GetAttribute("CarryingLaunchActive") == true
+	then
 		return
 	end
 	if launchCooldownRemaining() > 0 then
