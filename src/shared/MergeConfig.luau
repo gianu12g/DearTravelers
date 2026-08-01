@@ -75,6 +75,13 @@ MergeConfig.CARRY_GAP = 1.5
 -- as a merge -- exact-contact-only would feel unresponsive given the carried
 -- part only updates position once per Heartbeat.
 MergeConfig.MERGE_EPSILON = 0.75
+-- Auto Merge pass cadence. A detected pair remains untouched during the
+-- anticipation delay, then both roots tween together before the normal merge
+-- transaction/VFX run. Only one job per player is allowed, and the cooldown
+-- starts after a successful pair commits.
+MergeConfig.AUTO_MERGE_DELAY_SECONDS = 1
+MergeConfig.AUTO_MERGE_TWEEN_SECONDS = 0.5
+MergeConfig.AUTO_MERGE_COOLDOWN_SECONDS = 2
 -- How far (horizontal, matching this module's 2D pad model) the owning
 -- player's character must move away from a just-dropped/just-merged/
 -- just-cancelled part before it re-arms for pickup. Without this a part
@@ -252,6 +259,14 @@ end
 -- level 30. Route this through incomeForTier so the curves cannot drift.
 function MergeConfig.healthForTier(tier: number): number
 	return MergeConfig.incomeForTier(tier)
+end
+
+function MergeConfig.sanitizeSquishyHealthMultiplier(multiplier: any): number
+	return if multiplier == 2 then 2 else 1
+end
+
+function MergeConfig.maxHealthForTier(tier: number, multiplier: any): number
+	return MergeConfig.healthForTier(tier) * MergeConfig.sanitizeSquishyHealthMultiplier(multiplier)
 end
 
 return MergeConfig

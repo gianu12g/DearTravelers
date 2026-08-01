@@ -14,12 +14,17 @@ local CosmeticsService = require(script.Parent.CosmeticsService)
 local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
+local MergeService = require(script.Parent.MergeService)
 local PassEntitlements = require(ServerStorage.Modules.PassEntitlements)
 local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 
 local log = Log.new("PassEntitlementService")
 
 local SPEED_MULTIPLIER = 2
+local SPAWN_RATE_MULTIPLIER = 2
+local LOCK_COOLDOWN_MULTIPLIER = 0.5
+local SQUISHY_HEALTH_MULTIPLIER = 2
+local LAUNCH_COOLDOWN_MULTIPLIER = 0.5
 local BASE_WALK_SPEED_ATTRIBUTE = "PassBaseWalkSpeed"
 
 local VIP_COSMETICS = {
@@ -48,9 +53,7 @@ local function applyCharacterSpeed(player: Player, character: Model)
 		humanoid:SetAttribute(BASE_WALK_SPEED_ATTRIBUTE, baseWalkSpeed)
 	end
 
-	local multiplier = if player:GetAttribute("WalkSpeedMultiplier") == SPEED_MULTIPLIER
-		then SPEED_MULTIPLIER
-		else 1
+	local multiplier = if player:GetAttribute("WalkSpeedMultiplier") == SPEED_MULTIPLIER then SPEED_MULTIPLIER else 1
 	humanoid.WalkSpeed = baseWalkSpeed * multiplier
 end
 
@@ -81,6 +84,29 @@ local function applyBenefit(player: Player, passName: string): boolean
 		player:SetAttribute("WalkSpeedMultiplier", SPEED_MULTIPLIER)
 		applyCurrentCharacterSpeed(player)
 		return true
+	elseif passName == PassEntitlements.AUTO_MERGE then
+		player:SetAttribute("AutoMergeEnabled", true)
+		return true
+	elseif passName == PassEntitlements.DOUBLE_SPAWN then
+		player:SetAttribute("SpawnRateMultiplier", SPAWN_RATE_MULTIPLIER)
+		return true
+	elseif passName == PassEntitlements.FASTER_LOCK then
+		local alreadyApplied = player:GetAttribute("LockCooldownMultiplier") == LOCK_COOLDOWN_MULTIPLIER
+		player:SetAttribute("LockCooldownMultiplier", LOCK_COOLDOWN_MULTIPLIER)
+		if not alreadyApplied then
+			BaseService.applyFasterLock(player)
+		end
+		return true
+	elseif passName == PassEntitlements.DOUBLE_SQUISHY_HEALTH then
+		player:SetAttribute("SquishyHealthMultiplier", SQUISHY_HEALTH_MULTIPLIER)
+		return MergeService.applySquishyHealthMultiplier(player, SQUISHY_HEALTH_MULTIPLIER)
+	elseif passName == PassEntitlements.FASTER_LAUNCH then
+		local alreadyApplied = player:GetAttribute("LaunchCooldownMultiplier") == LAUNCH_COOLDOWN_MULTIPLIER
+		player:SetAttribute("LaunchCooldownMultiplier", LAUNCH_COOLDOWN_MULTIPLIER)
+		if not alreadyApplied then
+			MergeService.applyFasterLaunchCooldown(player)
+		end
+		return true
 	end
 	return false
 end
@@ -98,6 +124,11 @@ local function onPlayerAdded(player: Player)
 	player:SetAttribute("CashMultiplier", 1)
 	player:SetAttribute("OfflineEarningsMaxHours", MergeConfig.MAX_OFFLINE_SECONDS / 3600)
 	player:SetAttribute("WalkSpeedMultiplier", 1)
+	player:SetAttribute("AutoMergeEnabled", false)
+	player:SetAttribute("SpawnRateMultiplier", 1)
+	player:SetAttribute("LockCooldownMultiplier", 1)
+	player:SetAttribute("SquishyHealthMultiplier", 1)
+	player:SetAttribute("LaunchCooldownMultiplier", 1)
 
 	player.CharacterAdded:Connect(function(character)
 		local humanoid = character:WaitForChild("Humanoid", 10)
@@ -120,12 +151,19 @@ local function onPlayerAdded(player: Player)
 		return
 	end
 
-	for _, passName in {
-		PassEntitlements.VIP,
-		PassEntitlements.OFFLINE_EARNINGS,
-		PassEntitlements.DOUBLE_CASH,
-		PassEntitlements.DOUBLE_SPEED,
-	} do
+	for _, passName in
+		{
+			PassEntitlements.VIP,
+			PassEntitlements.OFFLINE_EARNINGS,
+			PassEntitlements.DOUBLE_CASH,
+			PassEntitlements.DOUBLE_SPEED,
+			PassEntitlements.AUTO_MERGE,
+			PassEntitlements.DOUBLE_SPAWN,
+			PassEntitlements.FASTER_LOCK,
+			PassEntitlements.DOUBLE_SQUISHY_HEALTH,
+			PassEntitlements.FASTER_LAUNCH,
+		}
+	do
 		if PassEntitlements.owns(player, passName, data) and not applyBenefit(player, passName) then
 			log.warn(`failed to apply "{passName}" for {player.Name}`)
 		end

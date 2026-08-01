@@ -160,8 +160,8 @@ function Types.isFiniteNumber(value: any): boolean
 	return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
 end
 
-function Types.sanitizeHealth(health: number, tier: number): number
-	local maxHealth = MergeConfig.healthForTier(tier)
+function Types.sanitizeHealth(health: number, tier: number, healthMultiplier: any?): number
+	local maxHealth = MergeConfig.maxHealthForTier(tier, healthMultiplier)
 	if type(health) ~= "number" or health ~= health or health == math.huge or health == -math.huge then
 		return maxHealth
 	end

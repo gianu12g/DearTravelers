@@ -20,9 +20,9 @@ local StatusUI = {}
 -- The attributes make health available to future effects without requiring
 -- them to understand this Gui hierarchy; the Gui itself stays disabled at
 -- full health so healthy pads remain visually quiet.
-function StatusUI.updateHealthVisual(part: BasePart, tier: number, health: number)
-	local maxHealth = MergeConfig.healthForTier(tier)
-	local safeHealth = Types.sanitizeHealth(health, tier)
+function StatusUI.updateHealthVisual(part: BasePart, tier: number, health: number, healthMultiplier: any?)
+	local maxHealth = MergeConfig.maxHealthForTier(tier, healthMultiplier)
+	local safeHealth = Types.sanitizeHealth(health, tier, healthMultiplier)
 	part:SetAttribute("Health", safeHealth)
 	part:SetAttribute("MaxHealth", maxHealth)
 
@@ -45,7 +45,13 @@ function StatusUI.updateHealthVisual(part: BasePart, tier: number, health: numbe
 	end
 end
 
-function StatusUI.createHealthBar(part: BasePart, statusBillboard: BillboardGui, tier: number, health: number)
+function StatusUI.createHealthBar(
+	part: BasePart,
+	statusBillboard: BillboardGui,
+	tier: number,
+	health: number,
+	healthMultiplier: any?
+)
 	local healthBar = Instance.new("Frame")
 	healthBar.Name = "HealthBar"
 	healthBar.Size = UDim2.fromScale(1, 22 / 52)
@@ -149,7 +155,7 @@ function StatusUI.createHealthBar(part: BasePart, statusBillboard: BillboardGui,
 	healthText.ZIndex = 5
 	healthText.Parent = bubble
 
-	StatusUI.updateHealthVisual(part, tier, health)
+	StatusUI.updateHealthVisual(part, tier, health, healthMultiplier)
 end
 
 function StatusUI.createLaunchCooldownCounter(part: BasePart, statusBillboard: BillboardGui)

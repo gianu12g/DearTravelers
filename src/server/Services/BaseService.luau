@@ -109,6 +109,11 @@ local queuedPlayers: { [Player]: true } = {}
 local BaseService = {}
 local onPlayerAdded: (Player) -> ()
 
+local function lockCooldownSeconds(player: Player): number
+	local multiplier = if player:GetAttribute("LockCooldownMultiplier") == 0.5 then 0.5 else 1
+	return UpgradeConfig.LOCK_COOLDOWN_SECONDS * multiplier
+end
+
 local function ownerDisplayName(player: Player): string
 	return if player:GetAttribute("VIP") == true then `[VIP] {player.DisplayName}` else player.DisplayName
 end
@@ -203,7 +208,7 @@ local function activateForcefield(player: Player, baseName: string): (boolean, s
 	end
 
 	local durationSeconds = UpgradeConfig.lockDurationSeconds(data.Merge.LockBase)
-	local cooldownSeconds = UpgradeConfig.LOCK_COOLDOWN_SECONDS
+	local cooldownSeconds = lockCooldownSeconds(player)
 	local generation = record.lockGeneration + 1
 	local expiresAt = now + durationSeconds
 	cooldownEndsAt = expiresAt + cooldownSeconds
@@ -453,6 +458,34 @@ function BaseService.isForcefieldActive(player: Player): boolean
 	return record ~= nil and record.locked
 end
 
+-- Applies a newly purchased faster-lock entitlement to a cooldown that is
+-- already running. The old delayed clear observes the changed deadline and
+-- becomes a no-op; the lock's own generation stays unchanged so an active
+-- forcefield still expires on schedule.
+function BaseService.applyFasterLock(player: Player)
+	local baseName = playerBases[player]
+	local record = if baseName ~= nil then bases[baseName] else nil
+	if baseName == nil or record == nil then
+		return
+	end
+
+	local now = Workspace:GetServerTimeNow()
+	if record.lockCooldownEndsAt <= now then
+		return
+	end
+
+	local reduction = UpgradeConfig.LOCK_COOLDOWN_SECONDS * 0.5
+	local cooldownEndsAt = math.max(now, record.lockCooldownEndsAt - reduction)
+	record.lockCooldownEndsAt = cooldownEndsAt
+	if cooldownEndsAt <= now then
+		record.part:SetAttribute("ForcefieldCooldownEndsAt", nil)
+		return
+	end
+
+	record.part:SetAttribute("ForcefieldCooldownEndsAt", cooldownEndsAt)
+	scheduleCooldownClear(player, baseName, record, record.lockGeneration, cooldownEndsAt, cooldownEndsAt - now)
+end
+
 -- A confirmed launch consumes the launcher's active protection. The old lock
 -- generation is invalidated so its delayed unlock/cooldown callbacks cannot
 -- affect this new cooldown, which begins at the launch commit time.
@@ -469,7 +502,7 @@ function BaseService.endForcefieldForLaunch(player: Player): boolean
 	end
 
 	local generation = record.lockGeneration + 1
-	local cooldownSeconds = UpgradeConfig.LOCK_COOLDOWN_SECONDS
+	local cooldownSeconds = lockCooldownSeconds(player)
 	record.lockGeneration = generation
 	if cooldownSeconds <= 0 then
 		record.lockCooldownEndsAt = 0

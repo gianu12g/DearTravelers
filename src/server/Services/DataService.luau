@@ -106,6 +106,9 @@ local TEMPLATE = {
 	]]
 	Merge = {
 		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number } },
+		-- Persisted so the permanent health pass can upgrade existing current
+		-- health exactly once and preserve doubled maximum health across rejoins.
+		SquishyHealthMultiplier = 1,
 		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
 		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling;
 		-- MaxSpawns is the per-player capacity within it, except for the one
@@ -578,6 +581,7 @@ local function repairProfileData(data: any)
 	data.Merge.SpawnLevel = UpgradeConfig.sanitizeValue("SpawnTier", data.Merge.SpawnLevel)
 	data.Merge.MaxSpawns = UpgradeConfig.sanitizeValue("MaxSpawns", data.Merge.MaxSpawns)
 	data.Merge.LockBase = UpgradeConfig.sanitizeValue("LockBase", data.Merge.LockBase)
+	data.Merge.SquishyHealthMultiplier = MergeConfig.sanitizeSquishyHealthMultiplier(data.Merge.SquishyHealthMultiplier)
 	data.Merge.LastActiveAt = finiteInteger(data.Merge.LastActiveAt, 0, 2 ^ 53 - 1, 0)
 	data.Merge.OfflineEarnings.Amount = finiteInteger(data.Merge.OfflineEarnings.Amount, 0, EconomyConfig.MAX_GRANT, 0)
 	data.Merge.OfflineEarnings.Seconds =
@@ -650,7 +654,7 @@ local function repairProfileData(data: any)
 		-- A profile can never retain a model above its rebirth unlock cap.
 		local safeTier =
 			math.clamp(math.floor(tier), 1, math.min(MergeConfig.MAX_TIER, RebirthConfig.maxModelLevel(data.Rebirths)))
-		local maxHealth = MergeConfig.healthForTier(safeTier)
+		local maxHealth = MergeConfig.maxHealthForTier(safeTier, data.Merge.SquishyHealthMultiplier)
 		local safeHealth = finiteNumber(health, 0, maxHealth, maxHealth)
 		-- A zero-health squishy was already dead when its prior server closed.
 		-- Do not resurrect it on join; live deaths provide their pop effect in

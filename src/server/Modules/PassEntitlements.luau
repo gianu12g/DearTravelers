@@ -31,6 +31,11 @@ PassEntitlements.VIP = "VIP"
 PassEntitlements.OFFLINE_EARNINGS = "Offline Earnings+"
 PassEntitlements.DOUBLE_CASH = "2x Cash"
 PassEntitlements.DOUBLE_SPEED = "2x Speed"
+PassEntitlements.AUTO_MERGE = "Auto Merge"
+PassEntitlements.DOUBLE_SPAWN = "x2 Spawn"
+PassEntitlements.FASTER_LOCK = "x2 Faster Lock"
+PassEntitlements.DOUBLE_SQUISHY_HEALTH = "x2 Squishy Health"
+PassEntitlements.FASTER_LAUNCH = "x2 Faster Launch"
 
 local function giftedPassOwned(data: any, passName: string): boolean
 	return type(data) == "table"

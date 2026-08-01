@@ -53,6 +53,7 @@ function SquishyProgress.applySessionStart(data: any, now: number, maxOfflineSec
 		-- shape before Replica can see it.
 		merge = {
 			Squishies = {},
+			SquishyHealthMultiplier = 1,
 			SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
 			MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
 			LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,

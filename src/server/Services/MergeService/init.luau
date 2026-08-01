@@ -177,6 +177,7 @@ local SafePlayerAdded = require(ServerStorage.Modules.UISystem.SafePlayerAdded)
 -- child's module-scope side effects run at the same boot timing they had as
 -- part of the monolith, per the Rojo init-split convention.
 local Assets = require(script.Assets)
+local AutoMerge = require(script.AutoMerge)
 local Carry = require(script.Carry)
 local Damage = require(script.Damage)
 local Income = require(script.Income)
@@ -216,6 +217,8 @@ MergeService.damageSquishies = Damage.damageSquishies
 MergeService.damageSquishiesNear = Damage.damageSquishiesNear
 MergeService.spawnSquishies = Damage.spawnSquishies
 MergeService.clearSquishies = Damage.clearSquishies
+MergeService.applySquishyHealthMultiplier = Damage.applyHealthMultiplier
+MergeService.applyFasterLaunchCooldown = Launch.applyFasterCooldown
 MergeService.resetIncomeRemainder = Income.resetRemainder
 
 local function onAssignedBaseChanged(player: Player)
@@ -270,6 +273,7 @@ local function onPlayerRemoving(player: Player)
 
 	Spawning.deactivateBase(player)
 	Carry.clearMushBoost(player)
+	AutoMerge.clearPlayer(player)
 	Spawning.clearPlayer(player)
 	Income.clearPlayer(player)
 	Carry.clearPlayer(player)
@@ -299,6 +303,7 @@ function MergeService.Init()
 		end,
 	})
 	local sharedState = { liveBases = liveBases, carries = carries, activeLaunches = activeLaunches }
+	AutoMerge.setup(sharedState)
 	Carry.setup(sharedState)
 	Launch.setup(sharedState)
 	Damage.setup(sharedState)
@@ -347,6 +352,7 @@ function MergeService.Start()
 	-- particular to be its own task.spawn loop (let alone one per player)
 	-- when it is exactly as bursty-free sitting here.
 	RunService.Heartbeat:Connect(function(dt: number)
+		AutoMerge.checkAll()
 		Carry.checkAllCarriesForMerge()
 		Carry.reArmSweep(dt)
 

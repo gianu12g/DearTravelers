@@ -19,6 +19,11 @@ local PassRewards: { [string]: (Player) -> boolean } = {
 	["Offline Earnings+"] = grant("Offline Earnings+"),
 	["2x Cash"] = grant("2x Cash"),
 	["2x Speed"] = grant("2x Speed"),
+	["Auto Merge"] = grant("Auto Merge"),
+	["x2 Spawn"] = grant("x2 Spawn"),
+	["x2 Faster Lock"] = grant("x2 Faster Lock"),
+	["x2 Squishy Health"] = grant("x2 Squishy Health"),
+	["x2 Faster Launch"] = grant("x2 Faster Launch"),
 }
 
 return PassRewards

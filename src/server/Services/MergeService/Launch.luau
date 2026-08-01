@@ -98,20 +98,7 @@ function Launch.cancelLaunch(player: Player)
 	end
 end
 
-function Launch.startCooldown(player: Player, part: BasePart)
-	local duration = MergeConfig.LAUNCH_COOLDOWN_SECONDS
-	if duration <= 0 or part.Parent == nil then
-		return
-	end
-
-	local readyAt = Workspace:GetServerTimeNow() + duration
-	part:SetAttribute("LaunchReadyAt", readyAt)
-	StatusUI.setLaunchCooldownCounter(part, duration)
-	local carry = carries[player]
-	if carry ~= nil and carry.part == part then
-		player:SetAttribute("CarryingLaunchReadyAt", readyAt)
-	end
-
+local function trackCooldown(player: Player, part: BasePart, readyAt: number)
 	task.spawn(function()
 		local lastWholeSeconds = -1
 		while part.Parent ~= nil and part:GetAttribute("LaunchReadyAt") == readyAt do
@@ -136,6 +123,61 @@ function Launch.startCooldown(player: Player, part: BasePart)
 			end
 		end
 	end)
+end
+
+local function publishCooldown(player: Player, part: BasePart, readyAt: number)
+	part:SetAttribute("LaunchReadyAt", readyAt)
+	local remaining = math.max(0, readyAt - Workspace:GetServerTimeNow())
+	StatusUI.setLaunchCooldownCounter(part, remaining)
+	local carry = carries[player]
+	if carry ~= nil and carry.part == part then
+		player:SetAttribute("CarryingLaunchReadyAt", readyAt)
+	end
+	trackCooldown(player, part, readyAt)
+end
+
+local function cooldownDuration(player: Player): number
+	local multiplier = if player:GetAttribute("LaunchCooldownMultiplier") == 0.5 then 0.5 else 1
+	return MergeConfig.LAUNCH_COOLDOWN_SECONDS * multiplier
+end
+
+function Launch.startCooldown(player: Player, part: BasePart)
+	local duration = cooldownDuration(player)
+	if duration <= 0 or part.Parent == nil then
+		return
+	end
+	publishCooldown(player, part, Workspace:GetServerTimeNow() + duration)
+end
+
+-- Shortens every cooldown already running when the pass is purchased. Old
+-- trackers exit because their exact LaunchReadyAt value no longer matches;
+-- publishCooldown starts the replacement tracker at the adjusted deadline.
+function Launch.applyFasterCooldown(player: Player)
+	local live = liveBases[player]
+	if live == nil then
+		return
+	end
+
+	local now = Workspace:GetServerTimeNow()
+	local reduction = MergeConfig.LAUNCH_COOLDOWN_SECONDS * 0.5
+	for part in live.parts do
+		local readyAt = part:GetAttribute("LaunchReadyAt")
+		if typeof(readyAt) ~= "number" or readyAt <= now then
+			continue
+		end
+
+		local adjustedReadyAt = math.max(now, readyAt - reduction)
+		if adjustedReadyAt <= now then
+			part:SetAttribute("LaunchReadyAt", nil)
+			StatusUI.setLaunchCooldownCounter(part, 0)
+			local carry = carries[player]
+			if carry ~= nil and carry.part == part then
+				player:SetAttribute("CarryingLaunchReadyAt", nil)
+			end
+		else
+			publishCooldown(player, part, adjustedReadyAt)
+		end
+	end
 end
 
 -- Same six-direction geometry as MushController.squashGeometry: `scale` is

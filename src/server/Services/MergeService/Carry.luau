@@ -122,7 +122,7 @@ local function commitMerge(
 		Tier = carry.entry.Tier + 1,
 		X = targetEntry.X,
 		Z = targetEntry.Z,
-		Health = MergeConfig.healthForTier(carry.entry.Tier + 1),
+		Health = MergeConfig.maxHealthForTier(carry.entry.Tier + 1, data.Merge.SquishyHealthMultiplier),
 	}
 
 	local updated = table.create(#data.Merge.Squishies)
@@ -200,6 +200,7 @@ local function tryMergeCarry(player: Player, carry: Types.CarryState)
 		if
 			otherPart == carry.part
 			or (activeLaunch ~= nil and otherPart == activeLaunch.part)
+			or otherPart:GetAttribute("AutoMerging") == true
 			or otherEntry.Tier ~= entry.Tier
 		then
 			continue

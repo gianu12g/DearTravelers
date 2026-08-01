@@ -32,6 +32,36 @@ local Passes = {
 		PassID = 1928221965,
 		GiftID = 3611986927,
 	},
+
+	["Auto Merge"] = {
+		Enabled = true,
+		PassID = 1932824958,
+		GiftID = 3612567312,
+	},
+
+	["x2 Spawn"] = {
+		Enabled = true,
+		PassID = 1932854966,
+		GiftID = 3612567315,
+	},
+
+	["x2 Faster Lock"] = {
+		Enabled = true,
+		PassID = 1933604878,
+		GiftID = 3612567320,
+	},
+
+	["x2 Squishy Health"] = {
+		Enabled = true,
+		PassID = 1933166941,
+		GiftID = 3612567538,
+	},
+
+	["x2 Faster Launch"] = {
+		Enabled = true,
+		PassID = 1934084659,
+		GiftID = 3612567539,
+	},
 }
 
 export type Passes = typeof(Passes)

@@ -56,6 +56,72 @@ function Damage.getSquishies(player: Player): { Types.MergeObjectEntry }?
 	return copy
 end
 
+-- Permanently upgrades both current and maximum health without ever doubling
+-- the same saved values twice. The persisted multiplier is the idempotence
+-- marker; every live reference is replaced alongside the replicated array so
+-- carry, launch, damage, and the in-world health bar stay on the same entries.
+function Damage.applyHealthMultiplier(player: Player, requestedMultiplier: number): boolean
+	local data = DataService.getData(player)
+	if data == nil then
+		return false
+	end
+
+	local currentMultiplier = MergeConfig.sanitizeSquishyHealthMultiplier(data.Merge.SquishyHealthMultiplier)
+	local targetMultiplier =
+		math.max(currentMultiplier, MergeConfig.sanitizeSquishyHealthMultiplier(requestedMultiplier))
+	if targetMultiplier == currentMultiplier then
+		local live = liveBases[player]
+		if live ~= nil then
+			for part, entry in live.parts do
+				StatusUI.updateHealthVisual(part, entry.Tier, entry.Health, targetMultiplier)
+			end
+		end
+		return true
+	end
+
+	local factor = targetMultiplier / currentMultiplier
+	local replacements: { [any]: Types.MergeObjectEntry } = {}
+	local updated: { Types.MergeObjectEntry } = table.create(#data.Merge.Squishies)
+	for _, entry in data.Merge.Squishies do
+		local newEntry: Types.MergeObjectEntry = {
+			Tier = entry.Tier,
+			X = entry.X,
+			Z = entry.Z,
+			Health = math.min(
+				MergeConfig.maxHealthForTier(entry.Tier, targetMultiplier),
+				Types.sanitizeHealth(entry.Health, entry.Tier, currentMultiplier) * factor
+			),
+		}
+		replacements[entry] = newEntry
+		table.insert(updated, newEntry)
+	end
+
+	DataService.set(player, { "Merge", "SquishyHealthMultiplier" }, targetMultiplier)
+	DataService.set(player, { "Merge", "Squishies" }, updated)
+
+	local carry = carries[player]
+	if carry ~= nil then
+		carry.entry = replacements[carry.entry] or carry.entry
+	end
+	local launch = activeLaunches[player]
+	if launch ~= nil then
+		launch.entry = replacements[launch.entry] or launch.entry
+	end
+
+	local live = liveBases[player]
+	if live ~= nil then
+		for part, oldEntry in live.parts do
+			local replacement = replacements[oldEntry]
+			if replacement ~= nil then
+				live.parts[part] = replacement
+				StatusUI.updateHealthVisual(part, replacement.Tier, replacement.Health, targetMultiplier)
+			end
+		end
+	end
+
+	return true
+end
+
 type DamageForEntry = (Types.MergeObjectEntry) -> number
 
 -- One transactional damage path shared by the developer test and real launch
@@ -70,6 +136,7 @@ local function applySquishyDamage(
 	if data == nil then
 		return nil, 0
 	end
+	local healthMultiplier = data.Merge.SquishyHealthMultiplier
 
 	local updated: { Types.MergeObjectEntry } = table.create(#data.Merge.Squishies)
 	local replacements: { [any]: Types.MergeObjectEntry } = {}
@@ -84,7 +151,7 @@ local function applySquishyDamage(
 		end
 
 		local damage = math.max(0, damageForEntry(entry))
-		local oldHealth = Types.sanitizeHealth(entry.Health, entry.Tier)
+		local oldHealth = Types.sanitizeHealth(entry.Health, entry.Tier, healthMultiplier)
 		local newHealth = math.max(0, oldHealth - damage)
 
 		if oldHealth <= 0 or newHealth <= 0 then
@@ -153,7 +220,7 @@ local function applySquishyDamage(
 			local replacement = replacements[oldEntry]
 			if replacement ~= nil then
 				live.parts[part] = replacement
-				StatusUI.updateHealthVisual(part, replacement.Tier, replacement.Health)
+				StatusUI.updateHealthVisual(part, replacement.Tier, replacement.Health, healthMultiplier)
 			elseif deadEntries[oldEntry] then
 				table.insert(deadParts, part)
 			end
@@ -185,9 +252,13 @@ function Damage.damageSquishies(player: Player, maxHealthFraction: number): (num
 		return 0, 0
 	end
 
+	local data = DataService.getData(player)
+	if data == nil then
+		return nil, 0
+	end
 	local damageFraction = math.min(maxHealthFraction, 1)
 	return applySquishyDamage(player, function(entry: Types.MergeObjectEntry): number
-		return MergeConfig.healthForTier(entry.Tier) * damageFraction
+		return MergeConfig.maxHealthForTier(entry.Tier, data.Merge.SquishyHealthMultiplier) * damageFraction
 	end, nil)
 end
 
@@ -224,6 +295,9 @@ function Damage.damageSquishiesNear(
 	for part, entry in live.parts do
 		if part.Parent == nil then
 			continue
+		end
+		if part:GetAttribute("AutoMerging") == true then
+			continue -- pair is reserved until its server-owned merge transaction commits
 		end
 		if activeLaunch ~= nil and activeLaunch.part == part then
 			continue -- in flight; not a valid area-damage target, same exclusion pickUp applies

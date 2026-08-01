@@ -84,7 +84,7 @@ end
 	pad-local coordinates in the first place (DataService.luau's Merge
 	comment).
 ]]
-local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEntry): BasePart
+local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEntry, healthMultiplier: number): BasePart
 	local tierDef = Types.tierDefFor(entry.Tier)
 
 	local part = Instance.new("Part")
@@ -133,7 +133,7 @@ local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEn
 	incomeText.Text = Format.FormatNumber(RebirthConfig.tierNumberForModelLevel(entry.Tier))
 	incomeText.Parent = billboard
 
-	StatusUI.createHealthBar(part, billboard, entry.Tier, entry.Health)
+	StatusUI.createHealthBar(part, billboard, entry.Tier, entry.Health, healthMultiplier)
 	StatusUI.createLaunchCooldownCounter(part, billboard)
 
 	return part
@@ -305,6 +305,9 @@ local function wirePickupTouched(player: Player, live: Types.LiveBase, part: Bas
 		if liveBases[player] ~= live then
 			return -- pad no longer live for this player; part is on its way out
 		end
+		if part:GetAttribute("AutoMerging") == true then
+			return -- reserved by the server-owned Auto Merge tween
+		end
 		if carries[player] ~= nil then
 			return -- already carrying -- walking over other objects does nothing
 		end
@@ -341,7 +344,9 @@ end
 	call site remembering to do it itself.
 ]]
 function Spawning.spawnRestingPart(player: Player, live: Types.LiveBase, entry: Types.MergeObjectEntry): BasePart
-	local part = materializeObject(live.spawnArea, entry)
+	local data = DataService.getData(player)
+	local healthMultiplier = if data ~= nil then data.Merge.SquishyHealthMultiplier else 1
+	local part = materializeObject(live.spawnArea, entry, healthMultiplier)
 	part.Parent = live.objectsFolder
 	live.parts[part] = entry
 	wirePickupTouched(player, live, part)
@@ -460,7 +465,7 @@ local function tryDeadlockRescue(player: Player, live: Types.LiveBase, data: Dat
 		Tier = sanitizedTier,
 		X = roundedX,
 		Z = roundedZ,
-		Health = MergeConfig.healthForTier(sanitizedTier),
+		Health = MergeConfig.maxHealthForTier(sanitizedTier, data.Merge.SquishyHealthMultiplier),
 	}
 
 	if DataService.tableInsert(player, { "Merge", "Squishies" }, entry) == nil then
@@ -514,7 +519,7 @@ function Spawning.trySpawnObject(player: Player, live: Types.LiveBase)
 		Tier = tier,
 		X = roundedX,
 		Z = roundedZ,
-		Health = MergeConfig.healthForTier(tier),
+		Health = MergeConfig.maxHealthForTier(tier, data.Merge.SquishyHealthMultiplier),
 	}
 
 	-- Append incrementally: auto-spawn runs every few seconds, so replacing the
@@ -532,11 +537,22 @@ local function runAutoSpawnLoop(player: Player, live: Types.LiveBase)
 	-- this loop exit both on the player leaving/releasing the base AND on a
 	-- later re-activation replacing this LiveBase with a new one -- either
 	-- way, this exact loop's job is done.
+	local progress = 0
+	local sampledAt = os.clock()
 	while player.Parent == Players and liveBases[player] == live do
-		task.wait(MergeConfig.SPAWN_INTERVAL)
+		task.wait(0.1)
+		local now = os.clock()
+		local elapsed = now - sampledAt
+		sampledAt = now
+		local spawnRateMultiplier = if player:GetAttribute("SpawnRateMultiplier") == 2 then 2 else 1
+		progress += elapsed * spawnRateMultiplier
 		if liveBases[player] ~= live then
 			break
 		end
+		if progress < MergeConfig.SPAWN_INTERVAL then
+			continue
+		end
+		progress = 0
 		Spawning.trySpawnObject(player, live)
 	end
 end
