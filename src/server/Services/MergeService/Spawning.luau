@@ -44,6 +44,11 @@ type Deps = {
 	onDeactivate: (Player) -> (),
 }
 
+type SquishyDraft = {
+	Tier: number,
+	Health: number,
+}
+
 -- Set once by Spawning.setup(), called from init.Init(). See this file's own
 -- header note on why these three are references to init-owned tables rather
 -- than state this module holds itself.
@@ -180,6 +185,292 @@ function Spawning.findOpenSpot(
 	end
 
 	return nil, nil
+end
+
+local function sanitizePurchasedBalance(value: any): number
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		return 0
+	end
+	return math.clamp(math.floor(value), 0, MergeConfig.MAX_PURCHASED_SQUISHIES_REMAINING)
+end
+
+-- Canonical merge counts for the board as it exists before paid units are
+-- added. Every equal pair below maxModelLevel carries into the next level;
+-- duplicates AT the cap intentionally remain separate because rebirth owns
+-- that progression gate.
+local function compactExistingCounts(existing: { Types.MergeObjectEntry }, maxModelLevel: number): { number }
+	local counts = table.create(maxModelLevel, 0)
+	for _, entry in existing do
+		local level = math.min(Types.sanitizeTier(entry.Tier), maxModelLevel)
+		counts[level] += 1
+	end
+
+	for level = 1, maxModelLevel - 1 do
+		local merged = math.floor(counts[level] / 2)
+		counts[level] %= 2
+		counts[level + 1] += merged
+	end
+	return counts
+end
+
+local function countSetBits(value: number): number
+	local remaining = math.floor(value)
+	local count = 0
+	while remaining > 0 do
+		count += remaining % 2
+		remaining = math.floor(remaining / 2)
+	end
+	return count
+end
+
+-- Largest integer <= value whose binary representation contains at most
+-- maxBits ones. Keeping the highest allowed set bits is optimal: replacing
+-- any one of them with lower bits can only make the represented value
+-- smaller. These bits correspond one-for-one with merge results below the
+-- rebirth cap.
+local function largestWithAtMostSetBits(value: number, maxBits: number, highestBit: number): number
+	if value <= 0 or maxBits <= 0 then
+		return 0
+	end
+	if countSetBits(value) <= maxBits then
+		return value
+	end
+
+	local result = 0
+	local kept = 0
+	for bit = highestBit, 0, -1 do
+		local weight = 2 ^ bit
+		if math.floor(value / weight) % 2 == 1 then
+			if kept >= maxBits then
+				break
+			end
+			result += weight
+			kept += 1
+		end
+	end
+	return result
+end
+
+-- Computes the maximum number of raw purchased units that can be consumed
+-- without the canonical final board exceeding maxSpawns. A unit is worth one
+-- object at spawnLevel. Above that level, binary place values exactly model
+-- repeated pair-merges; maxModelLevel acts as the top place, where duplicate
+-- objects stop carrying and each consumes its own slot.
+local function buildFinalLevelCounts(
+	existing: { Types.MergeObjectEntry },
+	pending: number,
+	spawnLevel: number,
+	maxModelLevel: number,
+	maxSpawns: number
+): ({ number }?, number)
+	local counts = compactExistingCounts(existing, maxModelLevel)
+	local lowerObjectCount = 0
+	for level = 1, spawnLevel - 1 do
+		lowerObjectCount += counts[level]
+	end
+
+	local upperSlots = maxSpawns - lowerObjectCount
+	if upperSlots < 0 then
+		return nil, 0
+	end
+
+	local unitsPerCappedObject = 2 ^ (maxModelLevel - spawnLevel)
+	local existingUpperUnits = 0
+	for level = spawnLevel, maxModelLevel do
+		existingUpperUnits += counts[level] * 2 ^ (level - spawnLevel)
+	end
+
+	local maximumUpperUnits = upperSlots * unitsPerCappedObject
+	if existingUpperUnits > maximumUpperUnits then
+		-- The existing capped board is already above the upgraded capacity
+		-- (possible only for the deadlock escape valve or old/corrupt data).
+		-- Never delete an owned object just to make a paid delivery fit.
+		return nil, 0
+	end
+
+	local upperLimit = math.min(existingUpperUnits + pending, maximumUpperUnits)
+	local cappedObjects = math.floor(upperLimit / unitsPerCappedObject)
+	local remainder = upperLimit % unitsPerCappedObject
+	local finalUpperUnits: number
+
+	if cappedObjects >= upperSlots then
+		-- Any remainder would need at least one additional object. Filling all
+		-- available slots with capped objects is the largest legal value.
+		finalUpperUnits = upperSlots * unitsPerCappedObject
+	else
+		local remainderSlots = upperSlots - cappedObjects
+		local legalRemainder = largestWithAtMostSetBits(remainder, remainderSlots, maxModelLevel - spawnLevel - 1)
+		finalUpperUnits = cappedObjects * unitsPerCappedObject + legalRemainder
+	end
+
+	local consumed = math.floor(finalUpperUnits - existingUpperUnits)
+	if consumed <= 0 then
+		return nil, 0
+	end
+
+	for level = spawnLevel, maxModelLevel do
+		counts[level] = 0
+	end
+	counts[maxModelLevel] = math.floor(finalUpperUnits / unitsPerCappedObject)
+	local finalRemainder = finalUpperUnits % unitsPerCappedObject
+	for bit = 0, maxModelLevel - spawnLevel - 1 do
+		if math.floor(finalRemainder / (2 ^ bit)) % 2 == 1 then
+			counts[spawnLevel + bit] = 1
+		end
+	end
+
+	return counts, math.min(consumed, pending)
+end
+
+local function preservedHealthByLevel(
+	existing: { Types.MergeObjectEntry },
+	maxModelLevel: number,
+	healthMultiplier: number
+): { [number]: { number } }
+	local healthByLevel: { [number]: { number } } = {}
+	for _, entry in existing do
+		local level = math.min(Types.sanitizeTier(entry.Tier), maxModelLevel)
+		local queue = healthByLevel[level]
+		if queue == nil then
+			queue = {}
+			healthByLevel[level] = queue
+		end
+		table.insert(queue, Types.sanitizeHealth(entry.Health, level, healthMultiplier))
+	end
+	return healthByLevel
+end
+
+local function findOpenSpotAmongEntries(
+	spawnArea: BasePart,
+	tierDef: MergeConfig.TierDef,
+	existing: { Types.MergeObjectEntry },
+	attempts: number
+): (number?, number?)
+	local halfSize = tierDef.Size / 2
+	local rangeX = spawnArea.Size.X / 2 - MergeConfig.PAD_MARGIN - halfSize
+	local rangeZ = spawnArea.Size.Z / 2 - MergeConfig.PAD_MARGIN - halfSize
+	if rangeX <= 0 or rangeZ <= 0 then
+		return nil, nil
+	end
+
+	for _ = 1, attempts do
+		local x = (random:NextNumber() * 2 - 1) * rangeX
+		local z = (random:NextNumber() * 2 - 1) * rangeZ
+		local fits = true
+		for _, entry in existing do
+			local otherHalf = Types.tierDefFor(entry.Tier).Size / 2
+			local minDistance = halfSize + otherHalf + MergeConfig.MIN_GAP
+			local dx = x - entry.X
+			local dz = z - entry.Z
+			if dx * dx + dz * dz < minDistance * minDistance then
+				fits = false
+				break
+			end
+		end
+		if fits then
+			return x, z
+		end
+	end
+	return nil, nil
+end
+
+local function entriesFromRandomPlacement(spawnArea: BasePart, drafts: { SquishyDraft }): { Types.MergeObjectEntry }?
+	local entries: { Types.MergeObjectEntry } = {}
+	for _, draft in drafts do
+		local x, z = findOpenSpotAmongEntries(spawnArea, Types.tierDefFor(draft.Tier), entries, 250)
+		if x == nil or z == nil then
+			return nil
+		end
+		table.insert(entries, {
+			Tier = draft.Tier,
+			X = math.round(x * 100) / 100,
+			Z = math.round(z * 100) / 100,
+			Health = draft.Health,
+		})
+	end
+	return entries
+end
+
+-- Guaranteed fallback for the current 70x70 pads and 15-object ceiling. The
+-- paid rebuild normally preserves the game's free-placement look through the
+-- random planner above; this centered lattice exists solely so a legitimate
+-- receipt can never be stranded because rejection sampling got unlucky.
+local function entriesFromFallbackLattice(spawnArea: BasePart, drafts: { SquishyDraft }): { Types.MergeObjectEntry }?
+	local count = #drafts
+	if count == 0 then
+		return {}
+	end
+
+	local columns = math.ceil(math.sqrt(count))
+	local rows = math.ceil(count / columns)
+	local maximumSize = 0
+	for _, draft in drafts do
+		maximumSize = math.max(maximumSize, Types.tierDefFor(draft.Tier).Size)
+	end
+	local step = maximumSize + MergeConfig.MIN_GAP
+	local requiredWidth = maximumSize + (columns - 1) * step
+	local requiredDepth = maximumSize + (rows - 1) * step
+	local usableWidth = spawnArea.Size.X - 2 * MergeConfig.PAD_MARGIN
+	local usableDepth = spawnArea.Size.Z - 2 * MergeConfig.PAD_MARGIN
+	if requiredWidth > usableWidth or requiredDepth > usableDepth then
+		return nil
+	end
+
+	local entries: { Types.MergeObjectEntry } = table.create(count)
+	for index, draft in drafts do
+		local row = math.floor((index - 1) / columns)
+		local column = (index - 1) % columns
+		local rowCount = math.min(columns, count - row * columns)
+		local x = (column - (rowCount - 1) / 2) * step
+		local z = (row - (rows - 1) / 2) * step
+		table.insert(entries, {
+			Tier = draft.Tier,
+			X = math.round(x * 100) / 100,
+			Z = math.round(z * 100) / 100,
+			Health = draft.Health,
+		})
+	end
+	return entries
+end
+
+local function planCompactedEntries(
+	data: DataService.PlayerData,
+	live: Types.LiveBase,
+	pending: number
+): ({ Types.MergeObjectEntry }?, number)
+	local maxModelLevel = RebirthConfig.maxModelLevel(data.Rebirths)
+	local spawnLevel = math.min(Types.sanitizeTier(data.Merge.SpawnLevel), maxModelLevel)
+	local maxSpawns = math.min(UpgradeConfig.readValue(data, "MaxSpawns"), MergeConfig.MAX_OBJECTS)
+	local finalCounts, consumed =
+		buildFinalLevelCounts(data.Merge.Squishies, pending, spawnLevel, maxModelLevel, maxSpawns)
+	if finalCounts == nil or consumed <= 0 then
+		return nil, 0
+	end
+
+	local healthMultiplier = MergeConfig.sanitizeSquishyHealthMultiplier(data.Merge.SquishyHealthMultiplier)
+	local healthQueues = preservedHealthByLevel(data.Merge.Squishies, maxModelLevel, healthMultiplier)
+	local healthIndexes: { [number]: number } = {}
+	local drafts: { SquishyDraft } = {}
+	-- Largest first makes random packing substantially more reliable. It has
+	-- no gameplay effect; all entries are committed in one transaction.
+	for level = maxModelLevel, 1, -1 do
+		for _ = 1, finalCounts[level] do
+			local queue = healthQueues[level]
+			local nextIndex = (healthIndexes[level] or 0) + 1
+			healthIndexes[level] = nextIndex
+			local preservedHealth = if queue ~= nil then queue[nextIndex] else nil
+			table.insert(drafts, {
+				Tier = level,
+				Health = preservedHealth or MergeConfig.maxHealthForTier(level, healthMultiplier),
+			})
+		end
+	end
+
+	local entries = entriesFromRandomPlacement(live.spawnArea, drafts)
+	if entries == nil then
+		entries = entriesFromFallbackLattice(live.spawnArea, drafts)
+	end
+	return entries, consumed
 end
 
 -- Same polling wait as PlaytimeRewardsService/FriendRewardService/etc:
@@ -351,6 +642,142 @@ function Spawning.spawnRestingPart(player: Player, live: Types.LiveBase, entry: 
 	live.parts[part] = entry
 	wirePickupTouched(player, live, part)
 	return part
+end
+
+local function notifyWaitingBalance(player: Player, remaining: number)
+	UINotificationService.SendNotification(
+		player,
+		"Info",
+		`Your base is full! You still have {Format.FormatNumber(remaining)} purchased Squishies waiting to be delivered.`
+	)
+end
+
+-- Rebuilds the complete board only when at least one raw paid unit can be
+-- consumed. The persisted Squishies array and remaining balance change in a
+-- single replica transaction; clients therefore never observe compacted
+-- models without the matching balance deduction (or vice versa).
+function Spawning.processPurchasedSquishies(player: Player, notifyProgress: boolean?): (number, number)
+	if player.Parent ~= Players then
+		return 0, 0
+	end
+
+	local data = DataService.getData(player)
+	if data == nil then
+		return 0, 0
+	end
+	local pending = sanitizePurchasedBalance(data.Merge.PurchasedSquishiesRemaining)
+	if pending <= 0 then
+		return 0, 0
+	end
+
+	local live = liveBases[player]
+	if live == nil or live.objectsFolder.Parent == nil then
+		return 0, pending
+	end
+
+	local plannedEntries, consumed = planCompactedEntries(data, live, pending)
+	if plannedEntries == nil or consumed <= 0 then
+		return 0, pending
+	end
+
+	-- The user explicitly chose this behavior for a purchase arriving during
+	-- carry/launch. Returning the source first also means its persisted entry
+	-- participates in the same authoritative compaction as every other model.
+	onDeactivate(player)
+	if liveBases[player] ~= live or live.objectsFolder.Parent == nil then
+		return 0, pending
+	end
+
+	local remaining = pending - consumed
+	DataService.setValues(player, { "Merge" }, {
+		Squishies = plannedEntries,
+		PurchasedSquishiesRemaining = remaining,
+	})
+
+	-- Clear transient Parts/VFX only after the data commit. All new Parts use
+	-- the exact entry tables now stored in profile data, preserving the
+	-- identity invariant used by carry, damage, and auto merge.
+	live.objectsFolder:ClearAllChildren()
+	table.clear(live.parts)
+	table.clear(live.disarmed)
+	live.deadlockStreak = 0
+	for _, entry in data.Merge.Squishies do
+		Spawning.spawnRestingPart(player, live, entry)
+	end
+
+	if notifyProgress == true then
+		if remaining > 0 then
+			UINotificationService.SendNotification(
+				player,
+				"Info",
+				`Your purchase was partially delivered. You still have {Format.FormatNumber(remaining)} purchased Squishies waiting for space.`
+			)
+		else
+			UINotificationService.SendNotification(
+				player,
+				"Success",
+				"All your purchased Squishies have been delivered!"
+			)
+		end
+	end
+
+	return consumed, remaining
+end
+
+-- Receipt entry point. Crediting the durable balance is itself the reward:
+-- lack of a live base or free slot never rejects an already-paid receipt.
+-- The later processing pass can therefore safely happen now, on rejoin, or
+-- after any future capacity change without losing the purchase.
+function Spawning.addPurchasedSquishies(player: Player, amount: number): boolean
+	if
+		type(amount) ~= "number"
+		or amount ~= amount
+		or amount == math.huge
+		or amount == -math.huge
+		or amount <= 0
+		or amount % 1 ~= 0
+	then
+		return false
+	end
+
+	local data = DataService.getData(player)
+	if data == nil then
+		return false
+	end
+
+	-- First use any space that may already exist. This also avoids rejecting
+	-- a legitimate purchase merely because an extremely large old balance is
+	-- sitting near the defensive persistence ceiling.
+	Spawning.processPurchasedSquishies(player, false)
+	data = DataService.getData(player)
+	if data == nil then
+		return false
+	end
+	local current = sanitizePurchasedBalance(data.Merge.PurchasedSquishiesRemaining)
+	if amount > MergeConfig.MAX_PURCHASED_SQUISHIES_REMAINING - current then
+		log.warn(`paid Squishy balance overflow prevented for {player.Name}`)
+		return false
+	end
+
+	-- A purchase arrival always releases a carried/launched object before the
+	-- paid board rebuild. If no unit can fit, the source is simply restored to
+	-- its saved location and the whole amount remains safely queued.
+	if liveBases[player] ~= nil then
+		onDeactivate(player)
+	end
+	DataService.set(player, { "Merge", "PurchasedSquishiesRemaining" }, current + amount)
+
+	local _, remaining = Spawning.processPurchasedSquishies(player, false)
+	if remaining > 0 then
+		notifyWaitingBalance(player, remaining)
+	end
+	return true
+end
+
+function Spawning.processAllPurchasedSquishies()
+	for player in liveBases do
+		Spawning.processPurchasedSquishies(player, true)
+	end
 end
 
 --[[
@@ -640,6 +1067,14 @@ function Spawning.activateBase(player: Player, baseName: string)
 		local restoreCount = math.min(#data.Merge.Squishies, MergeConfig.MAX_OBJECTS + 1)
 		for i = 1, restoreCount do
 			Spawning.spawnRestingPart(player, live, data.Merge.Squishies[i])
+		end
+
+		-- Rejoining/reactivating a base is a delivery opportunity. The balance
+		-- was restored with the profile above and is reinterpreted using the
+		-- player's progression NOW, never the SpawnLevel at purchase time.
+		local delivered, remaining = Spawning.processPurchasedSquishies(player, true)
+		if delivered == 0 and remaining > 0 then
+			notifyWaitingBalance(player, remaining)
 		end
 
 		runAutoSpawnLoop(player, live)

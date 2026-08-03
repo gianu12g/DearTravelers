@@ -27,6 +27,16 @@ export type TierDef = {
 local MergeConfig = {}
 
 MergeConfig.MAX_OBJECTS = 15
+-- Durable raw-unit balance for paid Squishy packs. A purchased unit is not
+-- tied to a model level: every delivery attempt reinterprets it at the
+-- player's CURRENT SpawnLevel, then compacts it up to their rebirth cap.
+-- The ceiling is intentionally far above any catalog pack while remaining
+-- an exact integer in Luau's double-precision number representation.
+MergeConfig.MAX_PURCHASED_SQUISHIES_REMAINING = 1e12
+-- Pending deliveries are retried on a short shared cadence so every way of
+-- freeing a slot (manual/auto merge, combat, future systems) is covered in
+-- addition to the immediate upgrade/rebirth hooks.
+MergeConfig.PURCHASED_DELIVERY_RETRY_INTERVAL = 1
 MergeConfig.SPAWN_INTERVAL = 5 -- seconds between auto-spawn attempts, per pad
 -- Deadlock rescue (Spawning.tryDeadlockRescue): a true deadlock -- board
 -- full, no legal merge pair among mergeable-tier entries -- must be observed

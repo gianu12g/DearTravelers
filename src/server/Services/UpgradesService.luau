@@ -15,6 +15,7 @@ local CoinsService = require(script.Parent.CoinsService)
 local DataService = require(script.Parent.DataService)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeService = require(script.Parent.MergeService)
 local Net = require(ReplicatedStorage.Shared.Net)
 local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
@@ -79,6 +80,11 @@ local function purchase(player: Player, requestedKey: string)
 	end
 
 	DataService.set(player, UpgradeConfig.pathFor(key), nextValue)
+	if key == "MaxSpawns" then
+		-- Capacity changed synchronously; do not make a paid balance wait for
+		-- the periodic safety sweep before occupying the newly opened slot.
+		MergeService.processPurchasedSquishies(player, true)
+	end
 	local description = valueDescription(key, nextValue)
 	log.info(`{player.Name} bought {key} level {UpgradeConfig.levelForValue(key, nextValue)} for {cost} coins`)
 	sendResult(player, true, key, `Upgraded to {description}`)

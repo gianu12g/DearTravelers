@@ -93,6 +93,8 @@ type SnapshotEntry = {
 }
 
 local lastCommandAt: { [Player]: number } = {}
+local lastSnapshotAt: { [Player]: number } = {}
+local lastAccessRequestAt: { [Player]: number } = {}
 local lastWarnAt: { [Player]: number } = {}
 
 -- A set, not an array: checkAccess runs this lookup on EVERY packet, so a linear
@@ -293,13 +295,14 @@ end
 	comment. Only once that passes do we spend a rank lookup and, on failure,
 	a throttled warn plus a reply.
 ]]
-local function checkAccess(player: Player): boolean
+local function checkAccess(player: Player, rateLimit: { [Player]: number }?): boolean
+	local timestamps = rateLimit or lastCommandAt
 	local now = os.clock()
-	local last = lastCommandAt[player]
+	local last = timestamps[player]
 	if last ~= nil and now - last < MIN_COMMAND_INTERVAL then
 		return false
 	end
-	lastCommandAt[player] = now
+	timestamps[player] = now
 
 	if isDeveloper(player) then
 		return true
@@ -337,11 +340,13 @@ end
 
 local function onPlayerRemoving(player: Player)
 	lastCommandAt[player] = nil
+	lastSnapshotAt[player] = nil
+	lastAccessRequestAt[player] = nil
 	lastWarnAt[player] = nil
 end
 
 local function onRequestSnapshot(data: { targetPlayer: Instance? }, player: Player)
-	if not checkAccess(player) then
+	if not checkAccess(player, lastSnapshotAt) then
 		return
 	end
 
@@ -655,19 +660,19 @@ function DevService.Init()
 		--[[
 			Rate limited like every other packet, and for the reason the top
 			comment gives: anyone can send this, so a flood must cost us nothing.
-			It shares lastCommandAt deliberately -- a separate table would be a
-			third thing to remember to clear on PlayerRemoving.
+			It has its own rate-limit bucket so requesting access cannot consume
+			the next snapshot refresh or mutation from the console.
 
 			No auth check: the answer IS the player's auth state, and telling
 			someone "no" reveals nothing they could not infer from the absence of
 			an icon.
 		]]
 		local now = os.clock()
-		local last = lastCommandAt[player]
+		local last = lastAccessRequestAt[player]
 		if last ~= nil and now - last < MIN_COMMAND_INTERVAL then
 			return
 		end
-		lastCommandAt[player] = now
+		lastAccessRequestAt[player] = now
 
 		publishAccess(player)
 	end)

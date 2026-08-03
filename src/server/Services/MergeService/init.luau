@@ -209,6 +209,7 @@ local characterRemovingConnections: { [Player]: RBXScriptConnection } = {}
 -- the existing Heartbeat connection instead of a loop per player.
 local incomeAccumulator = 0
 local activityCheckpointAccumulator = 0
+local purchasedDeliveryAccumulator = 0
 
 local MergeService = {}
 
@@ -220,6 +221,8 @@ MergeService.clearSquishies = Damage.clearSquishies
 MergeService.applySquishyHealthMultiplier = Damage.applyHealthMultiplier
 MergeService.applyFasterLaunchCooldown = Launch.applyFasterCooldown
 MergeService.resetIncomeRemainder = Income.resetRemainder
+MergeService.addPurchasedSquishies = Spawning.addPurchasedSquishies
+MergeService.processPurchasedSquishies = Spawning.processPurchasedSquishies
 
 local function onAssignedBaseChanged(player: Player)
 	local baseName = player:GetAttribute("AssignedBase")
@@ -300,6 +303,7 @@ function MergeService.Init()
 		onDeactivate = function(player: Player)
 			Carry.cancelCarry(player)
 			Launch.cancelLaunch(player)
+			AutoMerge.clearPlayer(player)
 		end,
 	})
 	local sharedState = { liveBases = liveBases, carries = carries, activeLaunches = activeLaunches }
@@ -360,6 +364,12 @@ function MergeService.Start()
 		while incomeAccumulator >= MergeConfig.INCOME_INTERVAL do
 			incomeAccumulator -= MergeConfig.INCOME_INTERVAL
 			Income.runTick()
+		end
+
+		purchasedDeliveryAccumulator += dt
+		if purchasedDeliveryAccumulator >= MergeConfig.PURCHASED_DELIVERY_RETRY_INTERVAL then
+			purchasedDeliveryAccumulator %= MergeConfig.PURCHASED_DELIVERY_RETRY_INTERVAL
+			Spawning.processAllPurchasedSquishies()
 		end
 
 		activityCheckpointAccumulator += dt

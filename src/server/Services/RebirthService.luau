@@ -66,6 +66,10 @@ local function requestRebirth(player: Player)
 	})
 	UINotificationService.SendNotification(player, "Success", "Rebirth successful!")
 	UINotificationService.EmitConfetti(player)
+	-- Rebirth has now cleared the board and reset SpawnLevel. Pending paid
+	-- units must be interpreted from that NEW level (for example four units
+	-- at level 1 compact into one level-3 model), never from their old run.
+	MergeService.processPurchasedSquishies(player, true)
 end
 
 function RebirthService.Init()

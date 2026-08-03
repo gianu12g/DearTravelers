@@ -137,7 +137,7 @@ local function trimTrailingZeros(text: string): string
 end
 
 local function formatCashPrice(value: number): string
-	return trimTrailingZeros(Format.FormatNumber(value))
+	return "$" .. trimTrailingZeros(Format.FormatNumber(value))
 end
 
 local function toIdSet(ids: { string }): { [string]: true }

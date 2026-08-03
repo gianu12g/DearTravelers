@@ -11,6 +11,7 @@
 local ServerStorage = game:GetService("ServerStorage")
 
 local CoinsService = require(ServerStorage.Services.CoinsService)
+local MergeService = require(ServerStorage.Services.MergeService)
 local WheelSpinService = require(ServerStorage.Services.UISystem.WheelSpinService)
 
 local ProductRewards: { [string]: (Player) -> boolean } = {
@@ -40,6 +41,30 @@ local ProductRewards: { [string]: (Player) -> boolean } = {
 
 	["10 Spins"] = function(player: Player)
 		return WheelSpinService.AddSpins(player, 10)
+	end,
+
+	["+10 Squishies"] = function(player: Player)
+		return MergeService.addPurchasedSquishies(player, 10)
+	end,
+
+	["+50 Squishies"] = function(player: Player)
+		return MergeService.addPurchasedSquishies(player, 50)
+	end,
+
+	["+100 Squishies"] = function(player: Player)
+		return MergeService.addPurchasedSquishies(player, 100)
+	end,
+
+	["+500 Squishies"] = function(player: Player)
+		return MergeService.addPurchasedSquishies(player, 500)
+	end,
+
+	["+1,000 Squishies"] = function(player: Player)
+		return MergeService.addPurchasedSquishies(player, 1000)
+	end,
+
+	["+10,000 Squishies"] = function(player: Player)
+		return MergeService.addPurchasedSquishies(player, 10000)
 	end,
 }
 

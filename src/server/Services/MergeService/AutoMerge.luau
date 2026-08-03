@@ -73,11 +73,12 @@ function AutoMerge.clearPlayer(player: Player)
 end
 
 local function pairIsCurrent(player: Player, job: AutoMergeJob): boolean
+	local carry = carries[player]
 	if
 		player.Parent ~= Players
 		or player:GetAttribute("AutoMergeEnabled") ~= true
 		or liveBases[player] ~= job.live
-		or carries[player] ~= nil
+		or (carry ~= nil and (carry.part == job.partA or carry.part == job.partB))
 		or activeLaunches[player] ~= nil
 		or job.partA.Parent ~= job.live.objectsFolder
 		or job.partB.Parent ~= job.live.objectsFolder
@@ -226,6 +227,8 @@ local function findPair(player: Player, live: Types.LiveBase): (PairCandidate?, 
 	end
 
 	local maxModelLevel = RebirthConfig.maxModelLevel(data.Rebirths)
+	local carry = carries[player]
+	local carriedPart = if carry ~= nil then carry.part else nil
 	local firstByTier: { [number]: PairCandidate } = {}
 	local bestA: PairCandidate? = nil
 	local bestB: PairCandidate? = nil
@@ -234,6 +237,7 @@ local function findPair(player: Player, live: Types.LiveBase): (PairCandidate?, 
 	for part, entry in live.parts do
 		if
 			part.Parent ~= live.objectsFolder
+			or part == carriedPart
 			or part:GetAttribute("AutoMerging") == true
 			or entry.Tier >= maxModelLevel
 		then
@@ -260,7 +264,6 @@ function AutoMerge.checkAll()
 			player:GetAttribute("AutoMergeEnabled") ~= true
 			or activeJobs[player] ~= nil
 			or (cooldownEndsAt[player] or 0) > now
-			or carries[player] ~= nil
 			or activeLaunches[player] ~= nil
 		then
 			continue

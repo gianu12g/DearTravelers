@@ -77,7 +77,7 @@ local POPUP_TWEEN_INFO = TweenInfo.new(POPUP_LIFETIME, Enum.EasingStyle.Quad, En
 -- this file, and MergeConfig doesn't track world-space base layout) -- far
 -- enough that a player standing on their own pad always sees its popups,
 -- short enough that a full 8-base server isn't rendering all of them at once.
-local MAX_RENDER_DISTANCE = 90
+local MAX_RENDER_DISTANCE = 140
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")

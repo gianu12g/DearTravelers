@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Live developer-product catalog (currency packs + spin packs).
+	Live developer-product catalog (currency, spin, and squishy packs).
 
 	Not every product has a GiftID -- the spin packs cannot be gifted, only
 	bought for yourself.
@@ -36,6 +36,36 @@ local Products = {
 
 	["10 Spins"] = {
 		ProductID = 3611983494,
+	},
+
+	["+10 Squishies"] = {
+		ProductID = 3612900786,
+		GiftID = 3612901877,
+	},
+
+	["+50 Squishies"] = {
+		ProductID = 3612900790,
+		GiftID = 3612901885,
+	},
+
+	["+100 Squishies"] = {
+		ProductID = 3612900793,
+		GiftID = 3612901890,
+	},
+
+	["+500 Squishies"] = {
+		ProductID = 3612900795,
+		GiftID = 3612901893,
+	},
+
+	["+1,000 Squishies"] = {
+		ProductID = 3612900798,
+		GiftID = 3612901900,
+	},
+
+	["+10,000 Squishies"] = {
+		ProductID = 3612900800,
+		GiftID = 3612901903,
 	},
 }
 

@@ -110,6 +110,12 @@ local TEMPLATE = {
 		-- health exactly once and preserve doubled maximum health across rejoins.
 		SquishyHealthMultiplier = 1,
 		SpawnLevel = UpgradeConfig.DEFAULT_SPAWN_LEVEL,
+		-- Raw paid-pack units still owed to this player. They deliberately do
+		-- not store a model level: MergeService re-reads the player's current
+		-- SpawnLevel and rebirth cap whenever space becomes available. Keeping
+		-- the balance in profile data makes it survive leaves/rejoins and also
+		-- exposes it through the existing private replica for a future counter.
+		PurchasedSquishiesRemaining = 0,
 		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling;
 		-- MaxSpawns is the per-player capacity within it, except for the one
 		-- transient MAX_OBJECTS + 1 entry MergeService.Spawning.tryDeadlockRescue
@@ -579,6 +585,8 @@ local function repairProfileData(data: any)
 	data.Rebirths = RebirthConfig.sanitizeRebirths(data.Rebirths)
 	data.Level, data.Experience = Progression.resolve(data.Level, data.Experience, 0)
 	data.Merge.SpawnLevel = UpgradeConfig.sanitizeValue("SpawnTier", data.Merge.SpawnLevel)
+	data.Merge.PurchasedSquishiesRemaining =
+		finiteInteger(data.Merge.PurchasedSquishiesRemaining, 0, MergeConfig.MAX_PURCHASED_SQUISHIES_REMAINING, 0)
 	data.Merge.MaxSpawns = UpgradeConfig.sanitizeValue("MaxSpawns", data.Merge.MaxSpawns)
 	data.Merge.LockBase = UpgradeConfig.sanitizeValue("LockBase", data.Merge.LockBase)
 	data.Merge.SquishyHealthMultiplier = MergeConfig.sanitizeSquishyHealthMultiplier(data.Merge.SquishyHealthMultiplier)
