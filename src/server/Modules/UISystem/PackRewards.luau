@@ -36,7 +36,7 @@ local function grantArcadeThemesPack(player: Player): boolean
 end
 
 local PackRewards: { [string]: (Player) -> boolean } = {
-	["Arcade Themes Pack"] = grantArcadeThemesPack,
+	["Limited Themes Pack"] = grantArcadeThemesPack,
 }
 
 return PackRewards

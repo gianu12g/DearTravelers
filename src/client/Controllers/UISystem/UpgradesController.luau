@@ -18,6 +18,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local Net = require(ReplicatedStorage.Shared.Net)
 local NotificationController = require(script.Parent.NotificationController)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
+local UIKitController = require(script.Parent.UIKitController)
 local UpgradeConfig = require(ReplicatedStorage.Shared.UpgradeConfig)
 
 local log = Log.new("UpgradesController")
@@ -88,10 +89,12 @@ local function render()
 		elseif rebirthGated then
 			row.priceTag.Text = "REBIRTH"
 		else
-			row.priceTag.Text = Format.FormatNumber(cost :: number)
+			row.priceTag.Text = "$" .. Format.FormatNumber(cost :: number)
 		end
 
-		row.button.Interactable = not isPending and not atGlobalMaximum and not rebirthGated and cost ~= nil
+		-- A rebirth-gated Spawn Level row remains actionable: clicking it is a
+		-- navigation shortcut to the Rebirth frame, not a purchase request.
+		row.button.Interactable = not isPending and not atGlobalMaximum and cost ~= nil
 	end
 end
 
@@ -176,6 +179,16 @@ local function bindFrame(frame: Frame)
 	for _, key in UpgradeConfig.ORDER do
 		local rowKey = key
 		rows[rowKey].button.Activated:Connect(function()
+			local data = DataController.getData()
+			if data ~= nil and rowKey == "SpawnTier" then
+				local value = UpgradeConfig.readValue(data, rowKey)
+				local rebirthGated = value < UpgradeConfig.maximumValue(rowKey)
+					and value >= RebirthConfig.maxModelLevel(data.Rebirths)
+				if rebirthGated then
+					UIKitController.OpenFrame("Rebirth")
+					return
+				end
+			end
 			requestUpgrade(rowKey)
 		end)
 	end

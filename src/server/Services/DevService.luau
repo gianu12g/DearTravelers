@@ -345,6 +345,10 @@ local function onPlayerRemoving(player: Player)
 	lastWarnAt[player] = nil
 end
 
+local function isSpawnLevelPath(path: { string }): boolean
+	return #path == 2 and path[1] == "Merge" and path[2] == "SpawnLevel"
+end
+
 local function onRequestSnapshot(data: { targetPlayer: Instance? }, player: Player)
 	if not checkAccess(player, lastSnapshotAt) then
 		return
@@ -394,10 +398,16 @@ local function onSet(data: { targetPlayer: Instance?, path: { string }, kind: st
 		return
 	end
 
-	DataService.set(target, data.path :: { string | number }, value)
+	local committedValue = value
+	if isSpawnLevelPath(data.path) then
+		local _ok, _upgradedCount, spawnLevel = MergeService.setSpawnLevel(target, value :: number)
+		committedValue = spawnLevel
+	else
+		DataService.set(target, data.path :: { string | number }, value)
+	end
 
 	-- A god-mode console must leave an audit trail: who, whose data, what.
-	log.info(`{player.Name} set {target.Name}.{table.concat(data.path, ".")} = {data.value}`)
+	log.info(`{player.Name} set {target.Name}.{table.concat(data.path, ".")} = {tostring(committedValue)}`)
 
 	Net.devResult.sendTo({ ok = true, message = `{table.concat(data.path, ".")} set` }, player)
 	sendSnapshot(target, player)
@@ -464,7 +474,12 @@ local function onAdd(data: { targetPlayer: Instance?, path: { string }, amount: 
 	end
 
 	local newValue = math.clamp(existing + amount, -MAX_ADD_MAGNITUDE, MAX_ADD_MAGNITUDE)
-	DataService.set(target, data.path :: { string | number }, newValue)
+	if isSpawnLevelPath(data.path) then
+		local _ok, _upgradedCount, spawnLevel = MergeService.setSpawnLevel(target, newValue)
+		newValue = spawnLevel
+	else
+		DataService.set(target, data.path :: { string | number }, newValue)
+	end
 
 	local dotted = table.concat(data.path, ".")
 	log.info(`{player.Name} added {amount} to {target.Name}.{dotted} -> {newValue}`)

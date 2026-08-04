@@ -51,12 +51,12 @@ local INFO_TYPE: { [ItemType]: Enum.InfoType } = {
 }
 
 type GiftData = {
-	GiftType: "Pass" | "Product" | "Pack" | "Voucher",
+	GiftType: "Pass" | "Product" | "Pack" | "Ticket",
 	GiftName: string,
 	GiftTarget: number,
 	-- Which frame opened the picker, so its Close button returns there
 	-- instead of always going to "Shop" -- ThemeShopController reuses this
-	-- same picker (StartVoucherGiftPrompt below), and closing it should not
+	-- same picker (StartTicketGiftPrompt below), and closing it should not
 	-- strand the player on an unrelated frame.
 	OriginFrame: Frames.FrameName,
 }
@@ -93,21 +93,21 @@ local giftedPasses: { [string]: boolean } = {}
 local ownedPacks: { string } = {}
 local passButtons: { { button: GuiButton, name: string } } = {}
 local packButtons: { { button: GuiButton, name: string } } = {}
-local voucherCount = 0
-local voucherTransferPending = false
-local voucherActiveRequestId: string? = nil
-local voucherConfirmLabel: TextLabel? = nil
+local ticketCount = 0
+local ticketTransferPending = false
+local ticketActiveRequestId: string? = nil
+local ticketConfirmLabel: TextLabel? = nil
 
 local MonetizationController = {}
 
-local function updateVoucherConfirmLabel()
-	local label = voucherConfirmLabel
-	if label == nil or giftData.GiftType ~= "Voucher" then
+local function updateTicketConfirmLabel()
+	local label = ticketConfirmLabel
+	if label == nil or giftData.GiftType ~= "Ticket" then
 		return
 	end
-	if voucherTransferPending then
+	if ticketTransferPending then
 		label.Text = "SENDING..."
-	elseif voucherCount > 0 then
+	elseif ticketCount > 0 then
 		label.Text = "SEND"
 	else
 		label.Text = "BUY"
@@ -412,13 +412,13 @@ end
 -- Opens the existing target picker for a fungible Theme Ticket. Selecting a
 -- player before the product prompt is UI state only: the Yes button prompts
 -- when the balance is zero, then requires a second post-receipt SEND click.
-function MonetizationController.StartVoucherGiftPrompt(originFrame: Frames.FrameName)
-	giftData.GiftType = "Voucher"
+function MonetizationController.StartTicketGiftPrompt(originFrame: Frames.FrameName)
+	giftData.GiftType = "Ticket"
 	giftData.GiftName = "Theme Ticket"
 	giftData.OriginFrame = originFrame
-	voucherTransferPending = false
-	voucherActiveRequestId = nil
-	updateVoucherConfirmLabel()
+	ticketTransferPending = false
+	ticketActiveRequestId = nil
+	updateTicketConfirmLabel()
 	local frame = Frames.get("GiftPlayerChoose")
 	local main = frame:WaitForChild("Main")
 	local holder = main:WaitForChild("Holder")
@@ -471,14 +471,14 @@ local function onPlayerSelected(userId: number, username: string, _displayName: 
 
 	local confirmFrame = Frames.get("GiftConfirm")
 	local areYouSure = confirmFrame:WaitForChild("AreYouSureText") :: TextLabel
-	if giftData.GiftType == "Voucher" then
+	if giftData.GiftType == "Ticket" then
 		areYouSure.Text = `Send 1 Theme Ticket to {username}?`
 	else
 		areYouSure.Text = `Are you sure you want to gift "{giftData.GiftName}" to {username}?`
 	end
-	voucherTransferPending = false
-	voucherActiveRequestId = nil
-	updateVoucherConfirmLabel()
+	ticketTransferPending = false
+	ticketActiveRequestId = nil
+	updateTicketConfirmLabel()
 
 	UISignals.OpenFrame.Fire("GiftConfirm", false)
 end
@@ -561,13 +561,13 @@ function MonetizationController.Init()
 	Net.promptStart.listen(function()
 		openPromptAnimation()
 	end)
-	Net.voucherGiftResult.listen(function(result)
-		if not voucherTransferPending or result.requestId ~= voucherActiveRequestId then
+	Net.ticketGiftResult.listen(function(result)
+		if not ticketTransferPending or result.requestId ~= ticketActiveRequestId then
 			return
 		end
-		voucherTransferPending = false
-		voucherActiveRequestId = nil
-		updateVoucherConfirmLabel()
+		ticketTransferPending = false
+		ticketActiveRequestId = nil
+		updateTicketConfirmLabel()
 		if result.ok and Frames.get("GiftConfirm").Visible then
 			UISignals.CloseFrame.Fire(true)
 		end
@@ -593,12 +593,12 @@ function MonetizationController.Start()
 		end
 	end)
 
-	DataController.observe({ "UISystem", "Vouchers" }, function(value: any)
+	DataController.observe({ "UISystem", "Tickets" }, function(value: any)
 		if type(value) ~= "number" then
 			return
 		end
-		voucherCount = math.max(0, math.floor(value))
-		updateVoucherConfirmLabel()
+		ticketCount = math.max(0, math.floor(value))
+		updateTicketConfirmLabel()
 	end)
 
 	local giftPlayerChooseFrame = Frames.get("GiftPlayerChoose")
@@ -715,24 +715,24 @@ function MonetizationController.Start()
 	local yesButton = giftConfirmFrame:WaitForChild("Yes") :: GuiButton
 	local yesText = yesButton:FindFirstChild("TextLabel")
 	if yesText ~= nil and yesText:IsA("TextLabel") then
-		voucherConfirmLabel = yesText
+		ticketConfirmLabel = yesText
 	end
 	yesButton.MouseButton1Click:Connect(function()
 		local giftType = giftData.GiftType
-		if giftType == "Voucher" then
-			if voucherTransferPending then
+		if giftType == "Ticket" then
+			if ticketTransferPending then
 				return
 			end
-			-- With no balance this asks the server to open the gift-voucher
+			-- With no balance this asks the server to open the gift-ticket
 			-- product. The selected target remains client-only until the player
-			-- clicks SEND after the receipt increments Vouchers.
+			-- clicks SEND after the receipt increments Tickets.
 			local requestId = HttpService:GenerateGUID(false)
-			if voucherCount > 0 then
-				voucherTransferPending = true
-				voucherActiveRequestId = requestId
-				updateVoucherConfirmLabel()
+			if ticketCount > 0 then
+				ticketTransferPending = true
+				ticketActiveRequestId = requestId
+				updateTicketConfirmLabel()
 			end
-			Net.voucherGift.send({
+			Net.ticketGift.send({
 				targetUserId = giftData.GiftTarget,
 				requestId = requestId,
 			})
@@ -751,7 +751,7 @@ function MonetizationController.Start()
 			end
 		end)
 	end)
-	updateVoucherConfirmLabel()
+	updateTicketConfirmLabel()
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(closePromptAnimation)
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(_, passId: number, purchased: boolean)

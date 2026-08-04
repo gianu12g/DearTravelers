@@ -8,14 +8,12 @@
 ]]
 
 local Packs = {
-	-- Limited shop offer. These products were originally authored as
-	-- "Secret Pack" (purchase) and "Starter Pack" (gift). Rename both in
-	-- Creator Dashboard and set both prices to 49 Robux. The client verifies
-	-- the live prices before enabling either button.
-	["Arcade Themes Pack"] = {
+	-- Limited shop offer. The client verifies the live prices before
+	-- enabling either button.
+	["Limited Themes Pack"] = {
 		Enabled = true,
-		ProductID = 3596657806,
-		GiftID = 3596657710,
+		ProductID = 3612150441,
+		GiftID = 3612151351,
 		ExpectedPrice = 49,
 		ExpectedGiftPrice = 49,
 	},

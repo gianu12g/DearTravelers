@@ -116,7 +116,7 @@ local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEn
 	local statusWidth = math.clamp(tierDef.Size * 1.25, 3, 8)
 	local statusHeight = statusWidth * (52 / 116)
 	billboard.Size = UDim2.fromScale(statusWidth, statusHeight)
-	billboard.StudsOffset = Vector3.new(0, tierDef.Size / 2 + 0.85, 0)
+	billboard.StudsOffsetWorldSpace = Vector3.new(0, tierDef.Size / 2 + 0.85, 0)
 	billboard.AlwaysOnTop = true
 	billboard.LightInfluence = 0
 	billboard.Parent = part
@@ -133,10 +133,17 @@ local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEn
 	incomeText.Font = Enum.Font.FredokaOne
 	incomeText.TextScaled = true
 	incomeText.TextColor3 = Color3.fromRGB(255, 248, 231)
-	incomeText.TextStrokeColor3 = Color3.fromRGB(58, 38, 31)
-	incomeText.TextStrokeTransparency = 0.15
+	incomeText.TextStrokeTransparency = 1
 	incomeText.Text = Format.FormatNumber(RebirthConfig.tierNumberForModelLevel(entry.Tier))
 	incomeText.Parent = billboard
+
+	local incomeStroke = Instance.new("UIStroke")
+	incomeStroke.Name = "IncomeStroke"
+	incomeStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	incomeStroke.Color = Color3.new(0, 0, 0)
+	incomeStroke.StrokeSizingMode = Enum.StrokeSizingMode.ScaledSize
+	incomeStroke.Thickness = 0.07
+	incomeStroke.Parent = incomeText
 
 	StatusUI.createHealthBar(part, billboard, entry.Tier, entry.Health, healthMultiplier)
 	StatusUI.createLaunchCooldownCounter(part, billboard)
@@ -283,8 +290,8 @@ local function buildFinalLevelCounts(
 	local maximumUpperUnits = upperSlots * unitsPerCappedObject
 	if existingUpperUnits > maximumUpperUnits then
 		-- The existing capped board is already above the upgraded capacity
-		-- (possible only for the deadlock escape valve or old/corrupt data).
-		-- Never delete an owned object just to make a paid delivery fit.
+		-- (possible with old or corrupt data). Never delete an owned object
+		-- just to make a paid delivery fit.
 		return nil, 0
 	end
 
@@ -322,24 +329,6 @@ local function buildFinalLevelCounts(
 	return counts, math.min(consumed, pending)
 end
 
-local function preservedHealthByLevel(
-	existing: { Types.MergeObjectEntry },
-	maxModelLevel: number,
-	healthMultiplier: number
-): { [number]: { number } }
-	local healthByLevel: { [number]: { number } } = {}
-	for _, entry in existing do
-		local level = math.min(Types.sanitizeTier(entry.Tier), maxModelLevel)
-		local queue = healthByLevel[level]
-		if queue == nil then
-			queue = {}
-			healthByLevel[level] = queue
-		end
-		table.insert(queue, Types.sanitizeHealth(entry.Health, level, healthMultiplier))
-	end
-	return healthByLevel
-end
-
 local function findOpenSpotAmongEntries(
 	spawnArea: BasePart,
 	tierDef: MergeConfig.TierDef,
@@ -374,8 +363,15 @@ local function findOpenSpotAmongEntries(
 	return nil, nil
 end
 
-local function entriesFromRandomPlacement(spawnArea: BasePart, drafts: { SquishyDraft }): { Types.MergeObjectEntry }?
-	local entries: { Types.MergeObjectEntry } = {}
+local function entriesFromRandomPlacement(
+	spawnArea: BasePart,
+	drafts: { SquishyDraft },
+	fixedEntries: { Types.MergeObjectEntry }
+): { Types.MergeObjectEntry }?
+	-- Existing entries that survive at the same level keep the SAME table and
+	-- pad-local X/Z. New merge results are packed around them; they are never
+	-- fed back through the random placer.
+	local entries: { Types.MergeObjectEntry } = table.clone(fixedEntries)
 	for _, draft in drafts do
 		local x, z = findOpenSpotAmongEntries(spawnArea, Types.tierDefFor(draft.Tier), entries, 250)
 		if x == nil or z == nil then
@@ -448,26 +444,40 @@ local function planCompactedEntries(
 	end
 
 	local healthMultiplier = MergeConfig.sanitizeSquishyHealthMultiplier(data.Merge.SquishyHealthMultiplier)
-	local healthQueues = preservedHealthByLevel(data.Merge.Squishies, maxModelLevel, healthMultiplier)
-	local healthIndexes: { [number]: number } = {}
+	local remainingCounts = table.clone(finalCounts)
+	local preservedEntries: { Types.MergeObjectEntry } = {}
+
+	-- Preserve as many existing same-level entries as the final composition can
+	-- contain. This chooses the minimum-disturbance interpretation of the
+	-- compaction: only entries that must be consumed by a merge disappear;
+	-- capped models and every other survivor retain their exact X/Z and health.
+	for _, entry in data.Merge.Squishies do
+		local level = math.min(Types.sanitizeTier(entry.Tier), maxModelLevel)
+		if entry.Tier == level and remainingCounts[level] > 0 then
+			table.insert(preservedEntries, entry)
+			remainingCounts[level] -= 1
+		end
+	end
+
 	local drafts: { SquishyDraft } = {}
-	-- Largest first makes random packing substantially more reliable. It has
-	-- no gameplay effect; all entries are committed in one transaction.
+	-- Every remaining output is new -- either a purchased squishy or a merge
+	-- result -- so it starts at full health under the global level-up rule.
+	-- Largest first makes random packing substantially more reliable.
 	for level = maxModelLevel, 1, -1 do
-		for _ = 1, finalCounts[level] do
-			local queue = healthQueues[level]
-			local nextIndex = (healthIndexes[level] or 0) + 1
-			healthIndexes[level] = nextIndex
-			local preservedHealth = if queue ~= nil then queue[nextIndex] else nil
+		for _ = 1, remainingCounts[level] do
 			table.insert(drafts, {
 				Tier = level,
-				Health = preservedHealth or MergeConfig.maxHealthForTier(level, healthMultiplier),
+				Health = MergeConfig.maxHealthForTier(level, healthMultiplier),
 			})
 		end
 	end
 
-	local entries = entriesFromRandomPlacement(live.spawnArea, drafts)
-	if entries == nil then
+	local entries = entriesFromRandomPlacement(live.spawnArea, drafts, preservedEntries)
+	if entries == nil and #preservedEntries == 0 then
+		-- With no survivor there is no position to protect, so the old guaranteed
+		-- full-board lattice remains a safe last resort. If survivors exist and
+		-- no new result fits around them, leave the purchase pending instead of
+		-- violating the position-preservation rule.
 		entries = entriesFromFallbackLattice(live.spawnArea, drafts)
 	end
 	return entries, consumed
@@ -644,6 +654,73 @@ function Spawning.spawnRestingPart(player: Player, live: Types.LiveBase, entry: 
 	return part
 end
 
+--[[
+	Authoritative SpawnLevel writer. Raising the floor upgrades every owned
+	squishy below it in the same replicated transaction and gives each upgraded
+	entry the new tier's full health. Carry, launch, and auto-merge state are
+	cancelled before the rewrite so no transient reference can retain an old
+	entry table or an old-tier visual.
+
+	The requested level is clamped to the player's current rebirth unlock. This
+	keeps SpawnLevel and the existing model-level ceiling as one coherent
+	invariant even when the developer console supplies the value directly.
+]]
+function Spawning.setSpawnLevel(player: Player, requestedLevel: number): (boolean, number, number)
+	local data = DataService.getData(player)
+	if data == nil then
+		return false, 0, UpgradeConfig.DEFAULT_SPAWN_LEVEL
+	end
+
+	local spawnLevel =
+		math.min(UpgradeConfig.sanitizeValue("SpawnTier", requestedLevel), RebirthConfig.maxModelLevel(data.Rebirths))
+
+	-- This callback is yield-free. It returns carried objects to persisted
+	-- positions and cancels launches/auto-merges before any entry is replaced.
+	onDeactivate(player)
+	data = DataService.getData(player)
+	if data == nil then
+		return false, 0, spawnLevel
+	end
+
+	local healthMultiplier = MergeConfig.sanitizeSquishyHealthMultiplier(data.Merge.SquishyHealthMultiplier)
+	local upgradedCount = 0
+	local updated: { Types.MergeObjectEntry } = table.create(#data.Merge.Squishies)
+	for _, entry in data.Merge.Squishies do
+		if entry.Tier < spawnLevel then
+			upgradedCount += 1
+			table.insert(updated, {
+				Tier = spawnLevel,
+				X = entry.X,
+				Z = entry.Z,
+				Health = MergeConfig.maxHealthForTier(spawnLevel, healthMultiplier),
+			})
+		else
+			table.insert(updated, entry)
+		end
+	end
+
+	if upgradedCount > 0 then
+		DataService.setValues(player, { "Merge" }, {
+			SpawnLevel = spawnLevel,
+			Squishies = updated,
+		})
+	else
+		DataService.set(player, { "Merge", "SpawnLevel" }, spawnLevel)
+	end
+
+	local live = liveBases[player]
+	if live ~= nil and live.objectsFolder.Parent ~= nil and upgradedCount > 0 then
+		live.objectsFolder:ClearAllChildren()
+		table.clear(live.parts)
+		table.clear(live.disarmed)
+		for _, entry in data.Merge.Squishies do
+			Spawning.spawnRestingPart(player, live, entry)
+		end
+	end
+
+	return true, upgradedCount, spawnLevel
+end
+
 local function notifyWaitingBalance(player: Player, remaining: number)
 	UINotificationService.SendNotification(
 		player,
@@ -652,10 +729,11 @@ local function notifyWaitingBalance(player: Player, remaining: number)
 	)
 end
 
--- Rebuilds the complete board only when at least one raw paid unit can be
--- consumed. The persisted Squishies array and remaining balance change in a
--- single replica transaction; clients therefore never observe compacted
--- models without the matching balance deduction (or vice versa).
+-- Compacts only the entries a paid delivery actually consumes. Same-level
+-- survivors keep their table identity, live Part, position, health and
+-- cooldown state; only merge participants disappear and only new results are
+-- placed. The persisted Squishies array and remaining balance still change in
+-- one replica transaction.
 function Spawning.processPurchasedSquishies(player: Player, notifyProgress: boolean?): (number, number)
 	if player.Parent ~= Players then
 		return 0, 0
@@ -694,15 +772,33 @@ function Spawning.processPurchasedSquishies(player: Player, notifyProgress: bool
 		PurchasedSquishiesRemaining = remaining,
 	})
 
-	-- Clear transient Parts/VFX only after the data commit. All new Parts use
-	-- the exact entry tables now stored in profile data, preserving the
-	-- identity invariant used by carry, damage, and auto merge.
-	live.objectsFolder:ClearAllChildren()
-	table.clear(live.parts)
-	table.clear(live.disarmed)
-	live.deadlockStreak = 0
+	-- Preserve every live Part whose exact entry table survived the plan. Parts
+	-- for consumed entries are removed; new result entries are materialized at
+	-- the positions the planner found around those fixed survivors.
+	local retainedEntries: { [Types.MergeObjectEntry]: true } = {}
+	for _, entry in plannedEntries do
+		retainedEntries[entry] = true
+	end
+
+	local removedParts: { BasePart } = {}
+	local materializedEntries: { [Types.MergeObjectEntry]: true } = {}
+	for part, entry in live.parts do
+		if retainedEntries[entry] then
+			materializedEntries[entry] = true
+		else
+			table.insert(removedParts, part)
+		end
+	end
+	for _, part in removedParts do
+		live.parts[part] = nil
+		live.disarmed[part] = nil
+		part:Destroy()
+	end
+
 	for _, entry in data.Merge.Squishies do
-		Spawning.spawnRestingPart(player, live, entry)
+		if not materializedEntries[entry] then
+			Spawning.spawnRestingPart(player, live, entry)
+		end
 	end
 
 	if notifyProgress == true then
@@ -780,134 +876,6 @@ function Spawning.processAllPurchasedSquishies()
 	end
 end
 
---[[
-	Deadlock escape valve for a full pad. Called only from trySpawnObject's
-	board-full branch below, exactly where auto-spawn would otherwise just
-	wait forever: merging requires exact tier equality (Carry.tryMergeCarry)
-	and is blocked outright at this player's rebirth cap
-	(RebirthConfig.maxModelLevel), so a full board of pairwise-distinct,
-	all-mergeable tiers has no legal pair, no free slot to auto-spawn into,
-	and no rebirth available (RebirthConfig.bestModelLevel has not reached the
-	cap -- checked explicitly below, since rebirth is the intended way out
-	whenever it IS available) -- a hard softlock with no player-initiated way
-	out.
-
-	Fires as soon as the SAME stuck shape has been observed for
-	MergeConfig.DEADLOCK_RESCUE_TICKS consecutive auto-spawn ticks
-	(live.deadlockStreak). Threshold is 1 -- the predicate below is exact, not
-	a heuristic (tallied fresh from live persisted data at fire time, and a
-	legal pair reappearing anywhere on the board resets the streak before this
-	fires), so there is nothing for a repeat observation to confirm; a
-	genuine deadlock could never resolve itself, by definition nothing on
-	this pad CAN merge while the conditions below all hold. The streak
-	counter itself stays live (rather than collapsing to a plain boolean)
-	because it still guards trySpawnObject's retry-without-reconfirm path
-	when findOpenSpot fails below.
-
-	`live.deadlockStreak` lives on the LiveBase itself, not a per-player
-	module table -- deactivateBase (base change, player leaving) discards the
-	whole `live` table, taking the counter with it for free. See
-	trySpawnObject for where it gets reset to 0 on every non-full tick.
-]]
-local function tryDeadlockRescue(player: Player, live: Types.LiveBase, data: DataService.PlayerData)
-	local maxModelLevel = RebirthConfig.maxModelLevel(data.Rebirths)
-
-	-- Rebirth guard: this player's best on-board model level already reached
-	-- the cap, so rebirth -- not a free rescue spawn -- is the intended way
-	-- off this board. Deliberately checked against the BEST entry, not "are
-	-- all entries capped": a mixed board (say {1..9} plus two duplicates
-	-- already at the cap) has no mergeable pair either, but rebirth is just
-	-- as available there, and must win the same way.
-	if RebirthConfig.bestModelLevel(data.Merge.Squishies) >= maxModelLevel then
-		live.deadlockStreak = 0
-		return
-	end
-
-	-- Tally counts per tier among MERGEABLE entries only. A capped-tier
-	-- duplicate can never merge (Carry.tryMergeCarry's own mergeLocked
-	-- check), so it must not count as a legal pair here -- and rescuing INTO
-	-- a capped tier would just recreate an equally unmergeable duplicate.
-	local mergeableCounts: { [number]: number } = {}
-	local lowestMergeableTier: number? = nil
-	for _, entry in data.Merge.Squishies do
-		if entry.Tier < maxModelLevel then
-			mergeableCounts[entry.Tier] = (mergeableCounts[entry.Tier] or 0) + 1
-			if lowestMergeableTier == nil or entry.Tier < lowestMergeableTier then
-				lowestMergeableTier = entry.Tier
-			end
-		end
-	end
-
-	if lowestMergeableTier == nil then
-		-- Every entry is already at/above this player's rebirth cap. This is
-		-- NOT the softlock this exists for -- rebirth is the intended, and
-		-- available, way forward, so do not short-circuit it with a free spawn.
-		live.deadlockStreak = 0
-		return
-	end
-
-	for _, count in mergeableCounts do
-		if count >= 2 then
-			-- A legal pair exists somewhere on the board. Carry's own
-			-- Heartbeat merge check owns resolving it; this pad isn't stuck.
-			live.deadlockStreak = 0
-			return
-		end
-	end
-
-	-- True deadlock on THIS tick: full board, no legal pair among mergeable
-	-- tiers, at least one mergeable singleton. At threshold 1 this fires the
-	-- rescue below immediately -- see this function's header for why no
-	-- confirmation repeat is needed.
-	live.deadlockStreak += 1
-	if live.deadlockStreak < MergeConfig.DEADLOCK_RESCUE_TICKS then
-		return
-	end
-
-	-- Same normal-spawn-path shape as trySpawnObject below (findOpenSpot ->
-	-- entry -> tableInsert -> spawnRestingPart), deliberately skipping only
-	-- the MaxSpawns gate that sent us here. Targets the LOWEST mergeable
-	-- singleton so the player's cheapest stuck object clears the deadlock,
-	-- not an arbitrary one. Sanitized lookup, same idiom as
-	-- materializeObject/pickUp (Types.luau's own tierDefFor/sanitizeTier
-	-- note): lowestMergeableTier came off a persisted entry, and a corrupted
-	-- value must not reach a raw MergeConfig.Tiers index -- a nil tierDef
-	-- would throw inside runAutoSpawnLoop, which is not pcall-wrapped,
-	-- killing auto-spawn for the rest of the session.
-	local sanitizedTier = Types.sanitizeTier(lowestMergeableTier)
-	local tierDef = Types.tierDefFor(lowestMergeableTier)
-	local x, z = Spawning.findOpenSpot(live.spawnArea, tierDef, live.parts)
-	if x == nil or z == nil then
-		-- No room even for the rescue -- skip and retry next tick rather
-		-- than forcing an overlapping placement. Streak is left at/above
-		-- threshold on purpose: the deadlock has not resolved, so the very
-		-- next tick should retry the spawn immediately, not wait for a fresh
-		-- confirmation window.
-		return
-	end
-
-	local roundedX = math.round(x * 100) / 100
-	local roundedZ = math.round(z * 100) / 100
-	local entry: Types.MergeObjectEntry = {
-		Tier = sanitizedTier,
-		X = roundedX,
-		Z = roundedZ,
-		Health = MergeConfig.maxHealthForTier(sanitizedTier, data.Merge.SquishyHealthMultiplier),
-	}
-
-	if DataService.tableInsert(player, { "Merge", "Squishies" }, entry) == nil then
-		return
-	end
-	Spawning.spawnRestingPart(player, live, entry)
-
-	-- The board now holds a fresh legal pair at `lowestMergeableTier` (this
-	-- rescue IS its second copy), so the very next tick's scan above would
-	-- reset this to 0 on its own -- reset here too rather than leaving a
-	-- rescue that just fired reading as "still stuck" for even one tick.
-	live.deadlockStreak = 0
-	UINotificationService.SendNotification(player, "Info", MergeConfig.DEADLOCK_RESCUE_MESSAGE)
-end
-
 function Spawning.trySpawnObject(player: Player, live: Types.LiveBase)
 	local data = DataService.getData(player)
 	if data == nil then
@@ -916,17 +884,9 @@ function Spawning.trySpawnObject(player: Player, live: Types.LiveBase)
 
 	local maxSpawns = UpgradeConfig.readValue(data, "MaxSpawns")
 	if #data.Merge.Squishies >= maxSpawns then
-		-- Pad full: normally auto-spawn just waits, but a board of pairwise-
-		-- distinct mergeable tiers can get permanently stuck here (no legal
-		-- pair, no free slot, no rebirth reachable) -- see
-		-- tryDeadlockRescue's header for the softlock this escapes.
-		tryDeadlockRescue(player, live, data)
+		-- A full pad stays full until gameplay or an upgrade frees capacity.
 		return
 	end
-	-- Board has room again -- any prior deadlock streak no longer describes
-	-- this board and must not carry over into a future, unrelated full-board
-	-- tick.
-	live.deadlockStreak = 0
 
 	local tier = math.min(Types.sanitizeTier(data.Merge.SpawnLevel), RebirthConfig.maxModelLevel(data.Rebirths))
 	local tierDef = MergeConfig.Tiers[tier]
@@ -1042,7 +1002,6 @@ function Spawning.activateBase(player: Player, baseName: string)
 			objectsFolder = folder,
 			parts = {},
 			disarmed = {},
-			deadlockStreak = 0,
 		}
 		-- Set BEFORE the restore loop below: spawnRestingPart's Touched wiring
 		-- closes over `live` and checks `liveBases[player] == live` on every
@@ -1050,21 +1009,10 @@ function Spawning.activateBase(player: Player, baseName: string)
 		-- touched.
 		liveBases[player] = live
 
-		-- Capped at MAX_OBJECTS + 1, not MAX_OBJECTS: a compliant writer can
-		-- legitimately reach MAX_OBJECTS + 1 today, because tryDeadlockRescue
-		-- deliberately bypasses the MaxSpawns gate to append its one escape-
-		-- valve squishy onto an already-full (<= MAX_OBJECTS) board. Capping
-		-- at MAX_OBJECTS here would silently leave that legitimate 16th entry
-		-- out of `parts`/the objectsFolder while it stayed in
-		-- data.Merge.Squishies -- a data-only entry with no Part, still
-		-- counted by MaxSpawns (so spawning stays blocked) and still read as
-		-- "a legal pair exists" by tryDeadlockRescue's own scan, but with
-		-- nothing to actually merge: a worse softlock than the one that
-		-- rescue exists to fix. The +1 is still a hard ceiling, not an
-		-- invitation -- profile data remains attacker-influenced over a long
-		-- enough time horizon (dev console, a future migration bug), and a
-		-- planted oversized array must not materialize hundreds of Parts.
-		local restoreCount = math.min(#data.Merge.Squishies, MergeConfig.MAX_OBJECTS + 1)
+		-- Profile repair applies this same absolute cap before activation;
+		-- keeping the restoration guard here prevents a future writer bug from
+		-- materializing an unbounded number of Parts during the live session.
+		local restoreCount = math.min(#data.Merge.Squishies, MergeConfig.MAX_OBJECTS)
 		for i = 1, restoreCount do
 			Spawning.spawnRestingPart(player, live, data.Merge.Squishies[i])
 		end

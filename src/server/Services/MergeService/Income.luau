@@ -69,15 +69,10 @@ end
 	grants, per the perf budget (8 players * 25 objects must not mean 200
 	writes a second).
 
-	The sum is capped at MAX_OBJECTS entries -- deliberately NOT widened to
-	MAX_OBJECTS + 1 the way activateBase's restore loop was (restoreCount,
-	Spawning.luau) -- for the same underlying reason both caps exist: profile
-	data is attacker-influenced over a long enough time horizon (dev console,
-	a future migration bug), and a planted oversized array must not earn
-	income without bound. The practical effect is that a deadlock rescue's
-	transient MAX_OBJECTS + 1st entry (Spawning.tryDeadlockRescue) earns
-	nothing until it merges away -- accepted, spec'd behavior, same as the
-	client-side popup pool (IncomePopupController.luau's own comment).
+	The sum is capped at MAX_OBJECTS entries because profile data is
+	attacker-influenced over a long enough time horizon (developer tools, old
+	versions, or a migration bug), and a planted oversized array must not earn
+	income without bound.
 ]]
 function Income.runTick()
 	for player in liveBases do

@@ -47,6 +47,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
@@ -721,7 +722,10 @@ function BaseService.Start()
 		log.error("no usable bases found under Workspace.MapLayout.Bases -- BaseService disabled")
 		return
 	end
-	if Players.MaxPlayers > #baseOrder then
+	-- Team Create test servers report Studio's internal capacity (currently
+	-- 60) instead of the place's Maximum Visitor Count from Creator Hub.
+	-- Validate only in published servers, where MaxPlayers is authoritative.
+	if not RunService:IsStudio() and Players.MaxPlayers > #baseOrder then
 		log.warn(
 			`server capacity is {Players.MaxPlayers}, but only {#baseOrder} usable bases exist; extra players will queue`
 		)

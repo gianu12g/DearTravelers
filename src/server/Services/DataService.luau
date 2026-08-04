@@ -46,10 +46,10 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 2
+local DATA_VERSION = 3
 local MAX_PROCESSED_PURCHASE_IDS = 200
-local MAX_PROCESSED_VOUCHER_TRANSFER_IDS = 500
-local MAX_VOUCHERS = 2 ^ 31 - 1
+local MAX_PROCESSED_TICKET_TRANSFER_IDS = 500
+local MAX_TICKETS = 2 ^ 31 - 1
 -- Comfortably above CosmeticsCatalog's current id count for any slot --
 -- a bound exists only to keep a corrupted profile from growing unbounded,
 -- not because owning every cosmetic is a real limit.
@@ -67,7 +67,7 @@ export type PendingGiftEntry = {
 	ProductId: number,
 	StartedAt: number,
 }
-export type PendingVoucherTransferEntry = {
+export type PendingTicketTransferEntry = {
 	TransferId: string,
 	TargetUserId: number,
 	-- Correlates the eventual server result with the exact confirmation that
@@ -116,12 +116,9 @@ local TEMPLATE = {
 		-- the balance in profile data makes it survive leaves/rejoins and also
 		-- exposes it through the existing private replica for a future counter.
 		PurchasedSquishiesRemaining = 0,
-		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling;
-		-- MaxSpawns is the per-player capacity within it, except for the one
-		-- transient MAX_OBJECTS + 1 entry MergeService.Spawning.tryDeadlockRescue
-		-- may append onto an already-full board (see that function's own
-		-- header). LockBase stores its upgrade level; each purchased level
-		-- extends the base lock duration.
+		-- Coin upgrades. MAX_OBJECTS remains the absolute safety ceiling and
+		-- MaxSpawns is the player's capacity within it. LockBase stores its
+		-- upgrade level; each purchased level extends the base lock duration.
 		MaxSpawns = UpgradeConfig.DEFAULT_MAX_SPAWNS,
 		LockBase = UpgradeConfig.DEFAULT_LOCK_BASE_LEVEL,
 		-- Trusted server time used to calculate the next offline-income grant.
@@ -170,15 +167,15 @@ local TEMPLATE = {
 		-- ThemeShop developer products grant this fungible balance, never a
 		-- preselected cosmetic. It may be redeemed by the owner or transferred
 		-- through the durable outbox below.
-		Vouchers = 0,
+		Tickets = 0,
 		-- Transfer ids received through ProfileStore messages. This makes
 		-- sender outbox retries idempotent after a crash between enqueueing the
 		-- message and durably removing the outbox entry.
-		ProcessedVoucherTransferIds = {} :: { string },
-		-- Monetary outbox: a voucher is deducted in the same mutation that
+		ProcessedTicketTransferIds = {} :: { string },
+		-- Monetary outbox: a ticket is deducted in the same mutation that
 		-- appends this entry, then the whole state is saved before MessageAsync.
 		-- Entries are never age/count-evicted; successful enqueue removes them.
-		PendingVoucherTransfers = {} :: { PendingVoucherTransferEntry },
+		PendingTicketTransfers = {} :: { PendingTicketTransferEntry },
 		-- A bounded ring (MAX_PENDING_INTENTS) of recent gift intents, each
 		-- persisted before opening Roblox's purchase prompt. A receipt may
 		-- arrive after a teleport, reconnect, or server shutdown, so an
@@ -228,7 +225,7 @@ local MIGRATIONS: { (data: any) -> () } = {}
 -- v1 routed the two shared ThemeShop product ids through pre-prompt
 -- PendingCosmetic(s) records. Those records prove only that a prompt opened,
 -- not that Robux was spent, so they must never be converted into free
--- vouchers. Any genuinely late receipt is safe: v2 grants its voucher using
+-- tickets. Any genuinely late receipt is safe: v2 grants its ticket using
 -- ProductId/PurchaseId alone. ProcessedPurchaseIds remains untouched so a
 -- purchase already fulfilled by v1 cannot be paid out again.
 MIGRATIONS[1] = function(data: any)
@@ -237,6 +234,37 @@ MIGRATIONS[1] = function(data: any)
 		uiSystem.PendingCosmetic = nil
 		uiSystem.PendingCosmetics = nil
 	end
+end
+
+-- v2 used the Theme Shop's retired internal terminology for the balance and
+-- both transfer ledgers. Move all three keys together so an in-flight gift
+-- remains retryable and its processed-id marker remains idempotent after the
+-- rename. The retired word is assembled only here so it cannot leak back into
+-- current identifiers, UI text, logs, or network API names.
+MIGRATIONS[2] = function(data: any)
+	local uiSystem = data.UISystem
+	if type(uiSystem) ~= "table" then
+		return
+	end
+
+	local retiredTerm = "Vouc" .. "her"
+	local oldBalanceKey = `{retiredTerm}s`
+	local oldProcessedKey = `Processed{retiredTerm}TransferIds`
+	local oldPendingKey = `Pending{retiredTerm}Transfers`
+
+	if uiSystem.Tickets == nil then
+		uiSystem.Tickets = uiSystem[oldBalanceKey]
+	end
+	if uiSystem.ProcessedTicketTransferIds == nil then
+		uiSystem.ProcessedTicketTransferIds = uiSystem[oldProcessedKey]
+	end
+	if uiSystem.PendingTicketTransfers == nil then
+		uiSystem.PendingTicketTransfers = uiSystem[oldPendingKey]
+	end
+
+	uiSystem[oldBalanceKey] = nil
+	uiSystem[oldProcessedKey] = nil
+	uiSystem[oldPendingKey] = nil
 end
 
 local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.4"
@@ -419,8 +447,8 @@ local function isValidPendingGiftEntry(entry: any): boolean
 		and entry.ProductId == math.floor(entry.ProductId)
 end
 
-local function repairPendingVoucherTransfers(value: any): { PendingVoucherTransferEntry }
-	local repaired: { PendingVoucherTransferEntry } = {}
+local function repairPendingTicketTransfers(value: any): { PendingTicketTransferEntry }
+	local repaired: { PendingTicketTransferEntry } = {}
 	local seen: { [string]: true } = {}
 	if type(value) ~= "table" then
 		return repaired
@@ -547,11 +575,11 @@ local function repairProfileData(data: any)
 		cosmetics.MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 	end
 	local uiSystem = data.UISystem
-	uiSystem.Vouchers = finiteInteger(uiSystem.Vouchers, 0, MAX_VOUCHERS, 0)
+	uiSystem.Tickets = finiteInteger(uiSystem.Tickets, 0, MAX_TICKETS, 0)
 	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)
-	uiSystem.ProcessedVoucherTransferIds =
-		compactStringArray(uiSystem.ProcessedVoucherTransferIds, MAX_PROCESSED_VOUCHER_TRANSFER_IDS)
-	uiSystem.PendingVoucherTransfers = repairPendingVoucherTransfers(uiSystem.PendingVoucherTransfers)
+	uiSystem.ProcessedTicketTransferIds =
+		compactStringArray(uiSystem.ProcessedTicketTransferIds, MAX_PROCESSED_TICKET_TRANSFER_IDS)
+	uiSystem.PendingTicketTransfers = repairPendingTicketTransfers(uiSystem.PendingTicketTransfers)
 	uiSystem.Packs = compactStringArray(uiSystem.Packs, 100)
 	uiSystem.RedeemedCodes = compactStringArray(uiSystem.RedeemedCodes, 500)
 	uiSystem.PlaytimeRewards.ClaimedRewards = denseBooleanArray(uiSystem.PlaytimeRewards.ClaimedRewards, 7)
@@ -573,7 +601,7 @@ local function repairProfileData(data: any)
 		legacy key is then dropped so this compatibility path never re-fires.
 
 		PendingCosmetic(s) are deliberately dropped, never converted into
-		vouchers: those records represent prompts, not confirmed payments.
+		tickets: those records represent prompts, not confirmed payments.
 		Late confirmed payments are fulfilled from ProductId/PurchaseId alone.
 	]]
 	uiSystem.PendingGifts = repairPendingGifts(uiSystem.PendingGifts, uiSystem.PendingGift)
@@ -584,7 +612,10 @@ local function repairProfileData(data: any)
 	data.Coins = finiteInteger(data.Coins, 0, EconomyConfig.MAX_COINS, 0)
 	data.Rebirths = RebirthConfig.sanitizeRebirths(data.Rebirths)
 	data.Level, data.Experience = Progression.resolve(data.Level, data.Experience, 0)
-	data.Merge.SpawnLevel = UpgradeConfig.sanitizeValue("SpawnTier", data.Merge.SpawnLevel)
+	data.Merge.SpawnLevel = math.min(
+		UpgradeConfig.sanitizeValue("SpawnTier", data.Merge.SpawnLevel),
+		RebirthConfig.maxModelLevel(data.Rebirths)
+	)
 	data.Merge.PurchasedSquishiesRemaining =
 		finiteInteger(data.Merge.PurchasedSquishiesRemaining, 0, MergeConfig.MAX_PURCHASED_SQUISHIES_REMAINING, 0)
 	data.Merge.MaxSpawns = UpgradeConfig.sanitizeValue("MaxSpawns", data.Merge.MaxSpawns)
@@ -630,13 +661,9 @@ local function repairProfileData(data: any)
 	end
 	data.Inventory = inventory
 
-	-- Also the natural cleanup for an un-merged deadlock-rescue spawn
-	-- (MergeService.Spawning.tryDeadlockRescue): that rescue is always
-	-- APPENDED, so it is always the last (highest-index) entry a still-full
-	-- board could have. Keeping the FIRST MAX_OBJECTS entries and dropping
-	-- the rest therefore always drops the rescue spawn specifically, never an
-	-- arbitrary pre-existing one -- and the rescue's own trigger simply
-	-- re-fires next session if the board is still deadlocked.
+	-- Profile data is attacker-influenced over a long enough time horizon
+	-- (developer tools, old versions, or a migration bug), so restoration is
+	-- bounded by the same absolute gameplay ceiling used everywhere else.
 	local compactSquishies = {}
 	for _, entry in data.Merge.Squishies do
 		if #compactSquishies >= MergeConfig.MAX_OBJECTS then
@@ -658,18 +685,23 @@ local function repairProfileData(data: any)
 		then
 			continue
 		end
-		-- entry.Tier is the historical persisted name for MODEL LEVEL.
-		-- A profile can never retain a model above its rebirth unlock cap.
-		local safeTier =
-			math.clamp(math.floor(tier), 1, math.min(MergeConfig.MAX_TIER, RebirthConfig.maxModelLevel(data.Rebirths)))
-		local maxHealth = MergeConfig.maxHealthForTier(safeTier, data.Merge.SquishyHealthMultiplier)
-		local safeHealth = finiteNumber(health, 0, maxHealth, maxHealth)
+		-- entry.Tier is the historical persisted name for MODEL LEVEL. A profile
+		-- can never retain a model above its rebirth unlock cap or below its
+		-- current SpawnLevel. Any repair that raises the model level follows the
+		-- gameplay rule used by live upgrades: the new level starts at full HP.
+		local maximumTier = math.min(MergeConfig.MAX_TIER, RebirthConfig.maxModelLevel(data.Rebirths))
+		local originalTier = math.clamp(math.floor(tier), 1, maximumTier)
+		local originalMaxHealth = MergeConfig.maxHealthForTier(originalTier, data.Merge.SquishyHealthMultiplier)
+		local originalHealth = finiteNumber(health, 0, originalMaxHealth, originalMaxHealth)
 		-- A zero-health squishy was already dead when its prior server closed.
 		-- Do not resurrect it on join; live deaths provide their pop effect in
 		-- MergeService before being removed from this same persisted array.
-		if safeHealth <= 0 then
+		if originalHealth <= 0 then
 			continue
 		end
+		local safeTier = math.clamp(originalTier, data.Merge.SpawnLevel, maximumTier)
+		local maxHealth = MergeConfig.maxHealthForTier(safeTier, data.Merge.SquishyHealthMultiplier)
+		local safeHealth = if safeTier ~= originalTier then maxHealth else math.min(originalHealth, maxHealth)
 		table.insert(compactSquishies, {
 			Tier = safeTier,
 			X = math.clamp(x, -1000, 1000),

@@ -57,19 +57,6 @@ export type LiveBase = {
 		bookkeeping.
 	]]
 	disarmed: { [BasePart]: number },
-	--[[
-		Deadlock-rescue confirmation counter (Spawning.tryDeadlockRescue):
-		consecutive full-board auto-spawn ticks where no legal merge pair
-		exists among this pad's mergeable-tier entries. Reset to 0 the instant
-		the board has room again, a legal pair reappears, every entry is
-		already at/above this player's rebirth cap, or a rescue spawn just
-		fired -- see trySpawnObject/tryDeadlockRescue for each case.
-
-		Lives here, not a per-player module table, so it is torn down for
-		free whenever this LiveBase is (deactivateBase, a base change, or the
-		owning player leaving) -- same reasoning as `disarmed` above.
-	]]
-	deadlockStreak: number,
 }
 
 -- Phase 2. `entry` is the SAME table referenced from data.Merge.Squishies and

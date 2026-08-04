@@ -40,10 +40,7 @@
 	CAPACITY: auto-spawn simply stops writing once a pad reaches that player's
 	persisted MaxSpawns upgrade. MergeConfig.MAX_OBJECTS remains the absolute
 	safety ceiling for profile repair/restoration. No error, no queue -- the pad
-	just waits until Phase 2 frees a slot. The one deliberate exception is
-	Spawning.tryDeadlockRescue, which bypasses the MaxSpawns gate (never
-	MAX_OBJECTS) to append a single escape-valve squishy onto a
-	confirmed-deadlocked full board.
+	just waits until a merge, damage, or a capacity upgrade frees a slot.
 
 	PHASE 2 -- CARRY/MERGE/DROP:
 
@@ -223,6 +220,7 @@ MergeService.applyFasterLaunchCooldown = Launch.applyFasterCooldown
 MergeService.resetIncomeRemainder = Income.resetRemainder
 MergeService.addPurchasedSquishies = Spawning.addPurchasedSquishies
 MergeService.processPurchasedSquishies = Spawning.processPurchasedSquishies
+MergeService.setSpawnLevel = Spawning.setSpawnLevel
 
 local function onAssignedBaseChanged(player: Player)
 	local baseName = player:GetAttribute("AssignedBase")

@@ -75,7 +75,7 @@ end
 	reads as a looming threat over the landing base.
 	Records every original value on `launch.scale` first so restoreLaunchScale
 	can undo this exactly later, no matter what the spawn/impact squash
-	animations do to these same Size/C0/StudsOffset values while the launch
+	animations do to these same Size/C0/StudsOffsetWorldSpace values while the launch
 	plays out.
 ]]
 function LaunchEffects.applyLaunchScale(launch: Types.LaunchState)
@@ -108,7 +108,7 @@ function LaunchEffects.applyLaunchScale(launch: Types.LaunchState)
 	local incomeLabel: BillboardGui? = if rawIncomeLabel ~= nil and rawIncomeLabel:IsA("BillboardGui")
 		then rawIncomeLabel
 		else nil
-	local incomeLabelOffset: Vector3? = if incomeLabel ~= nil then incomeLabel.StudsOffset else nil
+	local incomeLabelOffset: Vector3? = if incomeLabel ~= nil then incomeLabel.StudsOffsetWorldSpace else nil
 	local incomeLabelEnabled: boolean? = if incomeLabel ~= nil then incomeLabel.Enabled else nil
 
 	launch.scale = {
@@ -128,7 +128,7 @@ function LaunchEffects.applyLaunchScale(launch: Types.LaunchState)
 		end
 	end
 	if incomeLabel ~= nil and incomeLabelOffset ~= nil then
-		incomeLabel.StudsOffset = incomeLabelOffset * multiplier
+		incomeLabel.StudsOffsetWorldSpace = incomeLabelOffset * multiplier
 	end
 end
 
@@ -164,7 +164,7 @@ function LaunchEffects.restoreLaunchScale(launch: Types.LaunchState)
 	local enabled = scale.incomeLabelEnabled
 	if incomeLabel ~= nil and incomeLabel.Parent ~= nil then
 		if offset ~= nil then
-			incomeLabel.StudsOffset = offset
+			incomeLabel.StudsOffsetWorldSpace = offset
 		end
 		if enabled ~= nil then
 			incomeLabel.Enabled = enabled

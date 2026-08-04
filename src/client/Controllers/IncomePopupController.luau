@@ -24,16 +24,9 @@
 	"MergeObject" and carrying no Tier attribute -- the pulse's name filter
 	keeps it from becoming a phantom tier-1 popup.
 
-	CARRIED OBJECTS: popups are skipped while an object is being carried,
-	detected via the presence of a "CarryWeld" child (the exact WeldConstraint
-	MergeService.pickUp creates and every carry-ending path destroys) --
-	a purely observational signal that already exists for a different reason,
-	so no new attribute or remote is needed to know "is this specific Part,
-	anyone's, being carried right now". Income still accrues server-side
-	either way (MergeService sums data.Merge.Squishies regardless of carry
-	state); this is a visual choice only, made because a popup tweening
-	upward from a part that is itself moving with the carrying character
-	would fight its own motion.
+	CARRIED OBJECTS: popups remain attached to their Adornee while a squishy is
+	carried. The world-space offset therefore follows that moving squishy and
+	keeps showing every income pulse instead of suppressing its feedback.
 
 	PARENTING: popups are BillboardGuis parented under a client-owned Folder
 	in PlayerGui (the same container CarryController's HUD lives under) with
@@ -71,8 +64,11 @@ local log = Log.new("IncomePopupController")
 local WAIT_TIMEOUT = 10
 
 local RISE_DISTANCE = 3.5 -- studs the popup tweens upward before returning to its pool
-local POPUP_LIFETIME = 0.9 -- seconds -- tween AND fade duration together
+local POPUP_LIFETIME = 0.9 -- seconds -- total rise and on-screen duration
+local FADE_DELAY = 0.5 -- remain fully opaque for the first half-second
+local FADE_DURATION = POPUP_LIFETIME - FADE_DELAY
 local POPUP_TWEEN_INFO = TweenInfo.new(POPUP_LIFETIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FADE_TWEEN_INFO = TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 -- Generous rather than tuned to the map's actual base spacing (unknown to
 -- this file, and MergeConfig doesn't track world-space base layout) -- far
 -- enough that a player standing on their own pad always sees its popups,
@@ -89,6 +85,7 @@ local currentRebirths = 0
 type Popup = {
 	billboard: BillboardGui,
 	label: TextLabel,
+	stroke: UIStroke,
 }
 
 local popupPool: { Popup } = {}
@@ -126,11 +123,8 @@ end
 local function createPopup(): Popup
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "IncomePopup"
-	billboard.Size = UDim2.fromOffset(100, 32)
-	-- Deliberately false, unlike the resting object's own IncomeLabel: that
-	-- label is persistent HUD-ish info that must always read through geometry,
-	-- but a popup is a one-shot flourish and can occlude normally.
-	billboard.AlwaysOnTop = false
+	billboard.Size = UDim2.fromScale(4, 2)
+	billboard.AlwaysOnTop = true
 	billboard.MaxDistance = MAX_RENDER_DISTANCE
 	billboard.Enabled = false
 	billboard.Parent = getPopupHost()
@@ -142,10 +136,18 @@ local function createPopup(): Popup
 	label.Font = Enum.Font.GothamBold
 	label.TextScaled = true
 	label.TextColor3 = Color3.fromRGB(118, 255, 102)
-	label.TextStrokeColor3 = Color3.fromRGB(24, 78, 35)
+	label.TextStrokeTransparency = 1
 	label.Parent = billboard
 
-	return { billboard = billboard, label = label }
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "AmountStroke"
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	stroke.Color = Color3.new(0, 0, 0)
+	stroke.StrokeSizingMode = Enum.StrokeSizingMode.ScaledSize
+	stroke.Thickness = 0.07
+	stroke.Parent = label
+
+	return { billboard = billboard, label = label, stroke = stroke }
 end
 
 local function acquirePopup(): Popup
@@ -156,12 +158,7 @@ end
 local function releasePopup(popup: Popup)
 	popup.billboard.Enabled = false
 	popup.billboard.Adornee = nil
-	-- MAX_OBJECTS + 1, not MAX_OBJECTS: a deadlock rescue (server-side
-	-- Spawning.tryDeadlockRescue) can transiently hold a pad at 16 live
-	-- squishies, and capping the pool at 15 would destroy-and-recreate one
-	-- BillboardGui every single pulse for as long as that 16th squishy is on
-	-- the board.
-	if #popupPool < MergeConfig.MAX_OBJECTS + 1 then
+	if #popupPool < MergeConfig.MAX_OBJECTS then
 		table.insert(popupPool, popup)
 	else
 		popup.billboard:Destroy()
@@ -180,11 +177,12 @@ local function spawnPopup(part: BasePart)
 	local popup = acquirePopup()
 	local billboard = popup.billboard
 	local label = popup.label
+	local stroke = popup.stroke
 	billboard.Adornee = part
-	billboard.StudsOffset = startOffset
+	billboard.StudsOffsetWorldSpace = startOffset
 	billboard.Enabled = true
 	label.TextTransparency = 0
-	label.TextStrokeTransparency = 0.2
+	stroke.Transparency = 0
 	label.Text = "+$" .. Format.FormatIncome(amount)
 
 	local released = false
@@ -196,12 +194,20 @@ local function spawnPopup(part: BasePart)
 		releasePopup(popup)
 	end
 
-	local riseTween = TweenService:Create(billboard, POPUP_TWEEN_INFO, { StudsOffset = endOffset })
-	local fadeTween = TweenService:Create(label, POPUP_TWEEN_INFO, { TextTransparency = 1, TextStrokeTransparency = 1 })
+	local riseTween = TweenService:Create(billboard, POPUP_TWEEN_INFO, { StudsOffsetWorldSpace = endOffset })
+	local textFadeTween = TweenService:Create(label, FADE_TWEEN_INFO, { TextTransparency = 1 })
+	local strokeFadeTween = TweenService:Create(stroke, FADE_TWEEN_INFO, { Transparency = 1 })
 
-	riseTween.Completed:Once(finishPopup)
+	-- Fade completion owns release so a delayed scheduler frame can never pool
+	-- the popup before its deferred fade actually finishes.
+	textFadeTween.Completed:Once(finishPopup)
 	riseTween:Play()
-	fadeTween:Play()
+	task.delay(FADE_DELAY, function()
+		if not released then
+			textFadeTween:Play()
+			strokeFadeTween:Play()
+		end
+	end)
 
 	-- Belt-and-suspenders: Completed also fires on Cancel with a non-
 	-- Completed PlaybackState, and this popup has no owner that would ever
@@ -214,8 +220,7 @@ end
 
 --[[
 	One authoritative pulse, one snapshot of the local player's current base.
-	No cached Part list is needed: MAX_OBJECTS bounds this to 15 children (16
-	while a deadlock rescue is pending -- see Spawning.tryDeadlockRescue) once
+	No cached Part list is needed: MAX_OBJECTS bounds this to 15 children once
 	per second, and reading the folder live is what makes a newly spawned or
 	merged model automatically share the next pulse.
 
@@ -244,10 +249,6 @@ local function showIncomePulse()
 		if not part:IsA("BasePart") or part.Name ~= "MergeObject" then
 			continue
 		end
-		if part:FindFirstChild("CarryWeld") ~= nil then
-			continue -- currently carried -- see the header's CARRIED OBJECTS note
-		end
-
 		if camera ~= nil and (camera.CFrame.Position - part.Position).Magnitude > MAX_RENDER_DISTANCE then
 			continue -- off-screen (or camera lost) -- not worth the alloc
 		end

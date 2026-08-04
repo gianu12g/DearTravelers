@@ -165,8 +165,8 @@ function StatusUI.createLaunchCooldownCounter(part: BasePart, statusBillboard: B
 	local counterBillboard = Instance.new("BillboardGui")
 	counterBillboard.Name = "LaunchCooldownBillboard"
 	counterBillboard.Size = UDim2.fromScale(statusWidth * 0.76, counterHeight)
-	counterBillboard.StudsOffset =
-		Vector3.new(0, statusBillboard.StudsOffset.Y + statusHeight / 2 + counterHeight / 2 + 0.12, 0)
+	counterBillboard.StudsOffsetWorldSpace =
+		Vector3.new(0, statusBillboard.StudsOffsetWorldSpace.Y + statusHeight / 2 + counterHeight / 2 + 0.12, 0)
 	counterBillboard.AlwaysOnTop = true
 	counterBillboard.LightInfluence = 0
 	counterBillboard.Enabled = false

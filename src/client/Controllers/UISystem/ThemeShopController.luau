@@ -8,16 +8,16 @@
 	same tab switching, same DataController.observe wiring) plus a purchase
 	layer CosmeticsController never needed, since that menu shows owned
 	items only. Unlike Cosmetics, ThemeShop's ThemeTemplate1 lists EVERY
-	catalog entry. On an unowned card, Purchase spends one voucher when
-	available or prompts the voucher product when empty. On an owned card it
-	buys another voucher explicitly. CashPurchase grants the cosmetic when
-	unowned and converts the duplicate into a voucher when owned. Gift
-	transfers a generic voucher, so all three actions remain available.
+	catalog entry. On an unowned card, Purchase spends one ticket when
+	available or prompts the ticket product when empty. On an owned card it
+	buys another ticket explicitly. CashPurchase grants the cosmetic when
+	unowned and converts the duplicate into a ticket when owned. Gift
+	transfers a generic ticket, so all three actions remain available.
 
 	No Init() -- Frames.get yields, and nothing here needs another module's
 	Start() to have already run: Frames.get/WaitForChild block until the
 	frame exists regardless of load order, and MonetizationController is only
-	reached from a user click (StartVoucherGiftPrompt) long after every
+	reached from a user click (StartTicketGiftPrompt) long after every
 	Start() has had a chance to spawn (Loader.luau task.spawns each Start(),
 	so they run in parallel, not in sequence -- see its own comment).
 ]]
@@ -180,11 +180,11 @@ local function colorSequenceFromMergePop(id: string): ColorSequence?
 end
 
 -- pcall-wrapped per quality-gate.md (GetProductInfoAsync can throw). Called
--- once per voucher product, from the end of Start() -- AFTER every
+-- once per ticket product, from the end of Start() -- AFTER every
 -- frame/button/observer is already wired up, so a throttled Marketplace call
 -- never leaves the shop unusable while it's in flight (see Start()'s own
 -- comment on the ordering). renderSlot() stays yield-free so observers
--- cannot see a half-reconfigured pool. Every cosmetic shares these voucher
+-- cannot see a half-reconfigured pool. Every cosmetic shares these ticket
 -- prices, so a successful fetch never needs refetching; a failed fetch keeps
 -- the " ?" placeholder for the session rather than retrying (and therefore
 -- yielding) on a later render.
@@ -251,8 +251,8 @@ function ThemeShopController.Start()
 	-- purchase/gift/preview buttons, the owned-items observer) unwired for
 	-- however long that yield takes; the previous ordering fetched before any
 	-- of it was wired.
-	local voucherRobuxPrice = " ?"
-	local giftVoucherRobuxPrice = " ?"
+	local ticketRobuxPrice = " ?"
+	local giftTicketRobuxPrice = " ?"
 
 	local frame = Frames.get("ThemeShop")
 	local top = frame:WaitForChild("Top")
@@ -272,9 +272,9 @@ function ThemeShopController.Start()
 	end
 
 	local activeSlot: CosmeticsCatalog.Slot = "KeycapThemes"
-	local voucherCount = 0
-	local voucherCountText = "0"
-	local pendingVoucherPromptButton: GuiButton? = nil
+	local ticketCount = 0
+	local ticketCountText = "0"
+	local pendingTicketPromptButton: GuiButton? = nil
 	local ownedIds: {
 		KeycapThemes: { [string]: true },
 		SquishyBeams: { [string]: true },
@@ -300,8 +300,8 @@ function ThemeShopController.Start()
 		PurchasePriceTag: TextLabel?,
 		CashPriceTag: TextLabel?,
 		GiftPriceTag: TextLabel?,
-		VoucherMainLabel: TextLabel?,
-		VoucherShadowLabel: TextLabel?,
+		TicketMainLabel: TextLabel?,
+		TicketShadowLabel: TextLabel?,
 	}
 	local activeCards: { CardView } = {}
 	local cardPool: { CardView } = {}
@@ -531,9 +531,9 @@ function ThemeShopController.Start()
 			return
 		end
 		priceTag.Text = if card.IsOwned
-			then voucherRobuxPrice
-			elseif voucherCount > 0 then "Use Ticket"
-			else voucherRobuxPrice
+			then ticketRobuxPrice
+			elseif ticketCount > 0 then "Use Ticket"
+			else ticketRobuxPrice
 	end
 
 	local function updateCashPrice(card: CardView)
@@ -542,7 +542,7 @@ function ThemeShopController.Start()
 			return
 		end
 		local cashPrice = if card.IsOwned
-			then CosmeticsShopConfig.VOUCHER_CASH_PRICE
+			then CosmeticsShopConfig.TICKET_CASH_PRICE
 			else CosmeticsShopConfig.CASH_PRICE[card.Slot]
 		priceTag.Text = formatCashPrice(cashPrice)
 	end
@@ -550,7 +550,7 @@ function ThemeShopController.Start()
 	local function updateGiftPrice(card: CardView)
 		local priceTag = card.GiftPriceTag
 		if priceTag ~= nil then
-			priceTag.Text = if voucherCount > 0 then "Gift Ticket" else giftVoucherRobuxPrice
+			priceTag.Text = if ticketCount > 0 then "Gift Ticket" else giftTicketRobuxPrice
 		end
 	end
 
@@ -571,15 +571,15 @@ function ThemeShopController.Start()
 		end
 	end
 
-	local function refreshActiveVoucherPresentation()
+	local function refreshActiveTicketPresentation()
 		for _, card in activeCards do
-			local mainLabel = card.VoucherMainLabel
+			local mainLabel = card.TicketMainLabel
 			if mainLabel ~= nil then
-				mainLabel.Text = voucherCountText
+				mainLabel.Text = ticketCountText
 			end
-			local shadowLabel = card.VoucherShadowLabel
+			local shadowLabel = card.TicketShadowLabel
 			if shadowLabel ~= nil then
-				shadowLabel.Text = voucherCountText
+				shadowLabel.Text = ticketCountText
 			end
 			updatePurchasePrice(card)
 			updateGiftPrice(card)
@@ -626,8 +626,8 @@ function ThemeShopController.Start()
 		local purchasePriceTag: TextLabel? = nil
 		local cashPriceTag: TextLabel? = nil
 		local giftPriceTag: TextLabel? = nil
-		local voucherMainLabel: TextLabel? = nil
-		local voucherShadowLabel: TextLabel? = nil
+		local ticketMainLabel: TextLabel? = nil
+		local ticketShadowLabel: TextLabel? = nil
 
 		if purchaseButton ~= nil then
 			purchaseButton.Visible = true
@@ -635,22 +635,22 @@ function ThemeShopController.Start()
 			if priceTag ~= nil and priceTag:IsA("TextLabel") then
 				purchasePriceTag = priceTag
 			end
-			local voucherDisplay = purchaseButton:FindFirstChild("Tickets")
-			local hasVoucherDisplay = voucherDisplay ~= nil and voucherDisplay:IsA("GuiObject")
-			if hasVoucherDisplay then
-				local display = voucherDisplay :: GuiObject
+			local ticketDisplay = purchaseButton:FindFirstChild("Tickets")
+			local hasTicketDisplay = ticketDisplay ~= nil and ticketDisplay:IsA("GuiObject")
+			if hasTicketDisplay then
+				local display = ticketDisplay :: GuiObject
 				display.Visible = true
 				local mainLabel = display:FindFirstChild("main")
 				local shadowLabel = display:FindFirstChild("shadow")
 				if mainLabel ~= nil and mainLabel:IsA("TextLabel") then
-					voucherMainLabel = mainLabel
+					ticketMainLabel = mainLabel
 				end
 				if shadowLabel ~= nil and shadowLabel:IsA("TextLabel") then
-					voucherShadowLabel = shadowLabel
+					ticketShadowLabel = shadowLabel
 				end
 			end
 			if purchasePriceTag ~= nil then
-				purchasePriceTag.Visible = not hasVoucherDisplay
+				purchasePriceTag.Visible = not hasTicketDisplay
 			end
 		end
 
@@ -683,14 +683,14 @@ function ThemeShopController.Start()
 			PurchasePriceTag = purchasePriceTag,
 			CashPriceTag = cashPriceTag,
 			GiftPriceTag = giftPriceTag,
-			VoucherMainLabel = voucherMainLabel,
-			VoucherShadowLabel = voucherShadowLabel,
+			TicketMainLabel = ticketMainLabel,
+			TicketShadowLabel = ticketShadowLabel,
 		}
 
 		if purchaseButton ~= nil then
 			purchaseButton.MouseButton1Click:Connect(function()
-				pendingVoucherPromptButton = purchaseButton
-				Net.voucherPurchase.send({
+				pendingTicketPromptButton = purchaseButton
+				Net.ticketPurchase.send({
 					slot = card.Slot,
 					id = card.Id,
 				})
@@ -703,7 +703,7 @@ function ThemeShopController.Start()
 		end
 		if giftButton ~= nil then
 			giftButton.MouseButton1Click:Connect(function()
-				MonetizationController.StartVoucherGiftPrompt("ThemeShop")
+				MonetizationController.StartTicketGiftPrompt("ThemeShop")
 			end)
 		end
 		if previewButton ~= nil then
@@ -759,13 +759,13 @@ function ThemeShopController.Start()
 			end
 		end
 
-		local mainLabel = card.VoucherMainLabel
+		local mainLabel = card.TicketMainLabel
 		if mainLabel ~= nil then
-			mainLabel.Text = voucherCountText
+			mainLabel.Text = ticketCountText
 		end
-		local shadowLabel = card.VoucherShadowLabel
+		local shadowLabel = card.TicketShadowLabel
 		if shadowLabel ~= nil then
-			shadowLabel.Text = voucherCountText
+			shadowLabel.Text = ticketCountText
 		end
 
 		applyOwnership(card, ownedIds[slot][entry.Id] == true)
@@ -868,38 +868,38 @@ function ThemeShopController.Start()
 		scheduleOwnershipRefresh()
 	end)
 
-	local voucherRefreshPending = false
-	local function scheduleVoucherRefresh()
-		if voucherRefreshPending or #activeCards == 0 then
+	local ticketRefreshPending = false
+	local function scheduleTicketRefresh()
+		if ticketRefreshPending or #activeCards == 0 then
 			return
 		end
-		voucherRefreshPending = true
+		ticketRefreshPending = true
 		task.defer(function()
-			voucherRefreshPending = false
-			refreshActiveVoucherPresentation()
+			ticketRefreshPending = false
+			refreshActiveTicketPresentation()
 		end)
 	end
 
-	DataController.observe({ "UISystem", "Vouchers" }, function(value: any)
+	DataController.observe({ "UISystem", "Tickets" }, function(value: any)
 		if type(value) ~= "number" then
 			return
 		end
-		local nextVoucherCount = math.max(0, math.floor(value))
-		if nextVoucherCount == voucherCount then
+		local nextTicketCount = math.max(0, math.floor(value))
+		if nextTicketCount == ticketCount then
 			return
 		end
-		voucherCount = nextVoucherCount
-		voucherCountText = Format.FormatNumber(voucherCount)
-		scheduleVoucherRefresh()
+		ticketCount = nextTicketCount
+		ticketCountText = Format.FormatNumber(ticketCount)
+		scheduleTicketRefresh()
 	end)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId, productId)
-		if userId ~= player.UserId or productId ~= CosmeticsShopConfig.VOUCHER_PRODUCT_ID then
+		if userId ~= player.UserId or productId ~= CosmeticsShopConfig.TICKET_PRODUCT_ID then
 			return
 		end
 
-		local button = pendingVoucherPromptButton
-		pendingVoucherPromptButton = nil
+		local button = pendingTicketPromptButton
+		pendingTicketPromptButton = nil
 		if button ~= nil then
 			resetPurchaseButtonVisual(button)
 		end
@@ -917,11 +917,11 @@ function ThemeShopController.Start()
 	-- Fetched last, after every frame/button/observer above is already wired
 	-- (see robuxPriceText's own comment) -- patches only the relevant text
 	-- labels in the existing CardViews if either placeholder changes.
-	local fetchedVoucherPrice = robuxPriceText(CosmeticsShopConfig.VOUCHER_PRODUCT_ID)
-	local fetchedGiftVoucherPrice = robuxPriceText(CosmeticsShopConfig.GIFT_VOUCHER_PRODUCT_ID)
-	if fetchedVoucherPrice ~= voucherRobuxPrice or fetchedGiftVoucherPrice ~= giftVoucherRobuxPrice then
-		voucherRobuxPrice = fetchedVoucherPrice
-		giftVoucherRobuxPrice = fetchedGiftVoucherPrice
+	local fetchedTicketPrice = robuxPriceText(CosmeticsShopConfig.TICKET_PRODUCT_ID)
+	local fetchedGiftTicketPrice = robuxPriceText(CosmeticsShopConfig.GIFT_TICKET_PRODUCT_ID)
+	if fetchedTicketPrice ~= ticketRobuxPrice or fetchedGiftTicketPrice ~= giftTicketRobuxPrice then
+		ticketRobuxPrice = fetchedTicketPrice
+		giftTicketRobuxPrice = fetchedGiftTicketPrice
 		refreshActiveRobuxPrices()
 	end
 

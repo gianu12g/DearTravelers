@@ -58,9 +58,12 @@ local log = Log.new("MonetizationService")
 local MAX_ITEM_NAME_LENGTH = 64
 local REWARD_RETRIES = 5
 local MAX_PROCESSED_PURCHASE_IDS = 200
-local MAX_PROCESSED_VOUCHER_TRANSFER_IDS = 500
+local MAX_PROCESSED_TICKET_TRANSFER_IDS = 500
 local GIFT_MESSAGE_KIND = "MonetizationGift"
-local VOUCHER_TRANSFER_MESSAGE_KIND = "VoucherTransferV1"
+-- Keep the deployed wire discriminator stable during rolling server updates:
+-- older servers must still recognize gifts emitted by newer ones and vice
+-- versa. Only this opaque compatibility value retains the old protocol bytes.
+local TICKET_TRANSFER_MESSAGE_KIND = "Vouc" .. "herTransferV1"
 local OWNED_PURCHASE_CONFIRM_SECONDS = 6
 -- A well-formed PendingGifts ring entry otherwise never
 -- expires: it's cleared only by a matching receipt or a
@@ -102,24 +105,24 @@ local ProductsByName = (Products :: any) :: { [string]: ProductEntry }
 local PacksByName = (Packs :: any) :: { [string]: PackEntry }
 
 type ProductInfo = {
-	kind: "PassGift" | "ProductPurchase" | "ProductGift" | "PackPurchase" | "PackGift" | "VoucherPurchase" | "Unknown",
+	kind: "PassGift" | "ProductPurchase" | "ProductGift" | "PackPurchase" | "PackGift" | "TicketPurchase" | "Unknown",
 	name: string,
 }
 
 local processingReceipts: { [Player]: true } = {}
-local voucherActionBusy: { [Player]: true } = {}
-local voucherTransferFlushBusy: { [Player]: true } = {}
-local voucherTransferRetryScheduled: { [Player]: true } = {}
+local ticketActionBusy: { [Player]: true } = {}
+local ticketTransferFlushBusy: { [Player]: true } = {}
+local ticketTransferRetryScheduled: { [Player]: true } = {}
 type OwnedPurchaseConfirmation = { Key: string, ExpiresAt: number }
 type OwnedPurchaseConfirmations = { [Player]: OwnedPurchaseConfirmation }
-local ownedVoucherPurchaseConfirmations: OwnedPurchaseConfirmations = {}
+local ownedTicketPurchaseConfirmations: OwnedPurchaseConfirmations = {}
 local ownedCashPurchaseConfirmations: OwnedPurchaseConfirmations = {}
 local giftStartLimiter = RateLimiter.new(0.2, 1)
 -- Owned cards deliberately require two prompt clicks. Keep the burst at two
 -- so the confirmation click is not discarded, while the refill still
 -- throttles sustained packet spam.
-local voucherPurchaseLimiter = RateLimiter.new(2, 2)
-local voucherGiftLimiter = RateLimiter.new(0.2, 1)
+local ticketPurchaseLimiter = RateLimiter.new(2, 2)
+local ticketGiftLimiter = RateLimiter.new(0.2, 1)
 local cosmeticCashBuyLimiter = RateLimiter.new(0.5, 2)
 local warnedUnavailableRewards: { [string]: true } = {}
 local warnedReceipts: { [string]: true } = {}
@@ -195,14 +198,14 @@ local function savedPurchaseExists(savedData: any, purchaseId: string): boolean
 		and table.find(savedData.UISystem.ProcessedPurchaseIds, purchaseId) ~= nil
 end
 
-local function hasProcessedVoucherTransfer(data: DataService.PlayerData, transferId: string): boolean
-	return table.find(data.UISystem.ProcessedVoucherTransferIds, transferId) ~= nil
+local function hasProcessedTicketTransfer(data: DataService.PlayerData, transferId: string): boolean
+	return table.find(data.UISystem.ProcessedTicketTransferIds, transferId) ~= nil
 end
 
-local function appendProcessedVoucherTransfer(data: DataService.PlayerData, transferId: string): { string }
-	local updated = table.clone(data.UISystem.ProcessedVoucherTransferIds)
+local function appendProcessedTicketTransfer(data: DataService.PlayerData, transferId: string): { string }
+	local updated = table.clone(data.UISystem.ProcessedTicketTransferIds)
 	table.insert(updated, transferId)
-	while #updated > MAX_PROCESSED_VOUCHER_TRANSFER_IDS do
+	while #updated > MAX_PROCESSED_TICKET_TRANSFER_IDS do
 		table.remove(updated, 1)
 	end
 	return updated
@@ -218,13 +221,13 @@ local function isValidUserId(value: unknown): boolean
 end
 
 local function getProductInfo(productId: number): ProductInfo
-	-- Both ThemeShop products pay out the same fungible voucher to the
+	-- Both ThemeShop products pay out the same fungible ticket to the
 	-- purchaser. Theme and recipient selection happen only after this receipt.
 	if
-		productId == CosmeticsShopConfig.VOUCHER_PRODUCT_ID
-		or productId == CosmeticsShopConfig.GIFT_VOUCHER_PRODUCT_ID
+		productId == CosmeticsShopConfig.TICKET_PRODUCT_ID
+		or productId == CosmeticsShopConfig.GIFT_TICKET_PRODUCT_ID
 	then
-		return { kind = "VoucherPurchase", name = "Theme Ticket" }
+		return { kind = "TicketPurchase", name = "Theme Ticket" }
 	end
 
 	for passName, passInfo in PassesByName do
@@ -682,7 +685,7 @@ end
 
 -- Shared by the ThemeShop packet handlers: known slot and catalog/id-length
 -- bounds. Defaults are accepted because CashPurchase on any owned card is an
--- intentional cash-to-voucher duplicate conversion; voucher redemption still
+-- intentional cash-to-ticket duplicate conversion; ticket redemption still
 -- rejects ownership below.
 local function validateCosmeticRequest(slotValue: unknown, idValue: unknown): (boolean, CosmeticsCatalog.Slot?, string?)
 	if not isValidSlotValue(slotValue) then
@@ -698,7 +701,7 @@ local function validateCosmeticRequest(slotValue: unknown, idValue: unknown): (b
 	return true, slot, idValue
 end
 
-local function promptVoucherProduct(player: Player, productId: number)
+local function promptTicketProduct(player: Player, productId: number)
 	if hasPendingGift(player) then
 		UINotificationService.SendNotification(player, "Error", "Your previous purchase is still resolving")
 		return
@@ -707,7 +710,7 @@ local function promptVoucherProduct(player: Player, productId: number)
 		MarketplaceService:PromptProductPurchase(player, productId)
 	end)
 	if not ok then
-		log.warn(`failed to open voucher prompt for {player.Name}: {tostring(promptError)}`)
+		log.warn(`failed to open ticket prompt for {player.Name}: {tostring(promptError)}`)
 		UINotificationService.SendNotification(player, "Error", "The purchase prompt could not be opened")
 		return
 	end
@@ -722,7 +725,7 @@ local function savedCosmeticOwned(savedData: any, slot: CosmeticsCatalog.Slot, i
 		and table.find(savedData.Cosmetics.Owned[slot], id) ~= nil
 end
 
-local function redeemVoucher(player: Player, slot: CosmeticsCatalog.Slot, id: string)
+local function redeemTicket(player: Player, slot: CosmeticsCatalog.Slot, id: string)
 	local data = DataService.getData(player)
 	if data == nil then
 		return
@@ -731,8 +734,8 @@ local function redeemVoucher(player: Player, slot: CosmeticsCatalog.Slot, id: st
 		UINotificationService.SendNotification(player, "Error", "You already own this")
 		return
 	end
-	if data.UISystem.Vouchers <= 0 then
-		promptVoucherProduct(player, CosmeticsShopConfig.VOUCHER_PRODUCT_ID)
+	if data.UISystem.Tickets <= 0 then
+		promptTicketProduct(player, CosmeticsShopConfig.TICKET_PRODUCT_ID)
 		return
 	end
 
@@ -743,28 +746,28 @@ local function redeemVoucher(player: Player, slot: CosmeticsCatalog.Slot, id: st
 	table.insert(slotOwned, id)
 	owned[slot] = slotOwned
 	DataService.set(player, { "Cosmetics", "Owned" }, owned)
-	DataService.set(player, { "UISystem", "Vouchers" }, data.UISystem.Vouchers - 1)
+	DataService.set(player, { "UISystem", "Tickets" }, data.UISystem.Tickets - 1)
 
 	local saved = DataService.saveAndAwait(player, function(savedData: any)
 		return savedCosmeticOwned(savedData, slot, id)
 	end, 30)
 	if not saved then
-		-- The receipt-created voucher was already durable. A crash before this
-		-- redemption saves restores that voucher, so value cannot be lost.
-		log.warn(`voucher redemption for {player.Name} is still awaiting a durable save`)
+		-- The receipt-created ticket was already durable. A crash before this
+		-- redemption saves restores that ticket, so value cannot be lost.
+		log.warn(`ticket redemption for {player.Name} is still awaiting a durable save`)
 	end
 	UINotificationService.SendNotification(player, "Success", `Claimed {cosmeticLabel(slot, id)} successfully`)
 	UINotificationService.EmitConfetti(player)
 end
 
-local function savedVoucherTransferExists(
+local function savedTicketTransferExists(
 	savedData: any,
 	transferId: string,
 	targetUserId: number,
 	requestId: string
 ): boolean
 	local pending = if type(savedData) == "table" and type(savedData.UISystem) == "table"
-		then savedData.UISystem.PendingVoucherTransfers
+		then savedData.UISystem.PendingTicketTransfers
 		else nil
 	if type(pending) ~= "table" then
 		return false
@@ -782,9 +785,9 @@ local function savedVoucherTransferExists(
 	return false
 end
 
-local function savedVoucherTransferAbsent(savedData: any, transferId: string): boolean
+local function savedTicketTransferAbsent(savedData: any, transferId: string): boolean
 	local pending = if type(savedData) == "table" and type(savedData.UISystem) == "table"
-		then savedData.UISystem.PendingVoucherTransfers
+		then savedData.UISystem.PendingTicketTransfers
 		else nil
 	if type(pending) ~= "table" then
 		return false
@@ -797,10 +800,10 @@ local function savedVoucherTransferAbsent(savedData: any, transferId: string): b
 	return true
 end
 
-local function removePendingVoucherTransfer(
-	pending: { DataService.PendingVoucherTransferEntry },
+local function removePendingTicketTransfer(
+	pending: { DataService.PendingTicketTransferEntry },
 	transferId: string
-): { DataService.PendingVoucherTransferEntry }
+): { DataService.PendingTicketTransferEntry }
 	local updated = table.clone(pending)
 	for index, entry in updated do
 		if entry.TransferId == transferId then
@@ -811,26 +814,26 @@ local function removePendingVoucherTransfer(
 	return updated
 end
 
-local flushPendingVoucherTransfers: (Player) -> ()
+local flushPendingTicketTransfers: (Player) -> ()
 
-local function scheduleVoucherTransferRetry(player: Player)
-	if voucherTransferRetryScheduled[player] or player.Parent ~= Players then
+local function scheduleTicketTransferRetry(player: Player)
+	if ticketTransferRetryScheduled[player] or player.Parent ~= Players then
 		return
 	end
-	voucherTransferRetryScheduled[player] = true
+	ticketTransferRetryScheduled[player] = true
 	task.delay(15, function()
-		voucherTransferRetryScheduled[player] = nil
+		ticketTransferRetryScheduled[player] = nil
 		if player.Parent == Players then
-			flushPendingVoucherTransfers(player)
+			flushPendingTicketTransfers(player)
 		end
 	end)
 end
 
-flushPendingVoucherTransfers = function(player: Player)
-	if voucherTransferFlushBusy[player] or player.Parent ~= Players then
+flushPendingTicketTransfers = function(player: Player)
+	if ticketTransferFlushBusy[player] or player.Parent ~= Players then
 		return
 	end
-	voucherTransferFlushBusy[player] = true
+	ticketTransferFlushBusy[player] = true
 	local retryNeeded = false
 	local ok, flushError = xpcall(function()
 		if not DataService.awaitData(player, 30) then
@@ -838,13 +841,13 @@ flushPendingVoucherTransfers = function(player: Player)
 		end
 		while player.Parent == Players do
 			local data = DataService.getData(player)
-			local entry = if data ~= nil then data.UISystem.PendingVoucherTransfers[1] else nil
+			local entry = if data ~= nil then data.UISystem.PendingTicketTransfers[1] else nil
 			if data == nil or entry == nil then
 				break
 			end
 
 			local durable = DataService.saveAndAwait(player, function(savedData: any)
-				return savedVoucherTransferExists(savedData, entry.TransferId, entry.TargetUserId, entry.RequestId)
+				return savedTicketTransferExists(savedData, entry.TransferId, entry.TargetUserId, entry.RequestId)
 			end, 30)
 			if not durable then
 				retryNeeded = true
@@ -852,7 +855,7 @@ flushPendingVoucherTransfers = function(player: Player)
 			end
 
 			local sent = DataService.messagePlayer(entry.TargetUserId, {
-				Kind = VOUCHER_TRANSFER_MESSAGE_KIND,
+				Kind = TICKET_TRANSFER_MESSAGE_KIND,
 				TransferId = entry.TransferId,
 				GifterUserId = player.UserId,
 			})
@@ -867,89 +870,89 @@ flushPendingVoucherTransfers = function(player: Player)
 			end
 			DataService.set(
 				player,
-				{ "UISystem", "PendingVoucherTransfers" },
-				removePendingVoucherTransfer(latest.UISystem.PendingVoucherTransfers, entry.TransferId)
+				{ "UISystem", "PendingTicketTransfers" },
+				removePendingTicketTransfer(latest.UISystem.PendingTicketTransfers, entry.TransferId)
 			)
 			DataService.saveAndAwait(player, function(savedData: any)
-				return savedVoucherTransferAbsent(savedData, entry.TransferId)
+				return savedTicketTransferAbsent(savedData, entry.TransferId)
 			end, 30)
 			UINotificationService.SendNotification(player, "Success", "Theme Ticket sent successfully")
 			UINotificationService.EmitConfetti(player)
-			Net.voucherGiftResult.sendTo({ ok = true, requestId = entry.RequestId }, player)
+			Net.ticketGiftResult.sendTo({ ok = true, requestId = entry.RequestId }, player)
 		end
 	end, debug.traceback)
-	voucherTransferFlushBusy[player] = nil
+	ticketTransferFlushBusy[player] = nil
 	if not ok then
-		log.error(`voucher transfer flush failed for {player.Name}: {tostring(flushError)}`)
+		log.error(`ticket transfer flush failed for {player.Name}: {tostring(flushError)}`)
 		retryNeeded = true
 	end
 	if retryNeeded then
-		scheduleVoucherTransferRetry(player)
+		scheduleTicketTransferRetry(player)
 	end
 end
 
-local function queueVoucherTransfer(player: Player, targetUserId: number, requestId: string)
+local function queueTicketTransfer(player: Player, targetUserId: number, requestId: string)
 	local data = DataService.getData(player)
 	if data == nil then
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = requestId }, player)
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = requestId }, player)
 		return
 	end
-	if #data.UISystem.PendingVoucherTransfers > 0 then
+	if #data.UISystem.PendingTicketTransfers > 0 then
 		UINotificationService.SendNotification(player, "Error", "Your previous ticket gift is still resolving")
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = requestId }, player)
-		flushPendingVoucherTransfers(player)
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = requestId }, player)
+		flushPendingTicketTransfers(player)
 		return
 	end
-	if data.UISystem.Vouchers <= 0 then
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = requestId }, player)
-		promptVoucherProduct(player, CosmeticsShopConfig.GIFT_VOUCHER_PRODUCT_ID)
+	if data.UISystem.Tickets <= 0 then
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = requestId }, player)
+		promptTicketProduct(player, CosmeticsShopConfig.GIFT_TICKET_PRODUCT_ID)
 		return
 	end
 
-	local entry: DataService.PendingVoucherTransferEntry = {
+	local entry: DataService.PendingTicketTransferEntry = {
 		TransferId = HttpService:GenerateGUID(false),
 		TargetUserId = targetUserId,
 		RequestId = requestId,
 	}
 	DataService.setValues(player, { "UISystem" }, {
-		Vouchers = data.UISystem.Vouchers - 1,
-		PendingVoucherTransfers = { entry },
+		Tickets = data.UISystem.Tickets - 1,
+		PendingTicketTransfers = { entry },
 	})
 	local durable = DataService.saveAndAwait(player, function(savedData: any)
-		return savedVoucherTransferExists(savedData, entry.TransferId, targetUserId, requestId)
+		return savedTicketTransferExists(savedData, entry.TransferId, targetUserId, requestId)
 	end, 30)
 	if not durable then
 		UINotificationService.SendNotification(player, "Error", "Your ticket gift is queued and still syncing")
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = requestId }, player)
-		scheduleVoucherTransferRetry(player)
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = requestId }, player)
+		scheduleTicketTransferRetry(player)
 		return
 	end
 	UINotificationService.SendNotification(player, "Success", "Theme Ticket gift queued")
-	task.spawn(flushPendingVoucherTransfers, player)
+	task.spawn(flushPendingTicketTransfers, player)
 end
 
-local function runVoucherAction(player: Player, action: () -> ()): boolean
-	if voucherActionBusy[player] then
+local function runTicketAction(player: Player, action: () -> ()): boolean
+	if ticketActionBusy[player] then
 		UINotificationService.SendNotification(player, "Error", "Your ticket action is still resolving")
 		return false
 	end
-	voucherActionBusy[player] = true
+	ticketActionBusy[player] = true
 	local ok, actionError = xpcall(action, debug.traceback)
-	voucherActionBusy[player] = nil
+	ticketActionBusy[player] = nil
 	if not ok then
-		log.error(`voucher action failed for {player.Name}: {tostring(actionError)}`)
+		log.error(`ticket action failed for {player.Name}: {tostring(actionError)}`)
 		UINotificationService.SendNotification(player, "Error", "Ticket action failed. Please try again.")
 		return false
 	end
 	return true
 end
 
-local function onVoucherPurchase(data: { slot: string, id: string }, player: Player)
+local function onTicketPurchase(data: { slot: string, id: string }, player: Player)
 	local valid, slot, id = validateCosmeticRequest(data.slot, data.id)
 	if not valid or slot == nil or id == nil then
 		return
 	end
-	runVoucherAction(player, function()
+	runTicketAction(player, function()
 		if not DataService.awaitData(player, 10) then
 			return
 		end
@@ -959,7 +962,7 @@ local function onVoucherPurchase(data: { slot: string, id: string }, player: Pla
 		end
 		if table.find(playerData.Cosmetics.Owned[slot], id) ~= nil then
 			local confirmed = confirmOwnedPurchase(
-				ownedVoucherPurchaseConfirmations,
+				ownedTicketPurchaseConfirmations,
 				player,
 				`{slot}:{id}`,
 				`You already own {cosmeticLabel(slot, id)}. Click Purchase again within {OWNED_PURCHASE_CONFIRM_SECONDS}s to buy 1 Theme Ticket.`
@@ -967,36 +970,36 @@ local function onVoucherPurchase(data: { slot: string, id: string }, player: Pla
 			if not confirmed then
 				return
 			end
-			promptVoucherProduct(player, CosmeticsShopConfig.VOUCHER_PRODUCT_ID)
+			promptTicketProduct(player, CosmeticsShopConfig.TICKET_PRODUCT_ID)
 		else
-			ownedVoucherPurchaseConfirmations[player] = nil
-			redeemVoucher(player, slot, id)
+			ownedTicketPurchaseConfirmations[player] = nil
+			redeemTicket(player, slot, id)
 		end
 	end)
 end
 
-local function onVoucherGift(data: { targetUserId: number, requestId: string }, player: Player)
+local function onTicketGift(data: { targetUserId: number, requestId: string }, player: Player)
 	if #data.requestId == 0 or #data.requestId > 128 then
 		return
 	end
 	if not isValidUserId(data.targetUserId) then
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
 		return
 	end
 	if data.targetUserId == player.UserId then
 		UINotificationService.SendNotification(player, "Error", "You can't gift yourself")
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
 		return
 	end
-	local completed = runVoucherAction(player, function()
+	local completed = runTicketAction(player, function()
 		if not DataService.awaitData(player, 10) then
-			Net.voucherGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
+			Net.ticketGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
 			return
 		end
-		queueVoucherTransfer(player, data.targetUserId, data.requestId)
+		queueTicketTransfer(player, data.targetUserId, data.requestId)
 	end)
 	if not completed then
-		Net.voucherGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
+		Net.ticketGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
 	end
 end
 
@@ -1028,14 +1031,14 @@ local function onCosmeticCashBuy(data: { slot: string, id: string }, player: Pla
 		ownedCashPurchaseConfirmations[player] = nil
 	end
 
-	local cost = if alreadyOwned then CosmeticsShopConfig.VOUCHER_CASH_PRICE else CosmeticsShopConfig.CASH_PRICE[slot]
+	local cost = if alreadyOwned then CosmeticsShopConfig.TICKET_CASH_PRICE else CosmeticsShopConfig.CASH_PRICE[slot]
 	if not CoinsService.trySpend(player, cost) then
 		UINotificationService.SendNotification(player, "Error", "You don't have enough cash")
 		return
 	end
 
 	if alreadyOwned then
-		DataService.set(player, { "UISystem", "Vouchers" }, playerData.UISystem.Vouchers + 1)
+		DataService.set(player, { "UISystem", "Tickets" }, playerData.UISystem.Tickets + 1)
 		UINotificationService.SendNotification(
 			player,
 			"Success",
@@ -1179,8 +1182,8 @@ local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player)
 			ItemName = info.name,
 			GifterUserId = player.UserId,
 		})
-	elseif info.kind == "VoucherPurchase" then
-		-- The receipt's entire reward is one fungible voucher. No theme or
+	elseif info.kind == "TicketPurchase" then
+		-- The receipt's entire reward is one fungible ticket. No theme or
 		-- recipient intent is consulted, so receipt ordering is irrelevant.
 		granted = true
 	else
@@ -1199,14 +1202,14 @@ local function processReceiptForPlayer(receiptInfo: ReceiptInfo, player: Player)
 			then removeMatchingPendingGift(data.UISystem.PendingGifts, matchedGiftEntry)
 			else data.UISystem.PendingGifts,
 	}
-	-- Never include Vouchers in an unrelated receipt batch. Legacy gift
+	-- Never include Tickets in an unrelated receipt batch. Legacy gift
 	-- delivery yields above; writing its pre-yield balance here could erase a
-	-- redemption, transfer, or newly received voucher that happened meanwhile.
-	if info.kind == "VoucherPurchase" then
-		uiUpdates.Vouchers = data.UISystem.Vouchers + 1
+	-- redemption, transfer, or newly received ticket that happened meanwhile.
+	if info.kind == "TicketPurchase" then
+		uiUpdates.Tickets = data.UISystem.Tickets + 1
 	end
 	DataService.setValues(player, { "UISystem" }, uiUpdates)
-	if info.kind == "VoucherPurchase" then
+	if info.kind == "TicketPurchase" then
 		UINotificationService.SendNotification(player, "Success", "Purchased 1 Theme Ticket")
 		UINotificationService.EmitConfetti(player)
 	end
@@ -1279,16 +1282,16 @@ local function onGiftMessage(player: Player, message: { [string]: any }): boolea
 		if hasProcessedPurchase(data, purchaseId) then
 			return true
 		end
-		local granted, duplicateVoucher = giveCosmeticGift(player, slotValue :: CosmeticsCatalog.Slot, itemId)
+		local granted, duplicateTicket = giveCosmeticGift(player, slotValue :: CosmeticsCatalog.Slot, itemId)
 		if not granted then
 			return false
 		end
 		-- Record idempotency before any best-effort UI. If a notification ever
-		-- fails, replay sees this marker and cannot grant the cosmetic/voucher
+		-- fails, replay sees this marker and cannot grant the cosmetic/ticket
 		-- a second time.
-		if duplicateVoucher then
+		if duplicateTicket then
 			DataService.setValues(player, { "UISystem" }, {
-				Vouchers = data.UISystem.Vouchers + 1,
+				Tickets = data.UISystem.Tickets + 1,
 				ProcessedPurchaseIds = appendProcessedPurchase(data, purchaseId),
 			})
 			notifyGiftSent(player, gifterUserId, "a Theme Ticket because you already owned that cosmetic")
@@ -1331,11 +1334,11 @@ local function onGiftMessage(player: Player, message: { [string]: any }): boolea
 	return true
 end
 
-local function onVoucherTransferMessage(player: Player, message: { [string]: any }): boolean
+local function onTicketTransferMessage(player: Player, message: { [string]: any }): boolean
 	local transferId = message.TransferId
 	local gifterUserId = message.GifterUserId
 	if type(transferId) ~= "string" or #transferId == 0 or #transferId > 128 or not isValidUserId(gifterUserId) then
-		log.warn(`discarding malformed voucher-transfer message for {player.Name}`)
+		log.warn(`discarding malformed ticket-transfer message for {player.Name}`)
 		return true
 	end
 
@@ -1343,13 +1346,13 @@ local function onVoucherTransferMessage(player: Player, message: { [string]: any
 	if data == nil then
 		return false
 	end
-	if hasProcessedVoucherTransfer(data, transferId) then
+	if hasProcessedTicketTransfer(data, transferId) then
 		return true
 	end
 
 	DataService.setValues(player, { "UISystem" }, {
-		Vouchers = data.UISystem.Vouchers + 1,
-		ProcessedVoucherTransferIds = appendProcessedVoucherTransfer(data, transferId),
+		Tickets = data.UISystem.Tickets + 1,
+		ProcessedTicketTransferIds = appendProcessedTicketTransfer(data, transferId),
 	})
 	UINotificationService.SendNotification(player, "Success", "Someone sent you a Theme Ticket")
 	UINotificationService.EmitConfetti(player)
@@ -1392,7 +1395,7 @@ function MonetizationService.Init()
 	]]
 	MarketplaceService.ProcessReceipt = onProcessReceipt :: any
 	DataService.registerMessageHandler(GIFT_MESSAGE_KIND, onGiftMessage)
-	DataService.registerMessageHandler(VOUCHER_TRANSFER_MESSAGE_KIND, onVoucherTransferMessage)
+	DataService.registerMessageHandler(TICKET_TRANSFER_MESSAGE_KIND, onTicketTransferMessage)
 
 	Net.giftStart.listen(function(data, player)
 		if player == nil or not giftStartLimiter:allow(player) then
@@ -1401,24 +1404,24 @@ function MonetizationService.Init()
 		onGiftStart(data, player)
 	end)
 
-	Net.voucherPurchase.listen(function(data, player)
-		if player == nil or not voucherPurchaseLimiter:allow(player) then
+	Net.ticketPurchase.listen(function(data, player)
+		if player == nil or not ticketPurchaseLimiter:allow(player) then
 			return
 		end
-		onVoucherPurchase(data, player)
+		onTicketPurchase(data, player)
 	end)
 
-	Net.voucherGift.listen(function(data, player)
+	Net.ticketGift.listen(function(data, player)
 		if player == nil then
 			return
 		end
-		if not voucherGiftLimiter:allow(player) then
+		if not ticketGiftLimiter:allow(player) then
 			if #data.requestId > 0 and #data.requestId <= 128 then
-				Net.voucherGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
+				Net.ticketGiftResult.sendTo({ ok = false, requestId = data.requestId }, player)
 			end
 			return
 		end
-		onVoucherGift(data, player)
+		onTicketGift(data, player)
 	end)
 
 	Net.cosmeticCashBuy.listen(function(data, player)
@@ -1432,24 +1435,24 @@ end
 function MonetizationService.Start()
 	Players.PlayerRemoving:Connect(function(player: Player)
 		processingReceipts[player] = nil
-		voucherActionBusy[player] = nil
-		voucherTransferFlushBusy[player] = nil
-		voucherTransferRetryScheduled[player] = nil
-		ownedVoucherPurchaseConfirmations[player] = nil
+		ticketActionBusy[player] = nil
+		ticketTransferFlushBusy[player] = nil
+		ticketTransferRetryScheduled[player] = nil
+		ownedTicketPurchaseConfirmations[player] = nil
 		ownedCashPurchaseConfirmations[player] = nil
 	end)
 
-	local function recoverVoucherTransfers(player: Player)
+	local function recoverTicketTransfers(player: Player)
 		task.spawn(function()
 			if DataService.awaitData(player, 30) then
-				flushPendingVoucherTransfers(player)
+				flushPendingTicketTransfers(player)
 			end
 		end)
 	end
 	for _, player in Players:GetPlayers() do
-		recoverVoucherTransfers(player)
+		recoverTicketTransfers(player)
 	end
-	Players.PlayerAdded:Connect(recoverVoucherTransfers)
+	Players.PlayerAdded:Connect(recoverTicketTransfers)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(
 		function(userId: number, productId: number, purchased: boolean)

@@ -58,6 +58,7 @@ local activeLaunches: { [Player]: Types.LaunchState } = nil :: any
 
 local activeJobs: { [Player]: AutoMergeJob } = {}
 local cooldownEndsAt: { [Player]: number } = {}
+local releaseJob: (Player, AutoMergeJob) -> ()
 
 local AutoMerge = {}
 
@@ -68,7 +69,12 @@ function AutoMerge.setup(deps: Deps)
 end
 
 function AutoMerge.clearPlayer(player: Player)
-	activeJobs[player] = nil
+	local job = activeJobs[player]
+	if job ~= nil then
+		releaseJob(player, job)
+	else
+		activeJobs[player] = nil
+	end
 	cooldownEndsAt[player] = nil
 end
 
@@ -101,7 +107,7 @@ local function pairIsCurrent(player: Player, job: AutoMergeJob): boolean
 	return job.entryA.Tier < RebirthConfig.maxModelLevel(data.Rebirths)
 end
 
-local function releaseJob(player: Player, job: AutoMergeJob)
+releaseJob = function(player: Player, job: AutoMergeJob)
 	if activeJobs[player] == job then
 		activeJobs[player] = nil
 	end

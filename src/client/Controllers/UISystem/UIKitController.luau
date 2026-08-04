@@ -322,7 +322,10 @@ local Scale: { [string]: (GuiObject, number?) -> () } = {
 		local divisor = rate or 1
 
 		local function update()
-			local tileSize = (parent :: GuiObject).AbsoluteSize.X / divisor
+			-- Hidden/template UI can report an AbsoluteSize of zero while it is
+			-- being laid out. TileSize rejects zero dimensions, so keep the
+			-- temporary value valid until the next AbsoluteSize update.
+			local tileSize = math.max((parent :: GuiObject).AbsoluteSize.X / divisor, 1)
 			item.TileSize = UDim2.fromOffset(tileSize, tileSize)
 		end
 
@@ -721,10 +724,15 @@ function UIKitController.OpenFrame(frameName: Frames.FrameName, noBlur: boolean?
 	refreshWorldEffects()
 end
 
--- Shared HUD counter driver for Cash and Theme Tickets. Both authored
--- ImageLabels expose lowercase main/shadow labels plus identical transaction
--- badge templates.
-local function initCounterDisplay(holderName: string, labelName: string, path: { string | number })
+-- Shared HUD counter driver for Cash and Theme Tickets. `numberPrefix` lets
+-- the Cash counter and its transaction badges show "$" without leaking that
+-- currency symbol into the otherwise-identical Tickets UI.
+local function initCounterDisplay(
+	holderName: string,
+	labelName: string,
+	path: { string | number },
+	numberPrefix: string?
+)
 	local main = playerGui:WaitForChild("Main")
 	local hud = main:WaitForChild("HUD")
 	local holder = hud:WaitForChild(holderName)
@@ -738,9 +746,10 @@ local function initCounterDisplay(holderName: string, labelName: string, path: {
 	subTemplate.Parent = nil
 
 	local activeRender: RBXScriptConnection? = nil
+	local prefix = numberPrefix or ""
 
 	local function setCounterLabel(amount: number)
-		local formatted = Format.FormatNumber(amount)
+		local formatted = prefix .. Format.FormatNumber(amount)
 		mainLabel.Text = formatted
 		shadowLabel.Text = formatted
 	end
@@ -778,7 +787,7 @@ local function initCounterDisplay(holderName: string, labelName: string, path: {
 		badge.Size = UDim2.new(originalSize.X.Scale, originalSize.X.Offset, 0, 0)
 
 		local sign = if amount > 0 then "+" else "-"
-		local formatted = sign .. Format.FormatNumber(math.abs(amount))
+		local formatted = sign .. prefix .. Format.FormatNumber(math.abs(amount))
 		local badgeMain = badge:WaitForChild("main") :: TextLabel
 		local badgeShadow = badge:WaitForChild("shadow") :: TextLabel
 		badgeMain.Text = formatted
@@ -932,8 +941,8 @@ function UIKitController.Start()
 	end
 
 	initShopScrollBounds()
-	initCounterDisplay("Left", "Cash", { "Coins" })
-	initCounterDisplay("Right", "Tickets", { "UISystem", "Vouchers" })
+	initCounterDisplay("Left", "Cash", { "Coins" }, "$")
+	initCounterDisplay("Right", "Tickets", { "UISystem", "Tickets" })
 	watchLoadingScreenHandshake()
 
 	log.info("ready")

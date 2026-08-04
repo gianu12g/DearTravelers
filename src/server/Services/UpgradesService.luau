@@ -79,7 +79,11 @@ local function purchase(player: Player, requestedKey: string)
 		return
 	end
 
-	DataService.set(player, UpgradeConfig.pathFor(key), nextValue)
+	if key == "SpawnTier" then
+		MergeService.setSpawnLevel(player, nextValue)
+	else
+		DataService.set(player, UpgradeConfig.pathFor(key), nextValue)
+	end
 	if key == "MaxSpawns" then
 		-- Capacity changed synchronously; do not make a paid balance wait for
 		-- the periodic safety sweep before occupying the newly opened slot.

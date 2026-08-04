@@ -169,12 +169,12 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 
 		--[[
 			client -> server. ThemeShop's primary button action. The server
-			redeems one existing voucher for an unowned cosmetic, prompts when
+			redeems one existing ticket for an unowned cosmetic, prompts when
 			that balance is zero, or asks for a second confirmation click before
-			buying another voucher from an owned card. The slot/id never
+			buying another ticket from an owned card. The slot/id never
 			participate in receipt routing.
 		]]
-		voucherPurchase = ByteNet.definePacket({
+		ticketPurchase = ByteNet.definePacket({
 			value = ByteNet.struct({
 				slot = ByteNet.string,
 				id = ByteNet.string,
@@ -182,13 +182,13 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		}),
 
 		--[[
-			client -> server. Gift-confirm action. With a voucher available,
+			client -> server. Gift-confirm action. With a ticket available,
 			the server durably reserves it and queues a transfer to this player.
-			With no voucher, it prompts the gift-voucher product but deliberately
+			With no ticket, it prompts the gift-ticket product but deliberately
 			does NOT persist/use the target until the client confirms again after
 			the receipt has replicated the new balance.
 		]]
-		voucherGift = ByteNet.definePacket({
+		ticketGift = ByteNet.definePacket({
 			value = ByteNet.struct({
 				targetUserId = ByteNet.float64,
 				requestId = ByteNet.string,
@@ -197,7 +197,7 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 
 		-- server -> client. requestId prevents a delayed response from an older
 		-- transfer from closing a newer recipient confirmation.
-		voucherGiftResult = ByteNet.definePacket({
+		ticketGiftResult = ByteNet.definePacket({
 			value = ByteNet.struct({
 				ok = ByteNet.bool,
 				requestId = ByteNet.string,
