@@ -102,6 +102,13 @@ function Damage.applyHealthMultiplier(player: Player, requestedMultiplier: numbe
 	local carry = carries[player]
 	if carry ~= nil then
 		carry.entry = replacements[carry.entry] or carry.entry
+		-- Both numbers move here, not just current health: this is the 2x
+		-- Squishy Health pass landing, so the carry HUD's maximum changes too.
+		Types.setCarryingHealth(
+			player,
+			carry.entry.Health,
+			MergeConfig.maxHealthForTier(carry.entry.Tier, targetMultiplier)
+		)
 	end
 	local launch = activeLaunches[player]
 	if launch ~= nil then
@@ -189,6 +196,11 @@ local function applySquishyDamage(
 		local replacement = replacements[carry.entry]
 		if replacement ~= nil then
 			carry.entry = replacement
+			-- The carry HUD shows this squishy's health while it is held, and a
+			-- held squishy is still a legal target for someone else's launch.
+			-- Re-publish so the label follows the hit instead of freezing at
+			-- whatever it read when the player picked it up.
+			Types.setCarryingHealth(player, replacement.Health, carry.part:GetAttribute("MaxHealth"))
 		elseif deadEntries[carry.entry] then
 			carries[player] = nil
 			Types.clearCarryingAttributes(player)

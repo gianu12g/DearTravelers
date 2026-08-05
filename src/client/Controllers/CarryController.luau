@@ -19,7 +19,9 @@ local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Format = require(ReplicatedStorage.Shared.UISystem.Format)
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
 
 local log = Log.new("CarryController")
@@ -31,6 +33,8 @@ local CarryController = {}
 local dropLaunchUi: ScreenGui? = nil
 local carryActions: Frame? = nil
 local dropButton: TextButton? = nil
+local healthLabel: TextLabel? = nil
+local damageLabel: TextLabel? = nil
 
 local connectedButton: TextButton? = nil
 local activatedConnection: RBXScriptConnection? = nil
@@ -68,7 +72,49 @@ local function resolveUi(): (Frame, TextButton)
 	carryActions = actions
 	dropButton = button
 
+	--[[
+		The two carry-info readouts. Resolved with the rest of the UI so they
+		are re-found after a respawn re-clones PlayerGui, and looked up
+		defensively rather than with WaitForChild: they are decoration, and a
+		frame authored without them must not block the DROP button from binding.
+	]]
+	local launchButton = actions:FindFirstChild("C.Launch")
+	local dropInfo = button:FindFirstChild("InfoFrame")
+	local launchInfo = if launchButton ~= nil then launchButton:FindFirstChild("InfoFrame") else nil
+	local health = if dropInfo ~= nil then dropInfo:FindFirstChild("healthLabel") else nil
+	local damage = if launchInfo ~= nil then launchInfo:FindFirstChild("damageLabel") else nil
+	healthLabel = if health ~= nil and health:IsA("TextLabel") then health else nil
+	damageLabel = if damage ~= nil and damage:IsA("TextLabel") then damage else nil
+
 	return actions, button
+end
+
+--[[
+	Fills the carry readouts from what the server published about the held
+	squishy. Called on every carry-state change, and again whenever its health
+	moves (someone else's launch can damage a squishy you are holding).
+
+	Health is the live current value. Damage mirrors Launch's own maths exactly
+	-- healthForTier * LAUNCH_DAMAGE_FRACTION -- and deliberately NOT
+	maxHealthForTier: the 2x Squishy Health pass raises how much a squishy can
+	take, not how hard it hits, and the readout must not promise otherwise.
+]]
+local function refreshCarryInfo()
+	local health = healthLabel
+	if health ~= nil then
+		local current = player:GetAttribute("CarryingHealth")
+		health.Text = if type(current) == "number" then Format.FormatNumber(current) else "0"
+	end
+
+	local damage = damageLabel
+	if damage ~= nil then
+		local tier = player:GetAttribute("CarryingTier")
+		if type(tier) == "number" then
+			damage.Text = Format.FormatNumber(MergeConfig.healthForTier(tier) * MergeConfig.LAUNCH_DAMAGE_FRACTION)
+		else
+			damage.Text = "0"
+		end
+	end
 end
 
 local function bindDropButton(button: TextButton)
@@ -103,8 +149,23 @@ local function queueCarryingVisibility(tier: unknown)
 		end
 
 		bindDropButton(button)
+		-- Fill BEFORE showing, so the panel never appears holding the previous
+		-- squishy's numbers for a frame.
+		refreshCarryInfo()
 		actions.Visible = tier ~= nil
 	end)
+end
+
+--[[
+	Health can change while the panel is already open, without CarryingTier ever
+	moving. Repainting only the labels avoids re-running the whole visibility
+	path (and its UI resolution yield) for a number change.
+]]
+local function queueCarryInfoRefresh()
+	if carryActions == nil or carryActions.Parent == nil then
+		return
+	end
+	refreshCarryInfo()
 end
 
 local function watchScreensFolder(folder: Instance)
@@ -158,6 +219,12 @@ function CarryController.Init()
 	carryingTierChanged:Connect(function()
 		queueCarryingVisibility(player:GetAttribute("CarryingTier"))
 	end)
+
+	-- Same split-before-Connect rule as above (quality-gate.md Gate 2).
+	local carryingHealthChanged = player:GetAttributeChangedSignal("CarryingHealth")
+	carryingHealthChanged:Connect(queueCarryInfoRefresh)
+	local carryingMaxHealthChanged = player:GetAttributeChangedSignal("CarryingMaxHealth")
+	carryingMaxHealthChanged:Connect(queueCarryInfoRefresh)
 
 	-- PlayerGui resolution can yield, so start the respawn watcher only after
 	-- the attribute listener is connected.

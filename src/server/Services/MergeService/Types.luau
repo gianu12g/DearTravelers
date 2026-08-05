@@ -159,9 +159,32 @@ function Types.tierDefFor(tier: number): MergeConfig.TierDef
 	return MergeConfig.Tiers[Types.sanitizeTier(tier)]
 end
 
+--[[
+	Publishes the carried squishy's health for the carry HUD
+	(DropLaunchUI.CarryActions.A.Drop.InfoFrame.healthLabel).
+
+	An Attribute on the PLAYER rather than the client reading the part directly:
+	the part's own Health/MaxHealth attributes already replicate, but the client
+	has no reliable handle on WHICH part it is holding (the carry weld lives on
+	the part, in the pad's folder, not on the character), and attributes cannot
+	carry an Instance reference. Publishing the two numbers next to CarryingTier
+	keeps the client's job to formatting, and matches how CarryingTier itself is
+	already exposed -- public information either way, since anyone standing
+	nearby can see the squishy's health bar.
+
+	Call sites must keep this truthful for the whole carry, not just its start:
+	a carried squishy can still be damaged by another player's launch.
+]]
+function Types.setCarryingHealth(player: Player, health: any, maxHealth: any)
+	player:SetAttribute("CarryingHealth", if type(health) == "number" then health else nil)
+	player:SetAttribute("CarryingMaxHealth", if type(maxHealth) == "number" then maxHealth else nil)
+end
+
 function Types.clearCarryingAttributes(player: Player)
 	player:SetAttribute("CarryingTier", nil)
 	player:SetAttribute("CarryingLaunchReadyAt", nil)
+	player:SetAttribute("CarryingHealth", nil)
+	player:SetAttribute("CarryingMaxHealth", nil)
 end
 
 return Types

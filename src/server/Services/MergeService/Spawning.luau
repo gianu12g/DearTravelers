@@ -537,6 +537,10 @@ local function publishCarryingAttributes(player: Player, tier: number, part: Bas
 	player:SetAttribute("CarryingTier", tier)
 	local readyAt = part:GetAttribute("LaunchReadyAt")
 	player:SetAttribute("CarryingLaunchReadyAt", if typeof(readyAt) == "number" then readyAt else nil)
+	-- Read off the part rather than the entry: StatusUI.updateHealthVisual is
+	-- what maintains these, so they are already sanitized and already include
+	-- the player's SquishyHealthMultiplier.
+	Types.setCarryingHealth(player, part:GetAttribute("Health"), part:GetAttribute("MaxHealth"))
 end
 
 --[[
@@ -578,10 +582,40 @@ local function pickUp(player: Player, part: BasePart)
 		return -- no rig to carry it in front of (character streaming in/out)
 	end
 
-	local tierDef = Types.tierDefFor(entry.Tier)
-	local offset = tierDef.Size / 2 + MergeConfig.CARRY_GAP
-	local carryRotation = MergeObjectVisuals.getCarryRotation(Types.sanitizeTier(entry.Tier))
-	part.CFrame = attachPoint.CFrame * CFrame.new(0, 0, -offset) * carryRotation
+	--[[
+		Pose the ART in front of the character, not the gameplay root.
+
+		The root is an invisible cube sized off the tier ramp, and real artwork
+		does not match it -- a level-7 root is 6.70 studs around a 2.2-stud
+		watermelon, and attach() bottom-aligns that watermelon inside it. Placing
+		the ROOT at a fixed offset therefore got both axes wrong at once: the art
+		ended up ~4.2 studs out (against a 1.5 CARRY_GAP) and ~2.2 studs low.
+
+		So solve for the root position that puts the ART where it should be:
+
+		  1. Ask where the art actually is, in root space (centre + size).
+		  2. Pick the world point the art centre should occupy -- straight ahead
+		     of the torso, cleared by half the art's own extent plus CARRY_GAP.
+		  3. Place the root so that, once rotated, its art lands on that point.
+
+		Extent is the art's LARGEST dimension, not its depth: carryRotation spins
+		the object, so the clearance has to hold whichever face ends up forward.
+
+		With no attached visual the object is showing its fallback cube, whose
+		bounds are exactly the root's own -- centre (0,0,0), size root.Size --
+		so the same three steps collapse back to the original behaviour.
+	]]
+	local sanitizedTier = Types.sanitizeTier(entry.Tier)
+	local carryRotation = MergeObjectVisuals.getCarryRotation(sanitizedTier)
+	local artCentre, artSize = MergeObjectVisuals.getVisualBounds(part)
+	if artCentre == nil or artSize == nil then
+		artCentre, artSize = Vector3.zero, part.Size
+	end
+
+	local extent = math.max(artSize.X, artSize.Y, artSize.Z)
+	local rotation = attachPoint.CFrame.Rotation * carryRotation.Rotation
+	local targetArtPosition = (attachPoint.CFrame * CFrame.new(0, 0, -(extent / 2 + MergeConfig.CARRY_GAP))).Position
+	part.CFrame = CFrame.new(targetArtPosition - rotation * artCentre) * rotation
 	part.Anchored = false
 	part.CanCollide = false
 	part.Massless = true

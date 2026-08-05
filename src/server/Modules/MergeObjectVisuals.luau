@@ -249,6 +249,61 @@ function MergeObjectVisuals.attach(root: BasePart, tier: number): boolean
 end
 
 --[[
+	Where a root's attached ARTWORK actually sits, as (centre, size) in the
+	ROOT'S OWN object space. Returns nil when the root has no attached visual --
+	it is then showing its fallback cube, which the root's own size already
+	describes exactly.
+
+	Exists because the gameplay root Part is not the art and never was. Its size
+	comes from the tier ramp, authored when every level WAS a coloured cube, so
+	root size and art size were the same number. Real artwork does not follow
+	that ramp: a level-7 root is 6.70 studs around a 2.2-stud watermelon. Worse,
+	attach() bottom-aligns the visual inside the root, so an undersized model
+	also sits well below the root's centre. Anything positioned for what the
+	player SEES has to measure the art, in both offset and extent.
+
+	Measured off the LIVE welded result rather than the template, and returned
+	in root space rather than as a bare number, so it stays correct for any art
+	size, any authored pivot, and any future change to how attach aligns things.
+	Deliberately not cached: the read is a handful of parts, it happens once per
+	pickup, and a cache keyed on tier would silently go stale the moment two
+	roots of one level differ.
+]]
+function MergeObjectVisuals.getVisualBounds(root: BasePart): (Vector3?, Vector3?)
+	local visual = root:FindFirstChild(VISUAL_NAME)
+	if visual == nil then
+		return nil, nil
+	end
+
+	local parts = collectParts(visual)
+	if #parts == 0 then
+		return nil, nil
+	end
+
+	local minimum = Vector3.new(math.huge, math.huge, math.huge)
+	local maximum = Vector3.new(-math.huge, -math.huge, -math.huge)
+	for _, part in parts do
+		local half = part.Size / 2
+		for x = -1, 1, 2 do
+			for y = -1, 1, 2 do
+				for z = -1, 1, 2 do
+					local world = part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+					local corner = root.CFrame:PointToObjectSpace(world)
+					minimum = minimum:Min(corner)
+					maximum = maximum:Max(corner)
+				end
+			end
+		end
+	end
+
+	local size = maximum - minimum
+	if size.X <= 0 or size.Y <= 0 or size.Z <= 0 then
+		return nil, nil
+	end
+	return (minimum + maximum) / 2, size
+end
+
+--[[
 	Offset from the bottom-center of a tier template's world-axis bounding box
 	to its authored beam anchor attachment, in template space.
 
