@@ -590,8 +590,7 @@ local function runLaunch(player: Player, launch: Types.LaunchState, targetPositi
 		return
 	end
 
-	local attackerLevel = MergeConfig.healthForTier(tier)
-	local damage = attackerLevel * MergeConfig.LAUNCH_DAMAGE_FRACTION
+	local damage = MergeConfig.damageForTier(tier)
 
 	-- A launch is allowed to land anywhere, including empty and unclaimed map
 	-- space. Every other player's live squishies are checked spatially; an empty

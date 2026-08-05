@@ -94,10 +94,12 @@ end
 	squishy. Called on every carry-state change, and again whenever its health
 	moves (someone else's launch can damage a squishy you are holding).
 
-	Health is the live current value. Damage mirrors Launch's own maths exactly
-	-- healthForTier * LAUNCH_DAMAGE_FRACTION -- and deliberately NOT
-	maxHealthForTier: the 2x Squishy Health pass raises how much a squishy can
-	take, not how hard it hits, and the readout must not promise otherwise.
+	Health is the live current value. Damage calls the same shared
+	MergeConfig.damageForTier the server's impact resolution uses, so the
+	readout cannot drift from what the launch actually does. That curve takes
+	no health multiplier by design: the 2x Squishy Health pass raises how much
+	a squishy can take, not how hard it hits, and the readout must not promise
+	otherwise.
 ]]
 local function refreshCarryInfo()
 	local health = healthLabel
@@ -110,7 +112,7 @@ local function refreshCarryInfo()
 	if damage ~= nil then
 		local tier = player:GetAttribute("CarryingTier")
 		if type(tier) == "number" then
-			damage.Text = Format.FormatNumber(MergeConfig.healthForTier(tier) * MergeConfig.LAUNCH_DAMAGE_FRACTION)
+			damage.Text = Format.FormatNumber(MergeConfig.damageForTier(tier))
 		else
 			damage.Text = "0"
 		end

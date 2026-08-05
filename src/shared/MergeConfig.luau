@@ -125,11 +125,15 @@ MergeConfig.MAX_OFFLINE_PLUS_SECONDS = 24 * 60 * 60
 -- to every one-second income pulse.
 MergeConfig.ACTIVITY_CHECKPOINT_INTERVAL = 60
 
--- Launch combat. A squishy's player-facing level is the same 1, 2, 4, 8...
--- value returned by incomeForTier/healthForTier, so one equal-level hit removes
--- exactly one quarter of an undamaged target's health. Fractional health is
--- intentional: rounding tier-1's 0.25 damage up to 1 would make it a one-shot.
-MergeConfig.LAUNCH_DAMAGE_FRACTION = 0.25
+-- Launch combat. Damage and health follow their own eighth-root curve (see
+-- damageForTier/healthForTier below), deliberately NOT the doubling income
+-- curve: a model-level-30 squishy out-earns a level-1 by 2^29, but only
+-- out-hits it by ~1.5x, so a veteran's base is never unassailable and a fresh
+-- one is never free. Health is exactly twice damage at every level, so one
+-- equal-level hit always removes half an undamaged target -- two hits to pop.
+MergeConfig.COMBAT_BASE = 300
+MergeConfig.COMBAT_TIER_EXPONENT = 1 / 8
+MergeConfig.HEALTH_TO_DAMAGE_RATIO = 2
 -- Horizontal blast radius around the chosen landing point. A 35-stud radius
 -- gives the circle a 70-stud diameter, matching one playable base area while
 -- naturally leaving the square base's corners outside the circle. Kept shared
@@ -221,10 +225,7 @@ MergeConfig.Tiers = {
 } :: { TierDef }
 
 --[[
-	The one place tier -> income is computed, so the server billboard (Phase
-	3's income tick) and the client's floating popups can never disagree on
-	what a given tier is worth -- both call this instead of each doing its
-	own math.
+	Shared model-level guard for every per-level curve below.
 
 	Guards its input the same way MergeService.sanitizeTier does (NaN
 	included -- every comparison against NaN is false, so it must be caught
@@ -232,21 +233,48 @@ MergeConfig.Tiers = {
 	Tier attribute, which is `any` from Luau's perspective and not something
 	this module can assume was validated upstream.
 ]]
-function MergeConfig.incomeForTier(tier: number): number
-	local safeTier = tier
-	if type(safeTier) ~= "number" or safeTier ~= safeTier then
-		safeTier = 1
+local function safeModelLevel(tier: number): number
+	if type(tier) ~= "number" or tier ~= tier then
+		return 1
 	end
-	safeTier = math.clamp(math.floor(safeTier), 1, MergeConfig.MAX_TIER)
-
-	return MergeConfig.BASE_INCOME * (2 ^ (safeTier - 1))
+	return math.clamp(math.floor(tier), 1, MergeConfig.MAX_TIER)
 end
 
--- Health deliberately mirrors the earning multiplier: a model-level-1
--- squishy has 1 max health, level 2 has 2, and so on through the configured
--- level 30. Route this through incomeForTier so the curves cannot drift.
+--[[
+	The one place tier -> income is computed, so the server billboard (Phase
+	3's income tick) and the client's floating popups can never disagree on
+	what a given tier is worth -- both call this instead of each doing its
+	own math.
+]]
+function MergeConfig.incomeForTier(tier: number): number
+	return MergeConfig.BASE_INCOME * (2 ^ (safeModelLevel(tier) - 1))
+end
+
+--[[
+	Launch damage dealt BY an attacking squishy of this model level, and the
+	one place that curve is computed -- the server's impact resolution and the
+	carry HUD's readout both call this rather than each doing its own math.
+
+	An eighth-root curve, so the whole 1..30 range lands inside a narrow
+	300..458 band. That is the point: merging buys income, not combat
+	dominance, and the two curves are independent on purpose (see the
+	COMBAT_BASE note above). Deliberately takes no health multiplier -- the 2x
+	Squishy Health pass raises how much a squishy can TAKE, not how hard it
+	hits.
+
+	Floored to an integer so every combat number in the game is whole: the
+	damage readout, the health bar and the persisted value all agree without
+	anyone having to render a fraction.
+]]
+function MergeConfig.damageForTier(tier: number): number
+	return math.floor(MergeConfig.COMBAT_BASE * (safeModelLevel(tier) ^ MergeConfig.COMBAT_TIER_EXPONENT))
+end
+
+-- Base max health, before the 2x Squishy Health pass. Routed through
+-- damageForTier so the two combat curves cannot drift: health is always
+-- exactly HEALTH_TO_DAMAGE_RATIO hits from an equal-level attacker.
 function MergeConfig.healthForTier(tier: number): number
-	return MergeConfig.incomeForTier(tier)
+	return MergeConfig.damageForTier(tier) * MergeConfig.HEALTH_TO_DAMAGE_RATIO
 end
 
 function MergeConfig.sanitizeSquishyHealthMultiplier(multiplier: any): number

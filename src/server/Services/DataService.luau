@@ -47,7 +47,7 @@ local log = Log.new("DataService")
 	WARNING (from Replica's own docs): no gaps in numeric tables, and no keys
 	that aren't strings or numbers. Those cannot be replicated.
 ]]
-local DATA_VERSION = 3
+local DATA_VERSION = 4
 local MAX_PROCESSED_PURCHASE_IDS = 200
 local MAX_PROCESSED_TICKET_TRANSFER_IDS = 500
 local MAX_TICKETS = 2 ^ 31 - 1
@@ -306,6 +306,30 @@ MIGRATIONS[2] = function(data: any)
 	uiSystem[oldBalanceKey] = nil
 	uiSystem[oldProcessedKey] = nil
 	uiSystem[oldPendingKey] = nil
+end
+
+-- v3 stored squishy health on the retired combat scale, where health mirrored
+-- the doubling income curve (1, 2, 4, ... 2^29). It is now MergeConfig's flat
+-- damageForTier * 2 band, so saved values are wrong in BOTH directions: a
+-- level-1 squishy saved at 1 HP would load at 1/600 and pop to any hit, while
+-- a level-25 one saved at 2^24 would silently clamp down to its new maximum.
+--
+-- Clearing the field rather than recomputing it here is deliberate:
+-- repairProfileData already refills a missing Health from the live formula,
+-- which keeps the max-health maths in exactly one place and applies the same
+-- full-health-on-level-change rule every merge and Spawn Level upgrade
+-- already follows. Position and model level are untouched -- players keep
+-- every squishy they earned, each one healed to full once.
+MIGRATIONS[3] = function(data: any)
+	local merge = data.Merge
+	if type(merge) ~= "table" or type(merge.Squishies) ~= "table" then
+		return
+	end
+	for _, entry in merge.Squishies do
+		if type(entry) == "table" then
+			entry.Health = nil
+		end
+	end
 end
 
 local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.4"
@@ -834,8 +858,9 @@ local function repairProfileData(data: any)
 			Tier = safeTier,
 			X = math.clamp(x, -1000, 1000),
 			Z = math.clamp(z, -1000, 1000),
-			-- Fractional health is intentional: 25% of a 2-HP squishy is 0.5,
-			-- and flooring that would make the test action deal 50% instead.
+			-- Not floored: MergeConfig's curve is integral on its own, but the
+			-- developer console's fractional test damage can still leave a
+			-- remainder, and rounding it here would silently heal the target.
 			Health = safeHealth,
 		})
 	end
