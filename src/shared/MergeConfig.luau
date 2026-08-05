@@ -113,6 +113,47 @@ MergeConfig.MERGE_VFX_SCALE = 1
 -- earning rate, which is the whole point of merging rather than just hoarding.
 MergeConfig.INCOME_INTERVAL = 1 -- seconds between income pulses
 MergeConfig.BASE_INCOME = 1 -- $ per pulse at tier 1
+
+--[[
+	The squeeze pot -- what Mush pays out. See Types.MergeObjectEntry's Pot
+	field for why this is derived from a timestamp instead of accumulated.
+
+	ADDITIVE, NOT A REDIRECT: passive income keeps paying the wallet in full and
+	the pot fills alongside it, so a player who never squeezes loses nothing.
+	Redirecting income here instead would mean an idle player earns nothing and
+	an active one runs 15 pickup-click-drop chores a minute (MAX_OBJECTS with a
+	one-at-a-time carry), which would make the game worse, not more tactile.
+	Set MUSH_POT_RATE to 0 to disable the whole mechanic without touching code.
+
+	The cap is what stops a squishy hoarding forever, and it is deliberately
+	tier-relative: a level 20 banks 20 doublings faster than a level 1, so a
+	flat coin cap would be meaningless at one end and punitive at the other.
+]]
+MergeConfig.MUSH_POT_RATE = 1 -- pot fills at this multiple of the tier's income
+MergeConfig.MUSH_POT_CAP_PULSES = 60 -- pot stops growing after this many pulses
+--[[
+	A loaded squishy drains over several clicks rather than one, so a big pot
+	FEELS big instead of resolving identically to a small one. The ceiling
+	matches the pulse cap through the log curve below: a fully capped pot lands
+	exactly on MUSH_MAX_DRAIN_CLICKS.
+
+	The debounce is what gates payout clicks -- deliberately NOT the mush
+	cooldown, which still governs the WalkSpeed boost. Draining six clicks at
+	the 1s cooldown would be six seconds of standing still; 0.15s is about
+	human mash speed while still bounding the request rate server-side.
+]]
+MergeConfig.MUSH_MAX_DRAIN_CLICKS = 6
+MergeConfig.MUSH_DRAIN_DEBOUNCE = 0.15
+--[[
+	A filling squishy visibly swells, so a loaded one is readable from across
+	the pad with no UI at all. Hard ceiling: potFor already clamps the pot to
+	the tier cap, so no combination of income multipliers, extra squishies, or
+	idle time can push the visual past this.
+
+	VISUAL ONLY -- see potScaleFor's note on why the gameplay root must never
+	be scaled.
+]]
+MergeConfig.MUSH_POT_MAX_SCALE = 3
 -- Offline income uses the exact same per-tier pulse as live income, capped so
 -- a long absence cannot destabilize the economy. Change this one value to
 -- tune the maximum banked duration.
@@ -248,6 +289,98 @@ end
 ]]
 function MergeConfig.incomeForTier(tier: number): number
 	return MergeConfig.BASE_INCOME * (2 ^ (safeModelLevel(tier) - 1))
+end
+
+-- Pot fields are attacker-influenced over a long enough horizon exactly like
+-- every other persisted number, and NaN defeats a plain `< 0` check, so both
+-- inputs go through this before any arithmetic can propagate garbage.
+local function finitePositive(value: any): number
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge or value < 0 then
+		return 0
+	end
+	return value
+end
+
+-- Tier-relative by construction: see MUSH_POT_CAP_PULSES' note on why a flat
+-- coin cap cannot work across a curve that doubles thirty times.
+function MergeConfig.potCapForTier(tier: number): number
+	return MergeConfig.incomeForTier(tier) * MergeConfig.MUSH_POT_RATE * MergeConfig.MUSH_POT_CAP_PULSES
+end
+
+--[[
+	The live squeeze pot: whatever was banked at the last write, plus everything
+	that has accrued since, clamped to the tier's cap. This is the ONLY thing
+	that should read entry.Pot/entry.PotSince -- see Types.MergeObjectEntry.
+
+	A zero/absent PotSince means "never started accruing" and yields the banked
+	amount alone, so an entry written before this field existed reads as an
+	empty pot and begins filling from its first write rather than retroactively
+	banking the whole time it sat in the profile.
+]]
+function MergeConfig.potFor(banked: any, since: any, tier: number, now: any): number
+	local cap = MergeConfig.potCapForTier(tier)
+	if cap <= 0 then
+		return 0
+	end
+
+	local pot = finitePositive(banked)
+	local startedAt = finitePositive(since)
+	local currentTime = finitePositive(now)
+	if startedAt > 0 and currentTime > startedAt then
+		local pulses = (currentTime - startedAt) / MergeConfig.INCOME_INTERVAL
+		pot += MergeConfig.incomeForTier(tier) * MergeConfig.MUSH_POT_RATE * pulses
+	end
+
+	return math.min(pot, cap)
+end
+
+--[[
+	How many clicks it takes to drain `pot` at this tier. Logarithmic in banked
+	pulses so the count climbs with the pot without ever running away: a pot at
+	MUSH_POT_CAP_PULSES lands exactly on MUSH_MAX_DRAIN_CLICKS, and anything
+	under one pulse still pays out in a single click rather than being unclaimable.
+]]
+function MergeConfig.drainClicksForPot(pot: any, tier: number): number
+	local perPulse = MergeConfig.incomeForTier(tier) * MergeConfig.MUSH_POT_RATE
+	local banked = finitePositive(pot)
+	if perPulse <= 0 or banked <= 0 then
+		return 0
+	end
+
+	local pulses = banked / perPulse
+	if pulses <= 1 then
+		return 1
+	end
+	return math.clamp(math.ceil(math.log(pulses, 2)), 1, MergeConfig.MUSH_MAX_DRAIN_CLICKS)
+end
+
+--[[
+	How much a squishy swells to advertise its pot: 1 when empty, rising to
+	MUSH_POT_MAX_SCALE at the cap. This is what makes a loaded squishy readable
+	from across the pad without any UI, and it deflates on its own as drain
+	clicks eat the pot, because it is derived from the pot rather than tracked.
+
+	Hard-capped by potFor's own clamp, so no amount of extra squishies, income
+	multipliers, or idle time can push it past MUSH_POT_MAX_SCALE.
+
+	VISUAL ONLY. The caller must apply this to the Visual children's welds and
+	sizes, never to the MergeObject root -- pad packing, drop placement, and
+	merge detection all measure the root, and growing it would silently change
+	how many squishies fit on a pad. MushController's squash follows the same
+	rule for the same reason.
+
+	Square-rooted rather than linear: the pot is only interesting once it has
+	something in it, and a linear ramp spends most of its visible range on the
+	back half where the player has already decided to go squeeze it.
+]]
+function MergeConfig.potScaleFor(pot: any, tier: number): number
+	local cap = MergeConfig.potCapForTier(tier)
+	if cap <= 0 then
+		return 1
+	end
+
+	local fill = math.clamp(finitePositive(pot) / cap, 0, 1)
+	return 1 + (MergeConfig.MUSH_POT_MAX_SCALE - 1) * math.sqrt(fill)
 end
 
 --[[

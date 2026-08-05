@@ -19,9 +19,11 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Log = require(ReplicatedStorage.Shared.Log)
+local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Motion = require(script.Parent.Parent.UI.Motion)
 local Net = require(ReplicatedStorage.Shared.Net)
 local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
+local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 
 local log = Log.new("MushController")
 
@@ -33,7 +35,31 @@ local SQUASH_IN = TweenInfo.new(0.16, Enum.EasingStyle.Sine, Enum.EasingDirectio
 local SQUASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 local SQUASH_HOLD = 0.08
 local REQUEST_TIMEOUT = 1
-local COOLDOWN_FALLBACK = 5
+
+--[[
+	Money burst. A loaded squishy drains over several clicks (see
+	MergeConfig.drainClicksForPot), and every click in that sequence escalates:
+	the burst grows and the sound pitches up, so the last click of a big drain
+	lands hardest. A one-click drain is treated as the final click and gets the
+	full-size burst rather than the smallest one.
+
+	Scale is deliberately modest at the top. The authored asset is already sized
+	for a squishy, and VfxScaler multiplies particle SIZE -- a large multiplier
+	produces coins bigger than the thing that dropped them.
+]]
+local MONEY_BURST_ASSET = "MoneyBurst"
+local MONEY_BURST_MIN_SCALE = 0.85
+local MONEY_BURST_MAX_SCALE = 1.9
+local MONEY_BURST_MIN_COUNT_FACTOR = 0.6
+local MONEY_BURST_MAX_COUNT_FACTOR = 1.4
+-- Hard per-emitter ceiling. One player can mush every MUSH_DRAIN_DEBOUNCE, and
+-- a full server doing that at once is the case this has to stay cheap in.
+local MONEY_BURST_MAX_PARTICLES = 120
+-- Comfortably past the asset's longest particle Lifetime, so the clone is only
+-- ever destroyed after its last coin has gone.
+local MONEY_BURST_CLEANUP = 2.5
+local MUSH_PITCH_MIN = 1
+local MUSH_PITCH_MAX = 1.35
 local HIDDEN_COOLDOWN_TEXT = ""
 local INSTRUCTION_FADE_DELAY = 1
 local INSTRUCTION_FADE_INFO = TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
@@ -70,6 +96,9 @@ local instructionPulseMotion: Motion.Handle? = nil
 local instructionVisibilityConnection: RBXScriptConnection? = nil
 local instructionFadeRevision = 0
 local requestPending = false
+-- Local mirror of the server's mash debounce. Purely to keep the wire quiet
+-- while a player holds the mouse down; the server enforces its own regardless.
+local nextRequestAllowed = 0
 local activeSquishes: { [BasePart]: boolean } = {}
 
 local function findCarriedRoot(): BasePart?
@@ -109,12 +138,72 @@ end
 -- is ample -- this is a deliberate behaviour change from the previous
 -- unlimited-range rolloff (SoundId was assigned raw, with no RollOffMode at
 -- all, so the engine default Inverse had no cutoff) down to 80 studs.
-local function playMushSound(root: BasePart, soundId: string, volume: number)
+--[[
+	Where this click sits in the squishy's drain, as 0..1. A single-click drain
+	returns 1: one click IS the last click, and it should land like one rather
+	than getting the smallest, quietest burst in the set.
+]]
+local function drainRamp(step: number, total: number): number
+	if total <= 1 then
+		return 1
+	end
+	return math.clamp((step - 1) / (total - 1), 0, 1)
+end
+
+--[[
+	Fires the coin burst at the carried squishy, escalating with `ramp`.
+
+	Resolved defensively per call rather than cached: Assets.MoneyBurst lives in
+	the place file, not on disk, so a session that predates it must fall through
+	silently -- a missing effect asset is not a reason to break the mush.
+
+	The clone is anchored and unparented from the squishy's motion on purpose:
+	coins should stay where they were thrown, not ride the model as the player
+	walks off.
+]]
+local function emitMoneyBurst(root: BasePart, ramp: number)
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local template = if assets ~= nil then assets:FindFirstChild(MONEY_BURST_ASSET) else nil
+	if template == nil or not template:IsA("BasePart") then
+		return
+	end
+
+	local clone = template:Clone()
+	-- motion = true so a bigger burst throws coins proportionally further.
+	-- Scaling size alone just makes fatter coins in the same volume, which
+	-- reads as a rendering glitch rather than a bigger payout.
+	local scale = MONEY_BURST_MIN_SCALE + (MONEY_BURST_MAX_SCALE - MONEY_BURST_MIN_SCALE) * ramp
+	VfxScaler.scale(clone, scale, { motion = true })
+
+	clone.CFrame = root.CFrame
+	clone.Parent = root
+
+	local countFactor = MONEY_BURST_MIN_COUNT_FACTOR
+		+ (MONEY_BURST_MAX_COUNT_FACTOR - MONEY_BURST_MIN_COUNT_FACTOR) * ramp
+	for _, emitter in clone:GetChildren() do
+		if emitter:IsA("ParticleEmitter") then
+			local authored = emitter:GetAttribute("EmitCount")
+			local base = if type(authored) == "number" then authored else 10
+			emitter:Emit(math.clamp(math.round(base * countFactor), 1, MONEY_BURST_MAX_PARTICLES))
+		end
+	end
+
+	task.delay(MONEY_BURST_CLEANUP, function()
+		clone:Destroy()
+	end)
+end
+
+local function playMushSound(root: BasePart, soundId: string, volume: number, pitch: number)
 	if soundId == "" then
 		return
 	end
 
-	SoundKit.playOnId(root, "MushSound", soundId, nil, math.clamp(volume, 0, 10), SoundKit.Profiles.LOCAL_POP)
+	local sound =
+		SoundKit.playOnId(root, "MushSound", soundId, nil, math.clamp(volume, 0, 10), SoundKit.Profiles.LOCAL_POP)
+	-- Pitch climbs across a drain so six clicks build instead of repeating.
+	if sound ~= nil then
+		sound.PlaybackSpeed = pitch
+	end
 end
 
 local function squashGeometry(root: BasePart, direction: string): (Vector3, Vector3)
@@ -244,15 +333,14 @@ local function updateCooldownDisplay()
 	local boostActive = player:GetAttribute("MushBoostActive") == true
 	setCooldownGradient(boostActive or requestPending)
 
-	if boostActive then
-		local rawEndsAt = player:GetAttribute("MushBoostEndsAt")
-		local remaining = if type(rawEndsAt) == "number"
-			then math.max(0, rawEndsAt - Workspace:GetServerTimeNow())
-			else COOLDOWN_FALLBACK
-		setDisplayText(`{math.max(1, math.ceil(remaining))}`)
-	else
-		setDisplayText(HIDDEN_COOLDOWN_TEXT)
-	end
+	--[[
+		No countdown any more. This label used to show the boost's remaining
+		seconds because the boost WAS the cooldown; at MUSH_BOOST_DURATION it
+		would now just flicker a "2"/"1" while the player squeezes, which reads
+		as a broken timer rather than state. The gradient above still carries
+		"boost is up", which is the only part that was ever legible.
+	]]
+	setDisplayText(HIDDEN_COOLDOWN_TEXT)
 end
 
 local function cancelInstructionMotions()
@@ -396,24 +484,32 @@ end
 
 local function requestMush()
 	local root = findCarriedRoot()
-	if
-		requestPending
-		or player:GetAttribute("MushBoostActive") == true
-		or player:GetAttribute("CarryingTier") == nil
-		or root == nil
-	then
+	if requestPending or player:GetAttribute("CarryingTier") == nil or root == nil then
 		return
 	end
+
+	--[[
+		Deliberately NOT gated on MushBoostActive any more. The boost used to
+		double as the cooldown, so refusing while boosted was the throttle; now
+		that a loaded squishy drains over several clicks, that guard would block
+		every click after the first for the whole boost duration.
+	]]
+	local now = os.clock()
+	if now < nextRequestAllowed then
+		return
+	end
+	nextRequestAllowed = now + MergeConfig.MUSH_DRAIN_DEBOUNCE
 
 	requestPending = true
 	updateCooldownDisplay()
 	Net.mergeMushRequest.send()
 
+	-- Unconditional release: the reply clears this the moment it lands, and
+	-- tying the fallback to MushBoostActive would strand requestPending true
+	-- for as long as a refreshing boost stays up.
 	task.delay(REQUEST_TIMEOUT, function()
-		if player:GetAttribute("MushBoostActive") ~= true then
-			requestPending = false
-			updateCooldownDisplay()
-		end
+		requestPending = false
+		updateCooldownDisplay()
 	end)
 end
 
@@ -426,8 +522,17 @@ function MushController.Init()
 		if root == nil or root:GetAttribute("Tier") ~= data.tier then
 			return
 		end
-		playMushSound(root, data.soundId, data.soundVolume)
+
+		-- A mush on an empty squishy is still a real mush -- squash, sound,
+		-- speed boost -- it just has no money in it, so it stays at base pitch
+		-- and skips the burst entirely.
+		local ramp = if data.payout > 0 then drainRamp(data.drainStep, data.drainTotal) else 0
+		playMushSound(root, data.soundId, data.soundVolume, MUSH_PITCH_MIN + (MUSH_PITCH_MAX - MUSH_PITCH_MIN) * ramp)
 		squashVisual(root, data.direction)
+
+		if data.payout > 0 then
+			emitMoneyBurst(root, ramp)
+		end
 	end)
 
 	local boostChanged = player:GetAttributeChangedSignal("MushBoostActive")

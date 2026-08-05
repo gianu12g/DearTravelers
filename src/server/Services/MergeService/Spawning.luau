@@ -364,6 +364,32 @@ local function findOpenSpotAmongEntries(
 	return nil, nil
 end
 
+--[[
+	The one place a draft becomes a real entry, so both placement strategies
+	below cannot drift apart on what a new squishy starts with.
+
+	Drafts are squishies that did not exist before this call -- purchased units,
+	or the results of compacting a full board -- so the pot starts empty and
+	begins filling immediately.
+
+	KNOWN LOSS: squishies consumed by compaction take their pots with them. The
+	`fixedEntries` survivors keep their original tables and therefore their
+	pots, but a compacted pair's banked money is discarded rather than folded
+	into the result. It is bounded by the tier pot cap and only reachable
+	through a purchase, so it is a small silent loss rather than an exploit --
+	worth folding in if compaction ever becomes routine.
+]]
+local function entryFromDraft(draft: SquishyDraft, x: number, z: number): Types.MergeObjectEntry
+	return {
+		Tier = draft.Tier,
+		X = math.round(x * 100) / 100,
+		Z = math.round(z * 100) / 100,
+		Health = draft.Health,
+		Pot = 0,
+		PotSince = os.time(),
+	}
+end
+
 local function entriesFromRandomPlacement(
 	spawnArea: BasePart,
 	drafts: { SquishyDraft },
@@ -378,12 +404,7 @@ local function entriesFromRandomPlacement(
 		if x == nil or z == nil then
 			return nil
 		end
-		table.insert(entries, {
-			Tier = draft.Tier,
-			X = math.round(x * 100) / 100,
-			Z = math.round(z * 100) / 100,
-			Health = draft.Health,
-		})
+		table.insert(entries, entryFromDraft(draft, x, z))
 	end
 	return entries
 end
@@ -420,12 +441,7 @@ local function entriesFromFallbackLattice(spawnArea: BasePart, drafts: { Squishy
 		local rowCount = math.min(columns, count - row * columns)
 		local x = (column - (rowCount - 1) / 2) * step
 		local z = (row - (rows - 1) / 2) * step
-		table.insert(entries, {
-			Tier = draft.Tier,
-			X = math.round(x * 100) / 100,
-			Z = math.round(z * 100) / 100,
-			Health = draft.Health,
-		})
+		table.insert(entries, entryFromDraft(draft, x, z))
 	end
 	return entries
 end
@@ -735,6 +751,13 @@ function Spawning.setSpawnLevel(player: Player, requestedLevel: number): (boolea
 				X = entry.X,
 				Z = entry.Z,
 				Health = MergeConfig.maxHealthForTier(spawnLevel, healthMultiplier),
+				-- A Spawn Level upgrade is not a merge: the squishy is the same
+				-- object in the same spot, so its pot rides along untouched. The
+				-- raised tier does make it fill faster from here, which is the
+				-- same "the upgrade improves what you already own" rule the full
+				-- heal above follows.
+				Pot = entry.Pot,
+				PotSince = entry.PotSince,
 			})
 		else
 			table.insert(updated, entry)
@@ -949,6 +972,10 @@ function Spawning.trySpawnObject(player: Player, live: Types.LiveBase)
 		X = roundedX,
 		Z = roundedZ,
 		Health = MergeConfig.maxHealthForTier(tier, data.Merge.SquishyHealthMultiplier),
+		-- Starts empty and begins filling the moment it exists. os.time() to
+		-- match every other PotSince stamp -- see DataService's Squishies note.
+		Pot = 0,
+		PotSince = os.time(),
 	}
 
 	-- Append incrementally: auto-spawn runs every few seconds, so replacing the

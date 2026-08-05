@@ -144,11 +144,21 @@ local function commitPair(player: Player, job: AutoMergeJob, midpoint: Vector3):
 
 	local localMidpoint = job.live.spawnArea.CFrame:PointToObjectSpace(midpoint)
 	local newTier = job.entryA.Tier + 1
+	-- Both pots carry into the result, exactly as a manual merge does (see
+	-- Carry.commitMerge's note). Auto-merge absorbing pots silently would mean
+	-- the pass that is meant to save the player work also quietly spends their
+	-- banked squeeze money.
+	local nowSeconds = os.time()
+	local mergedPot = MergeConfig.potFor(job.entryA.Pot, job.entryA.PotSince, job.entryA.Tier, nowSeconds)
+		+ MergeConfig.potFor(job.entryB.Pot, job.entryB.PotSince, job.entryB.Tier, nowSeconds)
+
 	local newEntry: Types.MergeObjectEntry = {
 		Tier = newTier,
 		X = math.round(localMidpoint.X * 100) / 100,
 		Z = math.round(localMidpoint.Z * 100) / 100,
 		Health = MergeConfig.maxHealthForTier(newTier, data.Merge.SquishyHealthMultiplier),
+		Pot = math.min(mergedPot, MergeConfig.potCapForTier(newTier)),
+		PotSince = nowSeconds,
 	}
 
 	local updated = table.create(#data.Merge.Squishies)

@@ -106,7 +106,13 @@ local TEMPLATE = {
 		small enough not to need a shared type to stay in sync.
 	]]
 	Merge = {
-		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number } },
+		-- Pot/PotSince are the squeeze pot Mush pays out. Optional because they
+		-- are backfilled by repairProfileData rather than Reconcile: Reconcile
+		-- fills missing TOP-LEVEL fields, never the contents of array elements,
+		-- so every pre-existing squishy arrives without them. PotSince is a
+		-- wall-clock os.time() stamp, matching LastActiveAt above -- server
+		-- time would be meaningless the moment a player rejoins another server.
+		Squishies = {} :: { { Tier: number, X: number, Z: number, Health: number, Pot: number?, PotSince: number? } },
 		-- Persisted so the permanent health pass can upgrade existing current
 		-- health exactly once and preserve doubled maximum health across rejoins.
 		SquishyHealthMultiplier = 1,
@@ -817,6 +823,10 @@ local function repairProfileData(data: any)
 	-- (developer tools, old versions, or a migration bug), so restoration is
 	-- bounded by the same absolute gameplay ceiling used everywhere else.
 	local compactSquishies = {}
+	-- Wall clock, matching Merge.LastActiveAt: PotSince has to stay comparable
+	-- across sessions and across servers, which Workspace:GetServerTimeNow()
+	-- would not be. Hoisted so every repaired entry in one load shares a stamp.
+	local nowSeconds = os.time()
 	for _, entry in data.Merge.Squishies do
 		if #compactSquishies >= MergeConfig.MAX_OBJECTS then
 			break
@@ -854,6 +864,26 @@ local function repairProfileData(data: any)
 		local safeTier = math.clamp(originalTier, data.Merge.SpawnLevel, maximumTier)
 		local maxHealth = MergeConfig.maxHealthForTier(safeTier, data.Merge.SquishyHealthMultiplier)
 		local safeHealth = if safeTier ~= originalTier then maxHealth else math.min(originalHealth, maxHealth)
+		--[[
+			Squeeze pot. A missing or nonsense PotSince is started from now
+			rather than left at 0: potFor reads 0 as "never started accruing",
+			so a squishy saved before this field existed would otherwise stay
+			permanently empty instead of beginning to fill on this load.
+
+			A preserved PotSince deliberately keeps accruing across the offline
+			gap -- capped at the tier's pot ceiling by potFor, so the most a
+			long absence can produce is a padful of full squishies to squeeze,
+			which is the intended returning-player moment rather than a windfall.
+
+			Pot is clamped to this tier's cap for the same reason every other
+			persisted number here is bounded: profile data is attacker-influenced
+			over a long enough horizon.
+		]]
+		local potSince = finiteInteger(entry.PotSince, 0, 2 ^ 53 - 1, 0)
+		if potSince <= 0 or potSince > nowSeconds then
+			potSince = nowSeconds
+		end
+
 		table.insert(compactSquishies, {
 			Tier = safeTier,
 			X = math.clamp(x, -1000, 1000),
@@ -862,6 +892,8 @@ local function repairProfileData(data: any)
 			-- developer console's fractional test damage can still leave a
 			-- remainder, and rounding it here would silently heal the target.
 			Health = safeHealth,
+			Pot = finiteNumber(entry.Pot, 0, MergeConfig.potCapForTier(safeTier), 0),
+			PotSince = potSince,
 		})
 	end
 	data.Merge.Squishies = compactSquishies

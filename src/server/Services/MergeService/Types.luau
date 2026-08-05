@@ -20,6 +20,28 @@ export type MergeObjectEntry = {
 	X: number,
 	Z: number,
 	Health: number,
+	--[[
+		The squeeze pot -- money this squishy has banked for Mush to pay out.
+
+		DERIVED, NOT ACCUMULATED. Income pulses every INCOME_INTERVAL (1s) and
+		a pad holds up to MAX_OBJECTS (15) squishies, so accruing into these
+		fields per pulse would mean up to 15 replicated profile writes a second
+		per player -- exactly what Income.runTick's own header refuses to do for
+		coin grants. Instead PotSince records when the pot was last emptied and
+		MergeConfig.potFor computes the live value on demand. Nothing ticks;
+		writes happen only on mush, merge, and drop, which are all player-driven
+		and already rate-limited.
+
+		Pot is the amount banked at the last write (carried in from merges, or
+		the remainder of a partial drain). PotSince is the Workspace server
+		timestamp that amount started growing from.
+
+		Both are optional so an entry built by a site that predates this field
+		reads as an empty pot rather than erroring -- see MergeConfig.potFor,
+		which is the only thing that should ever read them.
+	]]
+	Pot: number?,
+	PotSince: number?,
 }
 
 export type BaseRecord = {

@@ -329,14 +329,30 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 			value = ByteNet.nothing,
 		}),
 
-		-- server -> requesting client. Confirms an accepted Mush and provides
-		-- the server-read per-tier audio configuration for local ASMR playback.
+		--[[
+			server -> requesting client. Confirms an accepted Mush and provides
+			the server-read per-tier audio configuration for local ASMR playback.
+
+			payout is what this click actually paid out of the squishy's squeeze
+			pot -- 0 for a mush on an empty squishy, which is still a legitimate
+			mush (squash, sound, speed boost) with no money burst. float64
+			because the coin curve doubles thirty times and an integer wire type
+			would overflow long before the top tier.
+
+			drainStep/drainTotal are 1-based and describe where this click sits
+			in the squishy's drain, so the client can ramp the burst size and
+			sound pitch across the sequence. Both are 0 when payout is 0. uint8
+			is ample: drainTotal is bounded by MUSH_MAX_DRAIN_CLICKS.
+		]]
 		mergeMushActivated = ByteNet.definePacket({
 			value = ByteNet.struct({
 				tier = ByteNet.uint8,
 				soundId = ByteNet.string,
 				soundVolume = ByteNet.float64,
 				direction = ByteNet.string,
+				payout = ByteNet.float64,
+				drainStep = ByteNet.uint8,
+				drainTotal = ByteNet.uint8,
 			}),
 		}),
 

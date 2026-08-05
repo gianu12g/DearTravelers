@@ -15,6 +15,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
+local CoinsService = require(script.Parent.Parent.CoinsService)
 local DataService = require(script.Parent.Parent.DataService)
 local Launch = require(script.Parent.Launch)
 local Log = require(ReplicatedStorage.Shared.Log)
@@ -49,8 +50,38 @@ local mushBoosts: { [Player]: Types.MushBoostState } = {}
 -- a new, legitimate attempt.
 local maxLevelNotifiedCarry: { [Player]: Types.CarryState } = {}
 
+--[[
+	Last os.clock() at which this player's mush was accepted. This -- not the
+	WalkSpeed boost -- is what rate-limits mushing now.
+
+	The two used to be the same timer: activateMush refused while a boost was
+	running, so the boost duration doubled as the cooldown. That cannot work
+	once a loaded squishy drains over several clicks, because a multi-click
+	drain at a multi-second cooldown is just standing still. They are now
+	independent: payout clicks are bounded by MUSH_DRAIN_DEBOUNCE (about human
+	mash speed, and a real server-side request bound), while the boost refreshes
+	on its own duration below.
+]]
+local mushDebounce: { [Player]: number } = {}
+
+--[[
+	How far into the current squishy's drain this player is, so the client can
+	ramp the burst and the sound pitch across the sequence instead of playing
+	six identical clicks.
+
+	Keyed to the exact CarryState rather than the player alone: picking up a
+	different squishy (or the same one again) is a new drain and must restart
+	the ramp. Counting steps here rather than re-deriving one from the pot is
+	deliberate -- the pot shrinks non-linearly as it drains, so a derived index
+	would stutter.
+]]
+local drainProgress: { [Player]: { carry: Types.CarryState, step: number } } = {}
+
 local MUSH_BOOST_AMOUNT = 5
-local MUSH_BOOST_DURATION = 5
+-- Short enough that continuous squeezing keeps you fast but it lapses shortly
+-- after you stop. A long duration paired with the fast debounce above would
+-- make the boost permanently on for anyone holding a squishy.
+local MUSH_BOOST_DURATION = 2
 
 local Carry = {}
 
@@ -64,6 +95,8 @@ end
 -- latch entirely so the table does not carry a stale entry for a Player
 -- instance that will never rejoin.
 function Carry.clearPlayer(player: Player)
+	mushDebounce[player] = nil
+	drainProgress[player] = nil
 	maxLevelNotifiedCarry[player] = nil
 end
 
@@ -119,11 +152,31 @@ local function commitMerge(
 		return
 	end
 
+	local mergedTier = carry.entry.Tier + 1
+	--[[
+		Both pots come along. Merging is the one place two squishies become one,
+		and quietly eating their banked money would punish the exact action the
+		whole game is built around.
+
+		Summed as DERIVED values rather than raw Pot fields, so whatever accrued
+		since each one's last write is included rather than lost.
+
+		The clamp is almost never reached and that is by construction: income
+		doubles per tier, so two full pots at tier N sum to exactly the cap at
+		tier N+1. A player who fills two squishies and merges them keeps the
+		whole thing.
+	]]
+	local nowSeconds = os.time()
+	local mergedPot = MergeConfig.potFor(carry.entry.Pot, carry.entry.PotSince, carry.entry.Tier, nowSeconds)
+		+ MergeConfig.potFor(targetEntry.Pot, targetEntry.PotSince, targetEntry.Tier, nowSeconds)
+
 	local newEntry: Types.MergeObjectEntry = {
-		Tier = carry.entry.Tier + 1,
+		Tier = mergedTier,
 		X = targetEntry.X,
 		Z = targetEntry.Z,
-		Health = MergeConfig.maxHealthForTier(carry.entry.Tier + 1, data.Merge.SquishyHealthMultiplier),
+		Health = MergeConfig.maxHealthForTier(mergedTier, data.Merge.SquishyHealthMultiplier),
+		Pot = math.min(mergedPot, MergeConfig.potCapForTier(mergedTier)),
+		PotSince = nowSeconds,
 	}
 
 	local updated = table.create(#data.Merge.Squishies)
@@ -402,6 +455,10 @@ function Carry.dropCarried(player: Player)
 		X = roundedX,
 		Z = roundedZ,
 		Health = carry.entry.Health,
+		-- Dropping is not collecting: a partially drained squishy keeps whatever
+		-- is left, so walking away mid-drain never destroys banked money.
+		Pot = carry.entry.Pot,
+		PotSince = carry.entry.PotSince,
 	}
 
 	-- Splice the fresh entry in place of the old one rather than mutating
@@ -442,9 +499,124 @@ function Carry.clearMushBoost(player: Player)
 	end
 end
 
+--[[
+	Ends the boost once its CURRENT end time passes, re-arming itself if a
+	further mush pushed that end time out while this timer was running.
+
+	The boost refreshes far faster than it expires now (MUSH_DRAIN_DEBOUNCE vs
+	MUSH_BOOST_DURATION), so a plain task.delay per activation would either
+	clear the boost early or need one timer per click. This keeps exactly one
+	timer alive per boost, however many times it is refreshed.
+]]
+local function scheduleBoostExpiry(player: Player, state: Types.MushBoostState, delay: number)
+	task.delay(delay, function()
+		if mushBoosts[player] ~= state then
+			return -- already cleared, or replaced by a newer boost
+		end
+
+		local endsAt = player:GetAttribute("MushBoostEndsAt")
+		local remaining = if type(endsAt) == "number" then endsAt - Workspace:GetServerTimeNow() else 0
+		if remaining > 0.05 then
+			scheduleBoostExpiry(player, state, remaining)
+			return
+		end
+
+		Carry.clearMushBoost(player)
+	end)
+end
+
+--[[
+	Pays one drain click of the carried squishy's pot, returning (payout, step,
+	totalSteps) -- 0 when there is nothing worth paying.
+
+	Writes NOTHING on a zero payout. Resetting PotSince on an empty pot would
+	discard accrual the player was never paid for, which would make spamming
+	mush on a fresh squishy a way to keep it permanently empty.
+]]
+local function drainCarriedPot(player: Player, carry: Types.CarryState): (number, number, number)
+	local data = DataService.getData(player)
+	if data == nil then
+		return 0, 0, 0
+	end
+
+	local tier = Types.sanitizeTier(carry.entry.Tier)
+	local nowSeconds = os.time()
+	local pot = MergeConfig.potFor(carry.entry.Pot, carry.entry.PotSince, tier, nowSeconds)
+	local totalSteps = MergeConfig.drainClicksForPot(pot, tier)
+	if totalSteps <= 0 then
+		return 0, 0, 0
+	end
+
+	-- Coins are integer-owned across the whole economy, so a per-click share
+	-- that rounds below 1 would pay nothing and leave the pot stuck forever.
+	-- Take the remainder in a single click instead of splitting it into
+	-- unpayable slivers.
+	local payout = math.floor(pot / totalSteps)
+	if payout < 1 then
+		payout = math.floor(pot)
+	end
+	if payout < 1 then
+		return 0, 0, 0
+	end
+
+	-- The same identity guard dropCarried uses: a stale CarryState must never
+	-- pay out against a squishy the profile no longer holds.
+	local entryIndex = table.find(data.Merge.Squishies, carry.entry)
+	if entryIndex == nil then
+		return 0, 0, 0
+	end
+
+	--[[
+		Pay BEFORE spending the pot. If CoinsService refuses (no profile, or the
+		player is at the coin ceiling) the pot must stay exactly where it was --
+		emptying it first would delete money the player never received.
+
+		Safe to order this way because CoinsService.add does not yield: it
+		re-enters QuestsService.award, which is itself yield-free, so nothing
+		can observe or mutate this entry between the credit and the splice below.
+	]]
+	if not CoinsService.add(player, payout) then
+		return 0, 0, 0
+	end
+
+	local newEntry: Types.MergeObjectEntry = {
+		Tier = carry.entry.Tier,
+		X = carry.entry.X,
+		Z = carry.entry.Z,
+		Health = carry.entry.Health,
+		Pot = math.max(pot - payout, 0),
+		PotSince = nowSeconds,
+	}
+
+	-- Splice rather than mutate, and move every live reference onto the new
+	-- table together -- see dropCarried's note on the same rule.
+	DataService.set(player, { "Merge", "Squishies", entryIndex }, newEntry)
+	carry.entry = newEntry
+	local live = liveBases[player]
+	if live ~= nil then
+		live.parts[carry.part] = newEntry
+	end
+
+	local progress = drainProgress[player]
+	if progress == nil or progress.carry ~= carry then
+		progress = { carry = carry, step = 0 }
+		drainProgress[player] = progress
+	end
+	progress.step = math.min(progress.step + 1, totalSteps)
+
+	return payout, progress.step, totalSteps
+end
+
 function Carry.activateMush(player: Player)
 	local carry = carries[player]
-	if carry == nil or mushBoosts[player] ~= nil then
+	if carry == nil then
+		return
+	end
+
+	-- Mash debounce, not the boost, is the gate now -- see mushDebounce's note.
+	local now = os.clock()
+	local blockedUntil = mushDebounce[player]
+	if blockedUntil ~= nil and now < blockedUntil then
 		return
 	end
 
@@ -453,29 +625,46 @@ function Carry.activateMush(player: Player)
 	if humanoid == nil or humanoid.Health <= 0 then
 		return
 	end
+	mushDebounce[player] = now + MergeConfig.MUSH_DRAIN_DEBOUNCE
 
-	local state: Types.MushBoostState = {
-		humanoid = humanoid,
-		originalWalkSpeed = humanoid.WalkSpeed,
-	}
-	mushBoosts[player] = state
-	player:SetAttribute("MushBoostEndsAt", Workspace:GetServerTimeNow() + MUSH_BOOST_DURATION)
-	player:SetAttribute("MushBoostActive", true)
-	humanoid.WalkSpeed = state.originalWalkSpeed + MUSH_BOOST_AMOUNT
+	local existing = mushBoosts[player]
+	if existing ~= nil then
+		--[[
+			Refresh, never re-apply. Re-reading humanoid.WalkSpeed here while the
+			boost is already applied would bake the bonus into originalWalkSpeed
+			and make it permanent -- a compounding speed exploit at one click per
+			MUSH_DRAIN_DEBOUNCE.
+		]]
+		if existing.humanoid.Parent ~= nil then
+			existing.humanoid.WalkSpeed = existing.originalWalkSpeed + MUSH_BOOST_AMOUNT
+		end
+		player:SetAttribute("MushBoostEndsAt", Workspace:GetServerTimeNow() + MUSH_BOOST_DURATION)
+	else
+		local state: Types.MushBoostState = {
+			humanoid = humanoid,
+			originalWalkSpeed = humanoid.WalkSpeed,
+		}
+		mushBoosts[player] = state
+		player:SetAttribute("MushBoostEndsAt", Workspace:GetServerTimeNow() + MUSH_BOOST_DURATION)
+		player:SetAttribute("MushBoostActive", true)
+		humanoid.WalkSpeed = state.originalWalkSpeed + MUSH_BOOST_AMOUNT
+		scheduleBoostExpiry(player, state, MUSH_BOOST_DURATION)
+	end
+
+	local payout, drainStep, drainTotal = drainCarriedPot(player, carry)
 
 	local tier = Types.sanitizeTier(carry.entry.Tier)
 	local soundId, soundVolume = MergeObjectVisuals.getMushSound(tier)
 	local direction = MergeObjectVisuals.getMushDirection(tier)
-	Net.mergeMushActivated.sendTo(
-		{ tier = tier, soundId = soundId, soundVolume = soundVolume, direction = direction },
-		player
-	)
-
-	task.delay(MUSH_BOOST_DURATION, function()
-		if mushBoosts[player] == state then
-			Carry.clearMushBoost(player)
-		end
-	end)
+	Net.mergeMushActivated.sendTo({
+		tier = tier,
+		soundId = soundId,
+		soundVolume = soundVolume,
+		direction = direction,
+		payout = payout,
+		drainStep = drainStep,
+		drainTotal = drainTotal,
+	}, player)
 end
 
 return Carry

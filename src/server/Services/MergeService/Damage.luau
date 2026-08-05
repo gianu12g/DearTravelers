@@ -51,7 +51,16 @@ function Damage.getSquishies(player: Player): { Types.MergeObjectEntry }?
 
 	local copy: { Types.MergeObjectEntry } = {}
 	for _, entry in data.Merge.Squishies do
-		table.insert(copy, { Tier = entry.Tier, X = entry.X, Z = entry.Z, Health = entry.Health })
+		-- Pot/PotSince ride along untouched: this copy exists to rewrite health,
+		-- and taking damage is not a reason to lose banked squeeze money.
+		table.insert(copy, {
+			Tier = entry.Tier,
+			X = entry.X,
+			Z = entry.Z,
+			Health = entry.Health,
+			Pot = entry.Pot,
+			PotSince = entry.PotSince,
+		})
 	end
 	return copy
 end
@@ -91,6 +100,10 @@ function Damage.applyHealthMultiplier(player: Player, requestedMultiplier: numbe
 				MergeConfig.maxHealthForTier(entry.Tier, targetMultiplier),
 				Types.sanitizeHealth(entry.Health, entry.Tier, currentMultiplier) * factor
 			),
+			-- The health pass doubles health, not money: the pot carries over
+			-- untouched so a purchase never resets what a squishy had banked.
+			Pot = entry.Pot,
+			PotSince = entry.PotSince,
 		}
 		replacements[entry] = newEntry
 		table.insert(updated, newEntry)
@@ -175,6 +188,11 @@ local function applySquishyDamage(
 			X = entry.X,
 			Z = entry.Z,
 			Health = newHealth,
+			-- Taking a hit does not empty a squishy's pot. A squishy that dies
+			-- here is dropped from `updated` entirely, so its pot goes with it
+			-- -- deliberate: the money was never collected.
+			Pot = entry.Pot,
+			PotSince = entry.PotSince,
 		}
 		table.insert(updated, newEntry)
 		replacements[entry] = newEntry
