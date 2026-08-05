@@ -65,17 +65,27 @@ local maxLevelNotifiedCarry: { [Player]: Types.CarryState } = {}
 local mushDebounce: { [Player]: number } = {}
 
 --[[
-	How far into the current squishy's drain this player is, so the client can
-	ramp the burst and the sound pitch across the sequence instead of playing
-	six identical clicks.
+	The drain currently in progress for this player: how many clicks it was
+	planned to take, how much each one pays, and how far in they are.
 
-	Keyed to the exact CarryState rather than the player alone: picking up a
-	different squishy (or the same one again) is a new drain and must restart
-	the ramp. Counting steps here rather than re-deriving one from the pot is
-	deliberate -- the pot shrinks non-linearly as it drains, so a derived index
-	would stutter.
+	The plan is fixed WHEN THE DRAIN STARTS and then followed to the end. It
+	cannot be re-derived per click from the remaining pot: drainClicksForPot is
+	logarithmic, so a pot that keeps shrinking keeps asking for nearly as many
+	clicks as it did when full, and a capped pot takes fourteen clicks to empty
+	instead of the six it was supposed to. Fixing the plan up front is what
+	makes "a full squishy is exactly MUSH_MAX_DRAIN_CLICKS clicks" true.
+
+	Keyed to the exact CarryState, not just the player: picking up a different
+	squishy is a different drain and must re-plan from that squishy's own pot.
 ]]
-local drainProgress: { [Player]: { carry: Types.CarryState, step: number } } = {}
+type DrainPlan = {
+	carry: Types.CarryState,
+	step: number,
+	totalSteps: number,
+	perClick: number,
+}
+
+local drainProgress: { [Player]: DrainPlan } = {}
 
 local MUSH_BOOST_AMOUNT = 5
 -- Short enough that continuous squeezing keeps you fast but it lapses shortly
@@ -542,18 +552,37 @@ local function drainCarriedPot(player: Player, carry: Types.CarryState): (number
 	local tier = Types.sanitizeTier(carry.entry.Tier)
 	local nowSeconds = os.time()
 	local pot = MergeConfig.potFor(carry.entry.Pot, carry.entry.PotSince, tier, nowSeconds)
-	local totalSteps = MergeConfig.drainClicksForPot(pot, tier)
-	if totalSteps <= 0 then
-		return 0, 0, 0
+
+	--[[
+		Start a new drain when there is no plan, when the player picked up a
+		different squishy, or when the previous plan ran to completion and the
+		pot has refilled since. See DrainPlan on why the plan is fixed here
+		rather than recomputed per click.
+	]]
+	local plan = drainProgress[player]
+	if plan == nil or plan.carry ~= carry or plan.step >= plan.totalSteps then
+		local totalSteps = MergeConfig.drainClicksForPot(pot, tier)
+		if totalSteps <= 0 then
+			return 0, 0, 0
+		end
+		plan = { carry = carry, step = 0, totalSteps = totalSteps, perClick = pot / totalSteps }
+		drainProgress[player] = plan
 	end
 
-	-- Coins are integer-owned across the whole economy, so a per-click share
-	-- that rounds below 1 would pay nothing and leave the pot stuck forever.
-	-- Take the remainder in a single click instead of splitting it into
-	-- unpayable slivers.
-	local payout = math.floor(pot / totalSteps)
+	--[[
+		The last click takes everything left, which both closes out the plan
+		exactly and sweeps up the sliver that accrued during the drain itself.
+
+		Coins are integer-owned across the whole economy, so a share that rounds
+		below 1 would pay nothing and leave the pot stuck forever. In that case
+		take the remainder in one click rather than splitting it into unpayable
+		slivers, and end the drain there.
+	]]
+	local isFinal = plan.step + 1 >= plan.totalSteps
+	local payout = if isFinal then math.floor(pot) else math.floor(plan.perClick)
 	if payout < 1 then
 		payout = math.floor(pot)
+		isFinal = true
 	end
 	if payout < 1 then
 		return 0, 0, 0
@@ -596,15 +625,18 @@ local function drainCarriedPot(player: Player, carry: Types.CarryState): (number
 	if live ~= nil then
 		live.parts[carry.part] = newEntry
 	end
+	-- Republish so the squishy visibly deflates as it is drained.
+	Spawning.publishPot(carry.part, newEntry)
 
-	local progress = drainProgress[player]
-	if progress == nil or progress.carry ~= carry then
-		progress = { carry = carry, step = 0 }
-		drainProgress[player] = progress
+	plan.step += 1
+	local step, totalSteps = plan.step, plan.totalSteps
+	if isFinal then
+		-- Closed out. The next click re-plans against whatever has refilled,
+		-- rather than continuing to divide an already-emptied pot.
+		plan.step = plan.totalSteps
 	end
-	progress.step = math.min(progress.step + 1, totalSteps)
 
-	return payout, progress.step, totalSteps
+	return payout, math.min(step, totalSteps), totalSteps
 end
 
 function Carry.activateMush(player: Player)

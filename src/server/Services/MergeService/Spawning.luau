@@ -90,6 +90,21 @@ end
 	pad-local coordinates in the first place (DataService.luau's Merge
 	comment).
 ]]
+--[[
+	Mirrors an entry's squeeze pot onto its Part so the client can derive the
+	swell locally (SquishyPotController).
+
+	The two RAW fields, never a computed size: the pot grows continuously, so
+	publishing a scale would be the same per-second write per squishy that the
+	pot's timestamp design exists to avoid. These change only when the pot is
+	actually written -- mush, merge, drop -- and the client turns them into a
+	live scale itself.
+]]
+function Spawning.publishPot(part: BasePart, entry: Types.MergeObjectEntry)
+	part:SetAttribute("PotBanked", if type(entry.Pot) == "number" then entry.Pot else 0)
+	part:SetAttribute("PotSince", if type(entry.PotSince) == "number" then entry.PotSince else 0)
+end
+
 local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEntry, healthMultiplier: number): BasePart
 	local tierDef = Types.tierDefFor(entry.Tier)
 
@@ -100,6 +115,7 @@ local function materializeObject(spawnArea: BasePart, entry: Types.MergeObjectEn
 	part.Size = Vector3.new(tierDef.Size, tierDef.Size, tierDef.Size)
 	part.Color = tierDef.Color
 	part:SetAttribute("Tier", entry.Tier)
+	Spawning.publishPot(part, entry)
 
 	local yOffset = spawnArea.Size.Y / 2 + tierDef.Size / 2
 	part.CFrame = spawnArea.CFrame * CFrame.new(entry.X, yOffset, entry.Z)

@@ -267,6 +267,16 @@ local function squashVisual(root: BasePart, direction: string)
 		return
 	end
 	activeSquishes[root] = true
+	--[[
+		Local-only marker so SquishyPotController leaves this model's welds alone
+		for the duration. Both controllers drive the same VisualWeld C0/Size
+		values, and the squash captures its restore targets at the start -- a pot
+		swell landing mid-squash would be reverted when the squash finishes.
+
+		Set client-side, so it never replicates and never reaches the server;
+		this is purely two local controllers agreeing on who owns the welds.
+	]]
+	root:SetAttribute("Squashing", true)
 
 	task.spawn(function()
 		local driver = Instance.new("NumberValue")
@@ -297,6 +307,7 @@ local function squashVisual(root: BasePart, direction: string)
 		end
 		driver:Destroy()
 		activeSquishes[root] = nil
+		root:SetAttribute("Squashing", nil)
 	end)
 end
 
