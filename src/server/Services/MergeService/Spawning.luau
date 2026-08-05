@@ -97,8 +97,8 @@ end
 	The two RAW fields, never a computed size: the pot grows continuously, so
 	publishing a scale would be the same per-second write per squishy that the
 	pot's timestamp design exists to avoid. These change only when the pot is
-	actually written -- mush, merge, drop -- and the client turns them into a
-	live scale itself.
+	actually written -- mush, merge, drop, pickup/drop-or-cancel (the carry
+	freeze/resume) -- and the client turns them into a live scale itself.
 ]]
 function Spawning.publishPot(part: BasePart, entry: Types.MergeObjectEntry)
 	part:SetAttribute("PotBanked", if type(entry.Pot) == "number" then entry.Pot else 0)
@@ -615,6 +615,46 @@ local function pickUp(player: Player, part: BasePart)
 	end
 
 	--[[
+		Freeze the squeeze pot for the whole carry: bank whatever has accrued so
+		far (MergeConfig.potFor read at server-now) into Pot, then pause further
+		accrual by writing PotSince = 0 -- the same "banked value only, not
+		accruing" sentinel potFor already gives a missing/zero timestamp (see its
+		own header note). Without this, the pot keeps ticking a pulse a second
+		while the player mash-clicks Mush, and the eased swell
+		(SquishyPotController) visibly fights the drain between clicks.
+
+		Every carry-ending path has to undo this freeze or the squishy stops
+		earning forever: Carry.dropCarried (deliberate drop) and
+		Carry.cancelCarry (character removing, pad teardown, spawn-level/
+		purchase rebuilds) both resume accrual with a fresh PotSince.
+		Carry.commitMerge needs no special case -- potFor already reads a
+		PotSince of 0 as "no bonus", so a merge of a still-carried squishy sums
+		correctly without this function's help.
+
+		Aborts the whole pickup (not just the freeze) if the entry can't be
+		found in the profile: starting a carry that can never bank its pot back
+		would be worse than leaving the squishy where it rests. The write
+		itself is deferred to just above `carries[player] =` below, past all
+		the pose/weld setup that follows -- see that site's comment for why.
+	]]
+	local data = DataService.getData(player)
+	local entryIndex = if data ~= nil then table.find(data.Merge.Squishies, entry) else nil
+	if entryIndex == nil then
+		log.warn(`squishy disappeared from {player.Name}'s profile -- pickup cancelled`)
+		return -- profile desynced from the live pad; do not start a carry that can't be banked
+	end
+
+	local sanitizedTier = Types.sanitizeTier(entry.Tier)
+	local frozenEntry: Types.MergeObjectEntry = {
+		Tier = entry.Tier,
+		X = entry.X,
+		Z = entry.Z,
+		Health = entry.Health,
+		Pot = MergeConfig.potFor(entry.Pot, entry.PotSince, sanitizedTier, os.time()),
+		PotSince = 0,
+	}
+
+	--[[
 		Pose the ART in front of the character, not the gameplay root.
 
 		The root is an invisible cube sized off the tier ramp, and real artwork
@@ -637,7 +677,6 @@ local function pickUp(player: Player, part: BasePart)
 		bounds are exactly the root's own -- centre (0,0,0), size root.Size --
 		so the same three steps collapse back to the original behaviour.
 	]]
-	local sanitizedTier = Types.sanitizeTier(entry.Tier)
 	local carryRotation = MergeObjectVisuals.getCarryRotation(sanitizedTier)
 	local artCentre, artSize = MergeObjectVisuals.getVisualBounds(part)
 	if artCentre == nil or artSize == nil then
@@ -658,8 +697,21 @@ local function pickUp(player: Player, part: BasePart)
 	weld.Part1 = part
 	weld.Parent = part
 
-	carries[player] = { live = live, part = part, entry = entry, weld = weld }
-	publishCarryingAttributes(player, entry.Tier, part)
+	-- Commit the freeze together with the CarryState that owns undoing it.
+	-- Everything above this point is either non-throwing table/CFrame math or
+	-- creates instances this function itself owns, so nothing between here
+	-- and `carries[player] =` below can leave frozenEntry written with no
+	-- carry left to resume it.
+	DataService.set(player, { "Merge", "Squishies", entryIndex }, frozenEntry)
+	live.parts[part] = frozenEntry
+	Spawning.publishPot(part, frozenEntry)
+
+	-- frozenEntry (not the original optional-typed `entry` local) is what
+	-- CarryState and the attribute publish use from here on, matching how
+	-- dropCarried/drainCarriedPot use a distinct new-entry local rather than
+	-- rebinding the original.
+	carries[player] = { live = live, part = part, entry = frozenEntry, weld = weld }
+	publishCarryingAttributes(player, frozenEntry.Tier, part)
 end
 
 --[[
@@ -834,16 +886,74 @@ function Spawning.processPurchasedSquishies(player: Player, notifyProgress: bool
 		return 0, pending
 	end
 
-	local plannedEntries, consumed = planCompactedEntries(data, live, pending)
-	if plannedEntries == nil or consumed <= 0 then
+	-- Feasibility gate only: planCompactedEntries reads only `data` and
+	-- `live.spawnArea`, so it is safe to call before any cancellation. This
+	-- makes a sweep that would deliver nothing OVERWHELMINGLY LIKELY to have
+	-- no side effects, not guaranteed to: planCompactedEntries's rejection
+	-- sampling runs against the module-level `random`, so a probe success
+	-- here can still be followed by a re-plan failure after the cancel below
+	-- (see the retry loop there). The probe's own placement work is
+	-- discarded either way once it passes -- rejection sampling running
+	-- twice at this cadence (once a second) is negligible. A sweep must
+	-- still never cancel a carry/launch it can't actually free space for,
+	-- since PurchasedSquishiesRemaining > 0 with a full board is a normal,
+	-- designed-for standing state (see notifyWaitingBalance) that this
+	-- function gets called against once per PURCHASED_DELIVERY_RETRY_INTERVAL,
+	-- forever, until space opens up.
+	local probeEntries, probeConsumed = planCompactedEntries(data, live, pending)
+	if probeEntries == nil or probeConsumed <= 0 then
 		return 0, pending
 	end
 
-	-- The user explicitly chose this behavior for a purchase arriving during
-	-- carry/launch. Returning the source first also means its persisted entry
-	-- participates in the same authoritative compaction as every other model.
+	--[[
+		The user explicitly chose this behavior for a purchase arriving during
+		carry/launch. Returning the source first also means its persisted entry
+		participates in the same authoritative compaction as every other model
+		-- and this MUST happen before planning, not after.
+
+		cancelCarry (Carry.luau) does not mutate a carried entry in place; it
+		SPLICES A NEW table into data.Merge.Squishies to resume accrual
+		(PotSince = os.time()) and repoints live.parts at that new table. A
+		plan built from data read before this call would still be holding the
+		OLD, frozen (PotSince = 0) table by identity -- writing that stale plan
+		back would silently discard the resume and strand the squishy paused
+		for the rest of the session (and orphan its live Part from
+		live.parts's new entry, failing the retain check below and forcing an
+		unwanted respawn). So: cancel first, then re-read data and re-plan
+		from what onDeactivate actually left behind. The probe above already
+		proved a delivery is possible, so this cancel is never wasted.
+	]]
 	onDeactivate(player)
 	if liveBases[player] ~= live or live.objectsFolder.Parent == nil then
+		return 0, pending
+	end
+
+	data = DataService.getData(player)
+	if data == nil then
+		return 0, pending
+	end
+	-- onDeactivate never touches PurchasedSquishiesRemaining; re-read anyway
+	-- as defence against a future change that does.
+	pending = sanitizePurchasedBalance(data.Merge.PurchasedSquishiesRemaining)
+	if pending <= 0 then
+		return 0, 0
+	end
+
+	-- Re-plan against what onDeactivate actually left behind (see comment
+	-- above) -- the probe plan's entry identities are now stale. Retry a
+	-- bounded number of times: rejection sampling is non-deterministic, so a
+	-- single re-plan can spuriously fail even though the probe above
+	-- succeeded moments earlier.
+	local plannedEntries: { Types.MergeObjectEntry }? = nil
+	local consumed = 0
+	for _ = 1, 4 do
+		plannedEntries, consumed = planCompactedEntries(data, live, pending)
+		if plannedEntries ~= nil and consumed > 0 then
+			break
+		end
+	end
+	if plannedEntries == nil or consumed <= 0 then
+		log.warn(`purchased delivery for {player.Name} cancelled a carry but could not place -- retrying next sweep`)
 		return 0, pending
 	end
 

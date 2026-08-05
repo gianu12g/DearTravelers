@@ -323,8 +323,10 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 		}),
 
 		-- client -> server. Request the carried object's Mush interaction.
-		-- MergeService verifies the sender is carrying and is not already
-		-- boosted; the client never chooses its tier, sound, or speed reward.
+		-- MergeService verifies the sender is carrying; the client never
+		-- chooses its tier, sound, or speed reward. Re-mushing while already
+		-- boosted refreshes the boost rather than being refused -- see
+		-- Carry.activateMush.
 		mergeMushRequest = ByteNet.definePacket({
 			value = ByteNet.nothing,
 		}),
@@ -335,9 +337,10 @@ return ByteNet.defineNamespace(NAMESPACE, function()
 
 			payout is what this click actually paid out of the squishy's squeeze
 			pot -- 0 for a mush on an empty squishy, which is still a legitimate
-			mush (squash, sound, speed boost) with no money burst. float64
-			because the coin curve doubles thirty times and an integer wire type
-			would overflow long before the top tier.
+			mush (base-pitch sound, speed boost) but with no squash and no money
+			burst: there is nothing draining, so nothing should visibly react.
+			float64 because the coin curve doubles thirty times and an integer
+			wire type would overflow long before the top tier.
 
 			drainStep/drainTotal are 1-based and describe where this click sits
 			in the squishy's drain, so the client can ramp the burst size and

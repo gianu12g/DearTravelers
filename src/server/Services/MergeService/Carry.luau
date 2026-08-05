@@ -114,8 +114,17 @@ end
 	Ends a carry without a merge or a deliberate drop: character removing
 	(death/respawn/leaving) or the pad going away underneath the player. The
 	entry's X/Z never changed while carried (see the init.luau header's PHASE 2
-	note), so this needs no DataService write -- putting the SAME part back
-	where it already persists is enough.
+	note), so the RESTING POSITION needs no DataService write -- putting the
+	SAME part back where it already persists is enough.
+
+	The POT does need one, though. Spawning.pickUp freezes accrual the instant
+	a squishy is carried (banks the live value, writes PotSince = 0 -- see its
+	own header note), and this is one of the two paths that must undo that
+	freeze or the squishy stops earning forever (dropCarried is the other,
+	for a deliberate drop). Skipped only if the profile entry can no longer be
+	found (data not loaded, or already spliced out from under this carry) --
+	that mirrors dropCarried's own guard, and there is nothing left to resume
+	accrual on in that case.
 
 	Safe to call when nothing is being carried (every caller does, rather
 	than checking first) and safe to call right before the pad's whole
@@ -131,7 +140,40 @@ function Carry.cancelCarry(player: Player)
 	Types.clearCarryingAttributes(player)
 
 	carry.weld:Destroy()
-	Spawning.reAnchorPart(carry.live, carry.part, carry.entry)
+
+	local restoredEntry: Types.MergeObjectEntry = carry.entry
+	local data = DataService.getData(player)
+	local entryIndex = if data ~= nil then table.find(data.Merge.Squishies, carry.entry) else nil
+	if entryIndex ~= nil then
+		restoredEntry = {
+			Tier = carry.entry.Tier,
+			X = carry.entry.X,
+			Z = carry.entry.Z,
+			Health = carry.entry.Health,
+			Pot = carry.entry.Pot,
+			PotSince = os.time(),
+		}
+		DataService.set(player, { "Merge", "Squishies", entryIndex }, restoredEntry)
+		carry.live.parts[carry.part] = restoredEntry
+		Spawning.publishPot(carry.part, restoredEntry)
+	else
+		-- No profile entry survives to persist a resume onto, but the Part
+		-- must still stop reading as frozen (PotSince = 0) -- belt-and-braces
+		-- against the swell (SquishyPotController) sticking visually paused
+		-- for the rest of the session. Publish a resumed copy onto the Part
+		-- alone; there is no profile entry left for it to diverge from.
+		local resumedEntry: Types.MergeObjectEntry = {
+			Tier = carry.entry.Tier,
+			X = carry.entry.X,
+			Z = carry.entry.Z,
+			Health = carry.entry.Health,
+			Pot = carry.entry.Pot,
+			PotSince = os.time(),
+		}
+		Spawning.publishPot(carry.part, resumedEntry)
+	end
+
+	Spawning.reAnchorPart(carry.live, carry.part, restoredEntry)
 	-- The respawned player can land right on top of this spot (base center)
 	-- -- see MergeConfig.REARM_CLEARANCE's comment.
 	Spawning.markDisarmed(carry.live, carry.part)
@@ -468,7 +510,12 @@ function Carry.dropCarried(player: Player)
 		-- Dropping is not collecting: a partially drained squishy keeps whatever
 		-- is left, so walking away mid-drain never destroys banked money.
 		Pot = carry.entry.Pot,
-		PotSince = carry.entry.PotSince,
+		-- Resumes accrual. pickUp (Spawning.luau) froze it at PotSince = 0 for
+		-- the whole carry so the pot-swell stops fighting the Mush drain --
+		-- dropping is a carry-ending path and must undo that freeze, the same
+		-- as cancelCarry's own resume, or the squishy would stop earning the
+		-- moment it was ever picked up.
+		PotSince = os.time(),
 	}
 
 	-- Splice the fresh entry in place of the old one rather than mutating
@@ -490,6 +537,7 @@ function Carry.dropCarried(player: Player)
 
 	live.parts[carry.part] = newEntry
 	Spawning.reAnchorPart(live, carry.part, newEntry)
+	Spawning.publishPot(carry.part, newEntry)
 	-- Dropped at (or near) the player's own feet -- see
 	-- MergeConfig.REARM_CLEARANCE's comment.
 	Spawning.markDisarmed(live, carry.part)
@@ -571,7 +619,9 @@ local function drainCarriedPot(player: Player, carry: Types.CarryState): (number
 
 	--[[
 		The last click takes everything left, which both closes out the plan
-		exactly and sweeps up the sliver that accrued during the drain itself.
+		exactly and sweeps up whatever rounding remainder the per-click division
+		left behind (the pot itself is frozen for the whole carry -- see
+		pickUp's note -- so there is nothing live still accruing to sweep up).
 
 		Coins are integer-owned across the whole economy, so a share that rounds
 		below 1 would pay nothing and leave the pot stuck forever. In that case
@@ -614,7 +664,12 @@ local function drainCarriedPot(player: Player, carry: Types.CarryState): (number
 		Z = carry.entry.Z,
 		Health = carry.entry.Health,
 		Pot = math.max(pot - payout, 0),
-		PotSince = nowSeconds,
+		-- Stays paused (0), not nowSeconds: this squishy is still carried, and
+		-- restarting the timestamp here would let the pot begin accruing again
+		-- between drain clicks -- exactly the swell-vs-drain fight this freeze
+		-- exists to stop. dropCarried/cancelCarry are what resume it, once the
+		-- carry actually ends.
+		PotSince = 0,
 	}
 
 	-- Splice rather than mutate, and move every live reference onto the new
@@ -657,7 +712,12 @@ function Carry.activateMush(player: Player)
 	if humanoid == nil or humanoid.Health <= 0 then
 		return
 	end
-	mushDebounce[player] = now + MergeConfig.MUSH_DRAIN_DEBOUNCE
+	-- Strictly shorter than the client's own send interval (both read
+	-- MUSH_DRAIN_DEBOUNCE, but the client throttles to the full value and
+	-- this arms the server's window at a fraction of it) -- see
+	-- MUSH_DRAIN_DEBOUNCE_SERVER_MARGIN's comment for why the two must not
+	-- match exactly.
+	mushDebounce[player] = now + MergeConfig.MUSH_DRAIN_DEBOUNCE * MergeConfig.MUSH_DRAIN_DEBOUNCE_SERVER_MARGIN
 
 	local existing = mushBoosts[player]
 	if existing ~= nil then

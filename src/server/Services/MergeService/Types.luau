@@ -29,12 +29,33 @@ export type MergeObjectEntry = {
 		per player -- exactly what Income.runTick's own header refuses to do for
 		coin grants. Instead PotSince records when the pot was last emptied and
 		MergeConfig.potFor computes the live value on demand. Nothing ticks;
-		writes happen only on mush, merge, and drop, which are all player-driven
-		and already rate-limited.
+		writes happen only on mush, merge, drop, and pickup/drop-or-cancel (the
+		carry freeze/resume), which are all player-driven and already
+		rate-limited.
 
 		Pot is the amount banked at the last write (carried in from merges, or
-		the remainder of a partial drain). PotSince is the Workspace server
-		timestamp that amount started growing from.
+		the remainder of a partial drain). PotSince is the os.time() wall-clock
+		timestamp that amount started growing from (see DataService's own
+		Squishies note on why this has to be wall clock, not
+		Workspace:GetServerTimeNow() -- the latter is not comparable across
+		sessions/servers).
+
+		PotSince = 0 ALSO MEANS PAUSED, not just "never started": Spawning.pickUp
+		freezes accrual for the whole time a squishy is carried by banking the
+		live value into Pot and writing PotSince = 0, which is what stops the
+		eased pot-swell (SquishyPotController) from visibly fighting the Mush
+		drain click by click. drainCarriedPot's own writes keep it paused
+		(PotSince stays 0) for every click during the carry. Carry.dropCarried
+		and Carry.cancelCarry are the two paths that end a carry and both
+		resume accrual with a fresh PotSince; Carry.commitMerge needs no
+		special case, since potFor already reads a frozen (PotSince = 0) entry
+		as its banked value alone.
+
+		A player who disconnects mid-carry saves PotSince = 0; DataService's
+		load-time repair coerces that to the load timestamp (banked Pot
+		survives, accrual resumes), but that one squishy forfeits the offline
+		accrual every other owned squishy gets credited for the time away --
+		acceptable, since it is bounded by the same pot cap regardless.
 
 		Both are optional so an entry built by a site that predates this field
 		reads as an empty pot rather than erroring -- see MergeConfig.potFor,

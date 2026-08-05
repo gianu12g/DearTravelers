@@ -2,7 +2,9 @@
 --[[
 	Mush is a contextual carry action: any click or completed touch tap while an
 	object is picked up asks the server to activate it. B.Mush is display-only
-	and shows the server-owned five-second cooldown.
+	and shows the server-owned WalkSpeed boost state (see updateCooldownDisplay);
+	there is no cooldown countdown any more -- see the note inside
+	updateCooldownDisplay.
 
 	The server approves the interaction and owns the temporary WalkSpeed reward;
 	this controller plays the tier-configured ASMR sound and squashes the carried
@@ -22,6 +24,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local Motion = require(script.Parent.Parent.UI.Motion)
 local Net = require(ReplicatedStorage.Shared.Net)
+local PotScale = require(script.Parent.PotScale)
 local SoundKit = require(ReplicatedStorage.Shared.AssetIds.SoundKit)
 local VfxScaler = require(ReplicatedStorage.Shared.VfxScaler)
 
@@ -34,7 +37,16 @@ local SPREAD_SCALE = 1.12
 local SQUASH_IN = TweenInfo.new(0.16, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 local SQUASH_OUT = TweenInfo.new(0.45, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
 local SQUASH_HOLD = 0.08
-local REQUEST_TIMEOUT = 1
+--[[
+	A retrigger that lands while the driver is already near 1 (the common case
+	at mash speed -- see squashVisual) would resume SQUASH_IN with almost
+	nowhere left to go, producing no visible motion. Kicking the driver down to
+	this floor first, over a short tween, guarantees every retrigger produces a
+	visible compress-and-release pulse regardless of timing, without ever
+	hard-setting Value (which would pop the geometry -- see runSquashCycle).
+]]
+local SQUASH_RETRIGGER_RELEASE = TweenInfo.new(0.03, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local SQUASH_RETRIGGER_FLOOR = 0.2
 
 --[[
 	Money burst. A loaded squishy drains over several clicks (see
@@ -71,13 +83,32 @@ local COOLDOWN_GRADIENT = ColorSequence.new({
 	ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 25, 25)),
 })
 
+-- authoredSize/authoredC0 are the squishy's TRUE authored geometry (pot scale
+-- == 1), not a live snapshot -- see collectVisualStates. composeWeld
+-- multiplies the current pot scale and squash alpha back in every frame, so
+-- these never go stale no matter how long the session runs.
 type VisualState = {
 	part: BasePart,
 	weld: Weld,
-	size: Vector3,
-	c0: CFrame,
-	targetSize: Vector3,
-	targetC0: CFrame,
+	authoredSize: Vector3,
+	authoredC0: CFrame,
+}
+
+-- One active squash. `states`/`scaleVec`/`squashAnchor`/`driver` are
+-- captured/created once, on the click that starts the session; every later
+-- click while it's still running just retriggers this same session (see
+-- squashVisual) instead of piling up a new one, so the geometry never
+-- squashes a squash.
+type SquashSession = {
+	states: { VisualState },
+	-- The direction's target per-axis scale and anchor from squashGeometry,
+	-- captured once so every retrigger in the session squashes toward the
+	-- same pose.
+	scaleVec: Vector3,
+	squashAnchor: Vector3,
+	driver: NumberValue,
+	currentTween: Tween?,
+	generation: number,
 }
 
 local MushController = {}
@@ -95,11 +126,10 @@ local instructionFadeMotion: Motion.Handle? = nil
 local instructionPulseMotion: Motion.Handle? = nil
 local instructionVisibilityConnection: RBXScriptConnection? = nil
 local instructionFadeRevision = 0
-local requestPending = false
 -- Local mirror of the server's mash debounce. Purely to keep the wire quiet
 -- while a player holds the mouse down; the server enforces its own regardless.
 local nextRequestAllowed = 0
-local activeSquishes: { [BasePart]: boolean } = {}
+local activeSquishes: { [BasePart]: SquashSession } = {}
 
 local function findCarriedRoot(): BasePart?
 	local baseName = player:GetAttribute("AssignedBase")
@@ -223,13 +253,23 @@ local function squashGeometry(root: BasePart, direction: string): (Vector3, Vect
 	return Vector3.new(SPREAD_SCALE, COMPRESS_SCALE, SPREAD_SCALE), Vector3.new(0, -root.Size.Y / 2, 0)
 end
 
-local function collectVisualStates(root: BasePart, direction: string): { VisualState }
+--[[
+	Captures the squishy's TRUE authored geometry (pot scale == 1), not a
+	live snapshot of wherever the pot happens to be right now: the live pot
+	scale (PotScale.get) is divided back out of both the position (around
+	PotScale.anchorFor's anchor) and the size. composeWeld multiplies the
+	CURRENT pot scale back in every frame, so a pot change mid-squash shows up
+	immediately instead of the session being stuck with whatever the pot was
+	when the click that started it landed.
+]]
+local function collectVisualStates(root: BasePart): { VisualState }
 	local visual = root:FindFirstChild("Visual")
 	if visual == nil then
 		return {}
 	end
 
-	local scale, anchor = squashGeometry(root, direction)
+	local potScale = PotScale.get(root)
+	local potAnchor = PotScale.anchorFor(root)
 	local states: { VisualState } = {}
 	local candidates = if visual:IsA("BasePart") then { visual } else visual:GetDescendants()
 
@@ -243,71 +283,183 @@ local function collectVisualStates(root: BasePart, direction: string): { VisualS
 		end
 
 		local c0 = weld.C0
-		local targetPosition = anchor + (c0.Position - anchor) * scale
+		local authoredPosition = potAnchor + (c0.Position - potAnchor) / potScale
 		table.insert(states, {
 			part = candidate,
 			weld = weld,
-			size = candidate.Size,
-			c0 = c0,
-			targetSize = candidate.Size * scale,
-			targetC0 = CFrame.new(targetPosition) * c0.Rotation,
+			authoredSize = candidate.Size / potScale,
+			authoredC0 = CFrame.new(authoredPosition) * c0.Rotation,
 		})
 	end
 
 	return states
 end
 
-local function squashVisual(root: BasePart, direction: string)
-	if activeSquishes[root] then
-		return
-	end
+--[[
+	Writes one visual piece's Size/C0 for squash alpha `alpha` (0 = resting,
+	1 = fully squashed), composed with the CURRENT live pot scale rather than
+	whatever it was when the session's states were captured -- this is what
+	lets the pot keep visibly deflating for the whole session instead of
+	freezing until the squash lets go (see SquishyPotController's header).
 
-	local states = collectVisualStates(root, direction)
-	if #states == 0 then
-		return
+	Both transforms share the same shape (anchor + (authored - anchor) *
+	scale) applied in sequence: pot swell first (around PotScale's anchor,
+	which never moves), then the squash on top of that (around this session's
+	own squashAnchor, from squashGeometry). Vector3 * Vector3 is component-wise
+	in Luau, so squashVec's per-axis scale applies correctly to both size and
+	position in one multiply.
+]]
+local function composeWeld(root: BasePart, session: SquashSession, state: VisualState, alpha: number)
+	local potScale = PotScale.get(root)
+	local potAnchor = PotScale.anchorFor(root)
+	local potPosition = potAnchor + (state.authoredC0.Position - potAnchor) * potScale
+	local potSize = state.authoredSize * potScale
+
+	local squashVec = Vector3.new(1, 1, 1):Lerp(session.scaleVec, alpha)
+	local finalPosition = session.squashAnchor + (potPosition - session.squashAnchor) * squashVec
+
+	state.part.Size = potSize * squashVec
+	state.weld.C0 = CFrame.new(finalPosition) * state.authoredC0.Rotation
+end
+
+-- Every active squash is recomposed every Heartbeat (not just on driver.Value
+-- changes) so a pot update lands on screen the same frame it happens, even
+-- during SQUASH_HOLD when the driver itself isn't moving.
+local function updateActiveSquishes()
+	for root, session in activeSquishes do
+		local alpha = session.driver.Value
+		for _, state in session.states do
+			if state.part.Parent == nil or state.weld.Parent == nil then
+				continue
+			end
+			composeWeld(root, session, state, alpha)
+		end
 	end
-	activeSquishes[root] = true
+end
+
+--[[
+	Runs one in -> hold -> out cycle of `session`'s driver, tagged with the
+	generation it was started at. A click that lands mid-cycle bumps
+	session.generation and spawns a fresh call of this function without
+	waiting for the old one to unwind (see squashVisual) -- so every
+	`Completed:Wait()`/`task.wait()` below checks the generation the instant it
+	wakes, whether that's a real completion or the Cancel() a newer click just
+	issued, and bails out the moment it finds itself superseded. Only the cycle
+	that reaches the end uncontested performs cleanup.
+]]
+local function runSquashCycle(root: BasePart, session: SquashSession, generation: number)
+	local driver = session.driver
+
 	--[[
-		Local-only marker so SquishyPotController leaves this model's welds alone
-		for the duration. Both controllers drive the same VisualWeld C0/Size
-		values, and the squash captures its restore targets at the start -- a pot
-		swell landing mid-squash would be reverted when the squash finishes.
-
-		Set client-side, so it never replicates and never reaches the server;
-		this is purely two local controllers agreeing on who owns the welds.
+		A retrigger's driver may already be near 1 (mid-hold, or early into a
+		previous in-tween) -- resuming SQUASH_IN from there would have almost
+		nowhere left to go and the click would produce no visible motion (see
+		squashVisual's header). Kick down to a shared floor first, over a short
+		tween, so every retrigger produces a visible pulse. Skipped when the
+		driver is already at/below the floor (a fresh session, or a retrigger
+		landing late in a previous SQUASH_OUT) since there's nothing to kick.
 	]]
-	root:SetAttribute("Squashing", true)
+	if driver.Value > SQUASH_RETRIGGER_FLOOR then
+		local release = TweenService:Create(driver, SQUASH_RETRIGGER_RELEASE, { Value = SQUASH_RETRIGGER_FLOOR })
+		session.currentTween = release
+		release:Play()
+		release.Completed:Wait()
+		if session.generation ~= generation then
+			return
+		end
+	end
+
+	local squashIn = TweenService:Create(driver, SQUASH_IN, { Value = 1 })
+	session.currentTween = squashIn
+	squashIn:Play()
+	squashIn.Completed:Wait()
+	if session.generation ~= generation then
+		return
+	end
+
+	task.wait(SQUASH_HOLD)
+	if session.generation ~= generation then
+		return
+	end
+
+	local squashOut = TweenService:Create(driver, SQUASH_OUT, { Value = 0 })
+	session.currentTween = squashOut
+	squashOut:Play()
+	squashOut.Completed:Wait()
+	if session.generation ~= generation then
+		return
+	end
+
+	activeSquishes[root] = nil
+	root:SetAttribute("Squashing", nil)
+	driver:Destroy()
+end
+
+--[[
+	Squashes the carried squishy toward `direction`. RETRIGGERS on every call
+	instead of ignoring clicks while a squash is already playing -- Mush now
+	fires a request per click (see requestMush), so the squash has to keep up
+	with clicks rather than dropping every one after the first. Every retrigger
+	also kicks the driver down to SQUASH_RETRIGGER_FLOOR first (runSquashCycle),
+	so a click landing while the driver is already near 1 still produces a
+	visible pulse instead of a tween with nowhere left to go.
+
+	The squash geometry (scaleVec/squashAnchor from squashGeometry) is
+	captured ONCE, on the click that starts a fresh session; every retrigger
+	within that session reuses it. The per-piece states captured alongside it
+	hold authored (pot-scale-1) geometry, not a live snapshot -- see
+	collectVisualStates -- and composeWeld re-reads the CURRENT pot scale every
+	Heartbeat via updateActiveSquishes, so a drain click keeps visibly
+	deflating the squishy through the rest of the session instead of freezing
+	until it ends.
+]]
+local function squashVisual(root: BasePart, direction: string)
+	local session = activeSquishes[root]
+	if session == nil then
+		local states = collectVisualStates(root)
+		if #states == 0 then
+			return
+		end
+
+		local scaleVec, squashAnchor = squashGeometry(root, direction)
+		local driver = Instance.new("NumberValue")
+
+		local newSession: SquashSession = {
+			states = states,
+			scaleVec = scaleVec,
+			squashAnchor = squashAnchor,
+			driver = driver,
+			currentTween = nil,
+			generation = 0,
+		}
+		activeSquishes[root] = newSession
+		session = newSession
+		--[[
+			Local-only marker so SquishyPotController defers its OWN weld write
+			for the duration -- it keeps easing and publishing to PotScale
+			regardless (see its header), and this controller reads that live
+			value every Heartbeat (composeWeld/updateActiveSquishes), so the two
+			compose instead of one simply overriding the other. Cleared only when
+			the session's LAST cycle reaches natural completion, in
+			runSquashCycle above.
+
+			Set client-side, so it never replicates and never reaches the server;
+			this is purely two local controllers agreeing on who writes the welds.
+		]]
+		root:SetAttribute("Squashing", true)
+	end
+
+	session.generation += 1
+	local generation = session.generation
+	if session.currentTween ~= nil then
+		-- Stop the tween that's currently driving the shared session -- without
+		-- this, the new cycle's tween and the old one would both write the same
+		-- NumberValue and fight every frame.
+		session.currentTween:Cancel()
+	end
 
 	task.spawn(function()
-		local driver = Instance.new("NumberValue")
-		local changedConnection = driver.Changed:Connect(function(alpha: number)
-			for _, state in states do
-				if state.part.Parent ~= nil and state.weld.Parent ~= nil then
-					state.part.Size = state.size:Lerp(state.targetSize, alpha)
-					state.weld.C0 = state.c0:Lerp(state.targetC0, alpha)
-				end
-			end
-		end)
-
-		local squashIn = TweenService:Create(driver, SQUASH_IN, { Value = 1 })
-		squashIn:Play()
-		squashIn.Completed:Wait()
-		task.wait(SQUASH_HOLD)
-
-		local squashOut = TweenService:Create(driver, SQUASH_OUT, { Value = 0 })
-		squashOut:Play()
-		squashOut.Completed:Wait()
-
-		changedConnection:Disconnect()
-		for _, state in states do
-			if state.part.Parent ~= nil and state.weld.Parent ~= nil then
-				state.part.Size = state.size
-				state.weld.C0 = state.c0
-			end
-		end
-		driver:Destroy()
-		activeSquishes[root] = nil
-		root:SetAttribute("Squashing", nil)
+		runSquashCycle(root, session, generation)
 	end)
 end
 
@@ -342,7 +494,7 @@ local function updateCooldownDisplay()
 	end
 
 	local boostActive = player:GetAttribute("MushBoostActive") == true
-	setCooldownGradient(boostActive or requestPending)
+	setCooldownGradient(boostActive)
 
 	--[[
 		No countdown any more. This label used to show the boost's remaining
@@ -493,9 +645,18 @@ local function resolveDisplay()
 	bindInstructionMotion(actions, instruction, stroke)
 end
 
+--[[
+	No round-trip gate any more: this used to hold `requestPending` until the
+	server's reply landed (or REQUEST_TIMEOUT lapsed) and refuse every click in
+	between, capping the squash/burst rate at one per round-trip regardless of
+	how fast the player actually clicked. The shared debounce below is the only
+	throttle left, and it is strictly LOOSER than the server's own rejection
+	window (see MergeConfig.MUSH_DRAIN_DEBOUNCE_SERVER_MARGIN) -- so a
+	legitimately-throttled click is never the one the server refuses.
+]]
 local function requestMush()
 	local root = findCarriedRoot()
-	if requestPending or player:GetAttribute("CarryingTier") == nil or root == nil then
+	if player:GetAttribute("CarryingTier") == nil or root == nil then
 		return
 	end
 
@@ -511,46 +672,31 @@ local function requestMush()
 	end
 	nextRequestAllowed = now + MergeConfig.MUSH_DRAIN_DEBOUNCE
 
-	requestPending = true
-	updateCooldownDisplay()
 	Net.mergeMushRequest.send()
-
-	-- Unconditional release: the reply clears this the moment it lands, and
-	-- tying the fallback to MushBoostActive would strand requestPending true
-	-- for as long as a refreshing boost stays up.
-	task.delay(REQUEST_TIMEOUT, function()
-		requestPending = false
-		updateCooldownDisplay()
-	end)
 end
 
 function MushController.Init()
 	Net.mergeMushActivated.listen(function(data)
-		requestPending = false
-		updateCooldownDisplay()
-
 		local root = findCarriedRoot()
 		if root == nil or root:GetAttribute("Tier") ~= data.tier then
 			return
 		end
 
-		-- A mush on an empty squishy is still a real mush -- squash, sound,
-		-- speed boost -- it just has no money in it, so it stays at base pitch
-		-- and skips the burst entirely.
+		-- A mush on an empty squishy is still a real mush -- speed boost and
+		-- base-pitch sound stay as click feedback -- but the squash and burst
+		-- are both skipped: there is nothing draining, so nothing should visibly
+		-- react.
 		local ramp = if data.payout > 0 then drainRamp(data.drainStep, data.drainTotal) else 0
 		playMushSound(root, data.soundId, data.soundVolume, MUSH_PITCH_MIN + (MUSH_PITCH_MAX - MUSH_PITCH_MIN) * ramp)
-		squashVisual(root, data.direction)
 
 		if data.payout > 0 then
+			squashVisual(root, data.direction)
 			emitMoneyBurst(root, ramp)
 		end
 	end)
 
 	local boostChanged = player:GetAttributeChangedSignal("MushBoostActive")
-	boostChanged:Connect(function()
-		requestPending = false
-		updateCooldownDisplay()
-	end)
+	boostChanged:Connect(updateCooldownDisplay)
 
 	local boostEndsAtChanged = player:GetAttributeChangedSignal("MushBoostEndsAt")
 	boostEndsAtChanged:Connect(updateCooldownDisplay)
@@ -568,6 +714,7 @@ function MushController.Init()
 	end)
 
 	RunService.Heartbeat:Connect(updateCooldownDisplay)
+	RunService.Heartbeat:Connect(updateActiveSquishes)
 
 	task.spawn(resolveDisplay)
 	task.spawn(function()

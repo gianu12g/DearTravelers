@@ -139,11 +139,38 @@ MergeConfig.MUSH_POT_CAP_PULSES = 60 -- pot stops growing after this many pulses
 
 	The debounce is what gates payout clicks -- deliberately NOT the mush
 	cooldown, which still governs the WalkSpeed boost. Draining six clicks at
-	the 1s cooldown would be six seconds of standing still; 0.15s is about
-	human mash speed while still bounding the request rate server-side.
+	the 1s cooldown would be six seconds of standing still; 0.06s is about
+	human mash speed (a ~16.7 click/s ceiling) while still bounding the
+	request rate server-side. The client's own round-trip gate is gone
+	(MushController.requestMush no longer waits for a reply before allowing
+	the next click), so this -- plus the dedicated mush RateLimiter in
+	MergeService/init.luau, sized above this cadence -- is what now stands
+	between a fast clicker and the server.
+
+	The client throttles its OWN sends to this exact value, but the server
+	does not enforce the identical window (see
+	MUSH_DRAIN_DEBOUNCE_SERVER_MARGIN below): a client throttle must be
+	strictly looser than the server's rejection window, or ordinary network
+	jitter between consecutive sends silently drops a click with no reply and
+	no visible cause.
 ]]
 MergeConfig.MUSH_MAX_DRAIN_CLICKS = 6
-MergeConfig.MUSH_DRAIN_DEBOUNCE = 0.15
+MergeConfig.MUSH_DRAIN_DEBOUNCE = 0.06
+--[[
+	The server arms its own mushDebounce window at MUSH_DRAIN_DEBOUNCE times
+	this margin (Carry.activateMush), strictly shorter than the client's send
+	interval above. Without real headroom, two clicks sent MUSH_DRAIN_DEBOUNCE
+	apart routinely arrive a few milliseconds closer together than that (one
+	send-tick of batching jitter), and the server would reject the second with
+	no reply at all -- an invisible dropped click, not a throttle.
+
+	Deliberately generous (server window 0.03s, still rejecting anything
+	faster than ~33 req/s) rather than shaved close to the client's interval:
+	this margin's job is to absorb jitter, not to bound abuse -- that's
+	mushInputLimiter (MergeService/init.luau) plus the pot's own wall-clock
+	accrual, neither of which this value changes.
+]]
+MergeConfig.MUSH_DRAIN_DEBOUNCE_SERVER_MARGIN = 0.5
 --[[
 	A filling squishy visibly swells, so a loaded one is readable from across
 	the pad with no UI at all. Hard ceiling: potFor already clamps the pot to
@@ -316,6 +343,12 @@ end
 	amount alone, so an entry written before this field existed reads as an
 	empty pot and begins filling from its first write rather than retroactively
 	banking the whole time it sat in the profile.
+
+	Carry.luau deliberately reuses this exact sentinel to PAUSE a carried
+	squishy's accrual: Spawning.pickUp writes PotSince = 0 the instant it is
+	picked up, and every carry-ending path (drop, cancel) writes a fresh
+	PotSince to resume it. That is not a special case here -- it is this same
+	"banked value only" reading, applied on purpose for the whole carry.
 ]]
 function MergeConfig.potFor(banked: any, since: any, tier: number, now: any): number
 	local cap = MergeConfig.potCapForTier(tier)

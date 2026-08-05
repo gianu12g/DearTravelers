@@ -184,8 +184,18 @@ local Types = require(script.Types)
 
 local log = Log.new("MergeService")
 
-local mergeInputLimiter = RateLimiter.new(8, 12)
+-- Dedicated to mergeDropRequest now that mush has its own limiter below (was
+-- named mergeInputLimiter before the split).
+local dropInputLimiter = RateLimiter.new(8, 12)
 local launchInputLimiter = RateLimiter.new(2, 3)
+-- Dedicated to mergeMushRequest, sized above MUSH_DRAIN_DEBOUNCE's cadence
+-- (~16.7 req/s at 0.06s) with headroom for mash bursts. dropInputLimiter's 8
+-- tokens/s used to double as mush's limiter, which was fine at the old
+-- 0.15s debounce (6.67 req/s, below the refill rate) but is now stricter
+-- than a sustained fast clicker's send rate -- a shared bucket would drain
+-- and start silently dropping ~20% of legitimate clicks (and drop requests,
+-- which also read dropInputLimiter) after a few seconds of mashing.
+local mushInputLimiter = RateLimiter.new(20, 25)
 
 -- Owned here and handed to every sibling that needs one via its own setup()
 -- call (see Spawning.luau's header note on the pattern) -- these three are
@@ -312,7 +322,7 @@ function MergeService.Init()
 	Income.setup({ liveBases = liveBases })
 
 	Net.mergeDropRequest.listen(function(_data, player)
-		if player ~= nil and mergeInputLimiter:allow(player) then
+		if player ~= nil and dropInputLimiter:allow(player) then
 			Carry.dropCarried(player)
 		end
 	end)
@@ -331,7 +341,7 @@ function MergeService.Init()
 	end)
 
 	Net.mergeMushRequest.listen(function(_data, player)
-		if player ~= nil and mergeInputLimiter:allow(player) then
+		if player ~= nil and mushInputLimiter:allow(player) then
 			Carry.activateMush(player)
 		end
 	end)
