@@ -3,8 +3,11 @@
 	Attaches replaceable per-tier artwork to MergeService's authoritative
 	MergeObject root Parts.
 
-	Templates live in ServerStorage.MergeObjectModels and are named Tier1,
-	Tier2, ... TierN. They may be Models or BaseParts. The gameplay root keeps
+	Templates live in ServerStorage.MergeObjectModels and are named Level1,
+	Level2, ... LevelN, matching the MODEL LEVEL stored in a squishy entry's
+	`Tier` field (RebirthConfig's note on the two numbers: the persisted field
+	kept its historical name, the artwork did not). They may be Models or
+	BaseParts. The gameplay root keeps
 	pickup, carrying, merging, persistence, and placement independent from the
 	artwork, while every visual BasePart is made non-interactive and welded to
 	the root.
@@ -24,7 +27,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local log = Log.new("MergeObjectVisuals")
 
 local TEMPLATE_FOLDER_NAME = "MergeObjectModels"
-local TEMPLATE_PREFIX = "Tier"
+local TEMPLATE_PREFIX = "Level"
 local VISUAL_NAME = "Visual"
 local WELD_NAME = "VisualWeld"
 local ROTATION_X_ATTRIBUTE = "RotationX"

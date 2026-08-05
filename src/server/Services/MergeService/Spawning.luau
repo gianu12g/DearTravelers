@@ -20,6 +20,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local Assets = require(script.Parent.Assets)
 local DataService = require(script.Parent.Parent.DataService)
 local Format = require(ReplicatedStorage.Shared.UISystem.Format)
+local IndexService = require(script.Parent.Parent.IndexService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
@@ -651,6 +652,13 @@ function Spawning.spawnRestingPart(player: Player, live: Types.LiveBase, entry: 
 	part.Parent = live.objectsFolder
 	live.parts[part] = entry
 	wirePickupTouched(player, live, part)
+	-- The one place the Squishy Index learns about a level: being the single
+	-- choke point for resting Parts (see this function's header) means every
+	-- producer -- auto-spawn, deadlock rescue, both merge commits, purchased
+	-- delivery, setSpawnLevel's floor raise, and activation restore -- is
+	-- covered without any of them knowing the index exists. Yield-free, so it
+	-- is safe inside the callers' read-modify-write transactions.
+	IndexService.markDiscovered(player, entry.Tier)
 	return part
 end
 

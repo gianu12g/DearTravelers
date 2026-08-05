@@ -213,6 +213,25 @@ local TEMPLATE = {
 			MergePops = { CosmeticsCatalog.DEFAULT_MERGE_POP_ID } :: { string },
 		},
 	},
+
+	--[[
+		Squishy Index discovery. A COMPACT array of model levels this player has
+		owned at least once -- an array, not a { [level]: true } map, for the
+		same reason Cosmetics.Owned is one: Replica cannot replicate a sparse
+		numeric table (this file's own WARNING above), and a map keyed by level
+		is exactly that as soon as one level in the middle is missing.
+
+		Stored in DISCOVERY order, not level order. IndexController sorts for
+		display, which keeps the write path a single append (tableInsert) rather
+		than a whole-array retransmit per discovery.
+
+		Reconcile() backfills this subtree onto existing profiles as empty;
+		IndexService then refills it naturally, because every persisted squishy
+		is re-materialized through Spawning.spawnRestingPart on base activation.
+	]]
+	Index = {
+		DiscoveredSquishies = {} :: { number },
+	},
 }
 
 export type PlayerData = typeof(TEMPLATE)
@@ -270,7 +289,7 @@ end
 local LIVE_PROFILE_STORE_NAME = "PlayerData_v1.4"
 -- Studio writes to a separate DataStore, so persistence can be tested across
 -- Play sessions without ever touching production player profiles.
-local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.4_Studio"
+local STUDIO_PROFILE_STORE_NAME = "PlayerData_v1.5_Studio"
 local PROFILE_STORE_NAME = if RunService:IsStudio() then STUDIO_PROFILE_STORE_NAME else LIVE_PROFILE_STORE_NAME
 
 local DataService = {
@@ -412,6 +431,39 @@ local function compactUserIds(value: any, maxEntries: number): { number }
 			if #compact >= maxEntries then
 				break
 			end
+		end
+	end
+	return compact
+end
+
+--[[
+	Compacts Index.DiscoveredSquishies: integer model levels within
+	1..maxLevel, deduped, order preserved. Anything else (a NaN, a level from
+	a future content update that raised MAX_MODEL_LEVEL and was then rolled
+	back, a string key from a hand-edited profile) is dropped rather than
+	clamped -- a bogus level is not evidence the player discovered SOME level,
+	so inventing one would hand out an index entry that was never earned.
+
+	Bounded by maxLevel entries by construction: dedupe plus the range check
+	means it can never exceed the number of levels that exist.
+]]
+local function compactModelLevels(value: any, maxLevel: number): { number }
+	local compact: { number } = {}
+	local seen: { [number]: true } = {}
+	if type(value) ~= "table" then
+		return compact
+	end
+	for _, level in value do
+		if
+			type(level) == "number"
+			and level == level -- NaN defeats the range check below (quality-gate trap #8)
+			and level == math.floor(level)
+			and level >= 1
+			and level <= maxLevel
+			and not seen[level]
+		then
+			seen[level] = true
+			table.insert(compact, level)
 		end
 	end
 	return compact
@@ -574,6 +626,8 @@ local function repairProfileData(data: any)
 	if type(cosmetics.MergePopId) ~= "string" or not table.find(cosmetics.Owned.MergePops, cosmetics.MergePopId) then
 		cosmetics.MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 	end
+	data.Index.DiscoveredSquishies = compactModelLevels(data.Index.DiscoveredSquishies, RebirthConfig.MAX_MODEL_LEVEL)
+
 	local uiSystem = data.UISystem
 	uiSystem.Tickets = finiteInteger(uiSystem.Tickets, 0, MAX_TICKETS, 0)
 	uiSystem.ProcessedPurchaseIds = compactStringArray(uiSystem.ProcessedPurchaseIds, MAX_PROCESSED_PURCHASE_IDS)

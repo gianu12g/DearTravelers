@@ -169,6 +169,55 @@ local Images = {
 		RubberDuck = 79172199450122,
 		StealthRubber = 108500065453603,
 	} :: { [string]: number },
+
+	--[[
+		Squishy Index card icons, keyed by MODEL LEVEL (1..
+		RebirthConfig.MAX_MODEL_LEVEL), not by displayed tier -- level 10 is the
+		key, "512" is only what the card prints.
+
+		Extracted from the place's "IconForge Icons" ScreenGui and matched to
+		ServerStorage.MergeObjectModels.Level* by name. Level order is the
+		artwork's bounding-box size ascending, so these rows move whenever a
+		model is inserted into the ramp -- keep the trailing comment on each row
+		so a re-sort stays reviewable.
+
+		Levels 28-30 are intentionally absent: those are the untextured
+		placeholder cubes and have no authored icon. Do NOT add `0` rows for
+		them -- Preloader.collectIds recurses into this group and formats every
+		number leaf, so a zero would queue a literal `rbxassetid://0` preload
+		for every player. A missing key is the supported state; IndexController
+		falls back to the authored template icon.
+	]]
+	SquishyIcons = {
+		[1] = 125103866949094, -- KawaiiMellow
+		[2] = 110940760734503, -- KawaiiStrawberry
+		[3] = 91919531668110, -- KawaiiOrange
+		[4] = 104085081076968, -- Pengu ("Penguin")
+		[5] = 76200441154809, -- PinkPengu
+		[6] = 75469845213048, -- MushroomFace ("MushroomWithFace")
+		[7] = 119933162800269, -- KawaiiWatermelon
+		[8] = 130153003786602, -- Boba (icon still named "Tier2")
+		[9] = 125353975728580, -- KawaiiDuck
+		[10] = 122261757597021, -- PurpleNeedoh ("PurpleSlime") -- ASSUMED by colour
+		[11] = 122647729726446, -- BreadFace ("BreadWithFace")
+		[12] = 109924529013852, -- Slime ("GreenSlime") -- ASSUMED, pairs with 10
+		[13] = 88356131878238, -- KawaiiBubble
+		[14] = 108556638828107, -- KawaiiButter
+		[15] = 128952780358785, -- KawaiiCupcake
+		[16] = 135271336235240, -- KawaiiKitten
+		[17] = 107878501283363, -- KawaiiIceCream
+		[18] = 108727662414338, -- AliveDumpling
+		[19] = 117794661445240, -- FaceMochi ("Mochi")
+		[20] = 106711691003410, -- doggy ("Doggy")
+		[21] = 133119816091487, -- axolotl
+		[22] = 137216321335324, -- Bread Roll ("Bread")
+		[23] = 126620283911578, -- Chocolate
+		[24] = 102770991702002, -- kiwi
+		[25] = 122252316298941, -- Butter ("RegularButter") -- ASSUMED over PurpleButter
+		[26] = 96449578352102, -- PinkButter ("PurpleButter") -- ASSUMED, pairs with 25
+		[27] = 118234514150424, -- shark ("Shark")
+		-- 28-30 are placeholder cubes with no authored icon.
+	} :: { [number]: number },
 }
 
 export type Images = typeof(Images)
