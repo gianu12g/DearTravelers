@@ -26,6 +26,12 @@ local EconomyConfig = require(ServerStorage.Modules.EconomyConfig)
 local Log = require(ReplicatedStorage.Shared.Log)
 local Validate = require(ServerStorage.Modules.Validate)
 
+-- Deferred require (Loader.luau's documented pattern): QuestsService pays coin
+-- rewards through add() above, so requiring it at module scope would be a cycle
+-- and Luau throws on those at load. Bound in Init(), which the Loader runs for
+-- every service before any Start().
+local QuestsService: typeof(require(ServerStorage.Services.UISystem.QuestsService)) = nil :: any
+
 local log = Log.new("CoinsService")
 
 --[[
@@ -72,6 +78,7 @@ function CoinsService.add(player: Player, amount: number): boolean
 		return false
 	end
 
+	local previousCoins = data.Coins
 	local newCoins = math.min(data.Coins + amount, EconomyConfig.MAX_COINS)
 	if newCoins == data.Coins then
 		-- Already at the cap. Writing would cost a replication packet to
@@ -82,6 +89,14 @@ function CoinsService.add(player: Player, amount: number): boolean
 	end
 
 	DataService.set(player, { "Coins" }, newCoins)
+	-- Quest metric. Reports the amount ACTUALLY banked (newCoins - old), not the
+	-- requested amount, so a grant partially clipped by MAX_COINS cannot credit
+	-- coins the player never received. QuestsService is bound in Init() rather
+	-- than required above -- it calls back into add() to pay quest rewards, and
+	-- Luau throws on a cyclic require at load.
+	if QuestsService ~= nil then
+		QuestsService.award(player, "CoinsEarned", newCoins - previousCoins)
+	end
 	return true
 end
 
@@ -111,6 +126,10 @@ function CoinsService.trySpend(player: Player, cost: number): boolean
 
 	DataService.set(player, { "Coins" }, data.Coins - cost)
 	return true
+end
+
+function CoinsService.Init()
+	QuestsService = require(ServerStorage.Services.UISystem.QuestsService)
 end
 
 function CoinsService.Start()

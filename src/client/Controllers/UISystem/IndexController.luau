@@ -35,14 +35,9 @@ local Images = require(ReplicatedStorage.Shared.AssetIds.Images)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
+local ScrollCanvas = require(script.Parent.Parent.Parent.UI.UISystem.ScrollCanvas)
 
 local log = Log.new("IndexController")
-
--- The template's authored strings for a level nobody has found yet. Read from
--- Studio rather than reproduced here would be circular (the template IS the
--- undiscovered state), so these two are the one place the locked copy lives.
-local UNDISCOVERED_TIER_TEXT = "???"
-local UNDISCOVERED_NAME_TEXT = "UNKNOWN!"
 
 local IndexController = {}
 
@@ -76,51 +71,15 @@ function IndexController.Start()
 		else nil
 
 	--[[
-		Studio authored this grid around a fixed CanvasSize.Y scale of 1, with
-		the cards AND the layout padding sized as percentages of that canvas.
-		Switching to AutomaticCanvasSize without undoing that is circular --
-		card height depends on canvas height while canvas height depends on the
-		cards -- and the canvas collapses to zero instead of growing.
-
-		Same fix, and same reasoning, as MonetizationController's gift list
-		(see its freezeHeight comment): turn the already-resolved heights into
-		OFFSETS first, then drop the fixed canvas. Only the Y axis is frozen --
-		X stays a scale so the grid still reflows with the frame's width, which
-		is what makes UIListLayout.Wraps do the right thing on other screen
-		sizes.
-
-		Done before `template.Parent = nil` below, because AbsoluteSize reads 0
-		once an object is unparented -- and before any clone is taken, so all 30
-		cards inherit the frozen height rather than each needing the same fix.
+		Undoes the three authored traits that individually defeat
+		AutomaticCanvasSize (fixed canvas scale + percentage-sized children,
+		scale padding, and the canvas-constraining UIAspectRatioConstraint) and
+		returns the inner AutomaticSize.Y content Frame that ThemeShop and
+		Cosmetics both have. See ScrollCanvas's header for the measurements
+		behind each one. Called BEFORE `template.Parent = nil` below, because
+		freezing the template's height needs it still laid out.
 	]]
-	local function freezeHeight(gui: GuiObject)
-		local height = gui.AbsoluteSize.Y
-		if height > 0 then
-			gui.Size = UDim2.new(gui.Size.X.Scale, gui.Size.X.Offset, 0, height)
-		end
-	end
-	freezeHeight(template)
-
-	local listLayout = scrollFrame:FindFirstChildOfClass("UIListLayout")
-	if listLayout ~= nil and listLayout.Padding.Scale ~= 0 then
-		--[[
-			Padding is a percentage of the same canvas the cards were, so it has
-			the identical circularity. Convert against the frame's own width, the
-			axis this horizontal, wrapping layout actually pads along.
-
-			FLOOR, never round. The authored row is tuned to exactly fit: at
-			621.74 wide, four 0.225-scale cards leave only 0.826px of slack
-			across three gaps. The true padding is 0.033 * 621.74 = 20.517px;
-			rounding that UP to 21 costs 1.449px total and silently drops the
-			row to three cards. Flooring to 20 keeps four per row with slack,
-			and losing a sub-pixel of gap is invisible where losing a column is
-			not.
-		]]
-		local resolved = scrollFrame.AbsoluteSize.X * listLayout.Padding.Scale + listLayout.Padding.Offset
-		if resolved > 0 then
-			listLayout.Padding = UDim.new(0, math.floor(resolved))
-		end
-	end
+	local cardHolder = ScrollCanvas.normalize(scrollFrame, template)
 
 	--[[
 		Card-level ClipsDescendants is deliberately NOT set, even though the
@@ -138,66 +97,6 @@ function IndexController.Start()
 	]]
 
 	--[[
-		Both proven menus put the cards in an inner Frame rather than directly
-		in the ScrollingFrame -- ThemeShop.MainScrollingFrame.Holder and
-		Cosmetics.MainScrollingFrame.Holder are both AutomaticSize = Y,
-		Size = {1,0},{0,0}, anchored top-centre. The Index was authored with its
-		cards parented straight into the ScrollingFrame, so build the missing
-		level here rather than diverging from the shape that already works.
-
-		Why it matters beyond parity: AutomaticCanvasSize then measures ONE
-		child whose own AutomaticSize does the accumulating, instead of
-		re-measuring 30 siblings' contribution to AbsoluteContentSize. That is
-		the arrangement whose scroll behavior you have already validated.
-	]]
-	local cardHolder = Instance.new("Frame")
-	cardHolder.Name = "Holder"
-	cardHolder.BackgroundTransparency = 1
-	cardHolder.BorderSizePixel = 0
-	cardHolder.AnchorPoint = Vector2.new(0.5, 0)
-	cardHolder.Position = UDim2.fromScale(0.5, 0)
-	cardHolder.Size = UDim2.fromScale(1, 0)
-	cardHolder.AutomaticSize = Enum.AutomaticSize.Y
-	if listLayout ~= nil then
-		listLayout.Parent = cardHolder
-	end
-	cardHolder.Parent = scrollFrame
-
-	--[[
-		A UIAspectRatioConstraint on a ScrollingFrame constrains its CANVAS, not
-		just its frame, and that silently defeats AutomaticCanvasSize. Measured
-		in-session on this exact frame: with the constraint attached the canvas
-		pins to 324px (= 621.74 width / 1.919 ratio, DominantAxis Width) while
-		the content holder measures 1669px; detach it and the canvas immediately
-		becomes 1669. Neither ThemeShop.MainScrollingFrame nor
-		Cosmetics.MainScrollingFrame has one, and both report
-		AbsoluteCanvasSize == their holder's height.
-
-		Removed rather than worked around because it is inert for layout here:
-		the frame's own AbsoluteSize stayed 324 with the constraint detached
-		(its Size is already a scale of HolderParent, which carries the shape).
-		Done in code, not Studio, because StarterGui is not Rojo-managed -- a
-		place-side deletion would live only in the .rbxl and could be undone by
-		any re-author of this frame.
-	]]
-	local aspectConstraint = scrollFrame:FindFirstChildOfClass("UIAspectRatioConstraint")
-	if aspectConstraint ~= nil then
-		aspectConstraint:Destroy()
-	end
-
-	-- Now safe: the canvas is driven by the holder's content height instead of
-	-- the other way round.
-	scrollFrame.CanvasSize = UDim2.new()
-	scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	scrollFrame.ScrollingDirection = Enum.ScrollingDirection.Y
-	-- ClipsDescendants is deliberately LEFT ALONE (authored false). ThemeShop
-	-- and Cosmetics clip because their ScrollingFrame is the outer element;
-	-- this frame is wrapped in HolderParent for exactly that job, and clipping
-	-- here would shave the cards' UIStrokes at the scroll edge. It is also not
-	-- needed for the canvas fix -- measured: with the aspect constraint removed
-	-- the canvas reached 1669 whether clipping was on or off.
-
-	--[[
 		The template lives INSIDE the ScrollingFrame in Studio (it is the
 		authored example card), so it would otherwise render as a permanent
 		31st card that no data drives. Reparent it out before the pool is built
@@ -213,8 +112,10 @@ function IndexController.Start()
 		Icon: ImageLabel?,
 		DefaultIconImage: string,
 		DefaultIconColor: Color3,
-		TierLabel: TextLabel?,
-		NameLabel: TextLabel?,
+		-- The squishyName instance. Named for its ROLE (it shows the tier
+		-- value) rather than its authored instance name, which no longer
+		-- describes what it displays.
+		ValueLabel: TextLabel?,
 	}
 
 	local cardPool: { CardView } = {}
@@ -236,12 +137,25 @@ function IndexController.Start()
 		local decor = root:FindFirstChild("Decor")
 		local iconInstance = if decor ~= nil then decor:FindFirstChild("Icon") else nil
 		local icon = if iconInstance ~= nil and iconInstance:IsA("ImageLabel") then iconInstance else nil
+		-- The tier value lives in the squishyName slot now -- that is the
+		-- position the card was designed to label from. Its authored instance
+		-- name is kept (renaming it in Studio would only break this lookup),
+		-- so ValueLabel below is named for what it shows, not what it is called.
 		local nameInstance = if decor ~= nil then decor:FindFirstChild("squishyName") else nil
-		local nameLabel = if nameInstance ~= nil and nameInstance:IsA("TextLabel") then nameInstance else nil
-		-- Authored with "?" as its literal Instance name (the undiscovered
-		-- glyph), so this is a name lookup, not a typo.
-		local tierInstance = root:FindFirstChild("?")
-		local tierLabel = if tierInstance ~= nil and tierInstance:IsA("TextLabel") then tierInstance else nil
+		local valueLabel = if nameInstance ~= nil and nameInstance:IsA("TextLabel") then nameInstance else nil
+		if valueLabel ~= nil then
+			valueLabel.Visible = true
+		end
+
+		-- Authored with "?" as its literal Instance name, so this is a name
+		-- lookup, not a typo. Hidden rather than destroyed: re-enabling it is a
+		-- one-line change and the authored instance stays visible to whoever
+		-- opens the template in Studio. Nothing reflows (Decor and the card
+		-- place their children absolutely), so hiding costs nothing.
+		local questionInstance = root:FindFirstChild("?")
+		if questionInstance ~= nil and questionInstance:IsA("GuiObject") then
+			questionInstance.Visible = false
+		end
 
 		return {
 			Level = level,
@@ -252,8 +166,7 @@ function IndexController.Start()
 			Icon = icon,
 			DefaultIconImage = if icon ~= nil then icon.Image else "",
 			DefaultIconColor = if icon ~= nil then icon.ImageColor3 else Color3.new(0, 0, 0),
-			TierLabel = tierLabel,
-			NameLabel = nameLabel,
+			ValueLabel = valueLabel,
 		}
 	end
 
@@ -265,26 +178,23 @@ function IndexController.Start()
 
 		local icon = card.Icon
 		if icon ~= nil then
-			-- White is the neutral tint that shows the art as authored; the
-			-- locked colour comes off the template so re-authoring it in Studio
-			-- needs no change here.
+			-- The SAME per-level art in both states -- an undiscovered card is
+			-- that squishy's own silhouette, not a generic placeholder, so the
+			-- image is set unconditionally and only the tint changes. White is
+			-- the neutral tint that shows the art as authored; the blacked-out
+			-- colour comes off the template, so re-authoring it in Studio needs
+			-- no change here.
+			icon.Image = iconImageForLevel(card.Level, card.DefaultIconImage)
 			icon.ImageColor3 = if isDiscovered then Color3.new(1, 1, 1) else card.DefaultIconColor
-			icon.Image = if isDiscovered
-				then iconImageForLevel(card.Level, card.DefaultIconImage)
-				else card.DefaultIconImage
 		end
 
-		local tierLabel = card.TierLabel
-		if tierLabel ~= nil then
-			tierLabel.Text = if isDiscovered
-				then Format.FormatNumber(RebirthConfig.tierNumberForModelLevel(card.Level))
-				else UNDISCOVERED_TIER_TEXT
-		end
-
-		local nameLabel = card.NameLabel
-		if nameLabel ~= nil then
-			local tierDef = MergeConfig.Tiers[card.Level]
-			nameLabel.Text = if isDiscovered and tierDef ~= nil then tierDef.Name else UNDISCOVERED_NAME_TEXT
+		-- The tier value IS the card's name now, in both states -- no "???"
+		-- placeholder. Knowing a locked squishy is worth 512 is part of what
+		-- makes the gap worth filling, and the black silhouette already carries
+		-- "undiscovered" on its own.
+		local valueLabel = card.ValueLabel
+		if valueLabel ~= nil then
+			valueLabel.Text = Format.FormatNumber(RebirthConfig.tierNumberForModelLevel(card.Level))
 		end
 	end
 

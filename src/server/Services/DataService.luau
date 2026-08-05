@@ -25,6 +25,7 @@ local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local PassEntitlements = require(ServerStorage.Modules.PassEntitlements)
 local ProfileStore = require(ServerStorage.ServerPackages.ProfileStore)
 local Progression = require(ReplicatedStorage.Shared.Progression)
+local QuestsConfig = require(ReplicatedStorage.Shared.UISystem.Config.Quests)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local Replica = require(ServerStorage.ReplicaServer)
 local SquishyProgress = require(ServerStorage.Modules.SquishyProgress)
@@ -231,6 +232,27 @@ local TEMPLATE = {
 	]]
 	Index = {
 		DiscoveredSquishies = {} :: { number },
+	},
+
+	--[[
+		Quest tracks. One entry per period, each holding the calendar key it was
+		last reset for plus two id-keyed maps.
+
+		Maps, not arrays, unlike Index above: these are keyed by quest ID
+		(strings), which Replica handles fine -- the sparse-numeric-table
+		restriction only applies to NUMERIC keys. Ids also make retiring a quest
+		safe, since repairQuests below simply drops keys the catalog no longer
+		defines.
+
+		Rewarded is separate from Progress rather than inferred from
+		`Progress >= Goal`, because a quest's Goal can be re-tuned after a
+		payout. Without the explicit flag, lowering a goal would silently pay
+		every player again.
+	]]
+	Quests = {
+		Daily = { PeriodKey = "", Progress = {} :: { [string]: number }, Rewarded = {} :: { [string]: boolean } },
+		Weekly = { PeriodKey = "", Progress = {} :: { [string]: number }, Rewarded = {} :: { [string]: boolean } },
+		Monthly = { PeriodKey = "", Progress = {} :: { [string]: number }, Rewarded = {} :: { [string]: boolean } },
 	},
 }
 
@@ -483,6 +505,57 @@ local function finiteNumber(value: any, minimum: number, maximum: number, fallba
 	return math.clamp(value, minimum, maximum)
 end
 
+--[[
+	Repairs the Quests subtree in place. Drops every id the catalog no longer
+	defines (that is what makes retiring a quest safe -- see Config/Quests's own
+	note) and clamps each surviving counter to a finite, non-negative integer no
+	larger than its goal.
+
+	Clamping to Goal rather than leaving a huge value matters: progress is what
+	the client draws the bar from, and an unbounded number out of a corrupted
+	profile would otherwise render past the end of its track.
+]]
+local function repairQuests(quests: any)
+	if type(quests) ~= "table" then
+		return
+	end
+	for _, period in QuestsConfig.PERIODS do
+		local track = quests[period]
+		if type(track) ~= "table" then
+			continue
+		end
+		if type(track.PeriodKey) ~= "string" then
+			track.PeriodKey = ""
+		end
+
+		local goals: { [string]: number } = {}
+		for _, quest in QuestsConfig.Catalog[period] do
+			goals[quest.Id] = quest.Goal
+		end
+
+		local progress: { [string]: number } = {}
+		if type(track.Progress) == "table" then
+			for id, value in track.Progress do
+				local goal = if type(id) == "string" then goals[id] else nil
+				if goal ~= nil then
+					progress[id] = finiteInteger(value, 0, goal, 0)
+				end
+			end
+		end
+		track.Progress = progress
+
+		local rewarded: { [string]: boolean } = {}
+		if type(track.Rewarded) == "table" then
+			for id, value in track.Rewarded do
+				if type(id) == "string" and goals[id] ~= nil and value == true then
+					rewarded[id] = true
+				end
+			end
+		end
+		track.Rewarded = rewarded
+	end
+end
+
 local function isValidPendingGiftEntry(entry: any): boolean
 	return type(entry) == "table"
 		and (entry.Kind == "Pass" or entry.Kind == "Product" or entry.Kind == "Pack")
@@ -627,6 +700,7 @@ local function repairProfileData(data: any)
 		cosmetics.MergePopId = CosmeticsCatalog.DEFAULT_MERGE_POP_ID
 	end
 	data.Index.DiscoveredSquishies = compactModelLevels(data.Index.DiscoveredSquishies, RebirthConfig.MAX_MODEL_LEVEL)
+	repairQuests(data.Quests)
 
 	local uiSystem = data.UISystem
 	uiSystem.Tickets = finiteInteger(uiSystem.Tickets, 0, MAX_TICKETS, 0)

@@ -21,6 +21,7 @@ local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
 local Net = require(ReplicatedStorage.Shared.Net)
+local QuestsService = require(script.Parent.Parent.UISystem.QuestsService)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local Spawning = require(script.Parent.Spawning)
 local Types = require(script.Parent.Types)
@@ -159,6 +160,11 @@ local function commitMerge(
 	live.disarmed[targetPart] = nil
 	carry.part:Destroy()
 	targetPart:Destroy()
+
+	-- Quest metric. Counted here, after the transaction has committed, so a
+	-- merge that bailed out above never credits progress. Yield-free, like the
+	-- rest of this function.
+	QuestsService.award(player, "Merges", 1)
 
 	Vfx.spawnMergeVfx(live.objectsFolder, vfxPosition)
 	Vfx.sendMergeSquishyVfx(player, vfxPosition)

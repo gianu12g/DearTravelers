@@ -27,6 +27,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DataService = require(script.Parent.DataService)
+local QuestsService = require(script.Parent.UISystem.QuestsService)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 
 local IndexService = {}
@@ -67,6 +68,10 @@ function IndexService.markDiscovered(player: Player, modelLevel: any): boolean
 	-- element instead of retransmitting every level discovered so far, and the
 	-- array stays compact because this is the only writer.
 	DataService.tableInsert(player, { "Index", "DiscoveredSquishies" }, modelLevel)
+	-- Quest metric. Reached only on a genuinely NEW level, because every
+	-- already-discovered path returned above -- so re-owning a level the player
+	-- already has cannot farm the "Discover N New Squishies" quests.
+	QuestsService.award(player, "Discoveries", 1)
 	return true
 end
 

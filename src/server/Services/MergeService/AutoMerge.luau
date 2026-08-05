@@ -20,6 +20,7 @@ local DataService = require(script.Parent.Parent.DataService)
 local Launch = require(script.Parent.Launch)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
+local QuestsService = require(script.Parent.Parent.UISystem.QuestsService)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local Spawning = require(script.Parent.Spawning)
 local Types = require(script.Parent.Types)
@@ -171,6 +172,11 @@ local function commitPair(player: Player, job: AutoMergeJob, midpoint: Vector3):
 	job.live.disarmed[job.partB] = nil
 	job.partA:Destroy()
 	job.partB:Destroy()
+
+	-- Quest metric, same as the manual merge in Carry.commitMerge: an auto-merge
+	-- produces the same t+1 squishy, and paying for the Auto Merge pass must not
+	-- make quests progress slower.
+	QuestsService.award(player, "Merges", 1)
 
 	Vfx.spawnMergeVfx(job.live.objectsFolder, midpoint)
 	Vfx.sendMergeSquishyVfx(player, midpoint)

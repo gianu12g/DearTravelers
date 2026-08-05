@@ -28,6 +28,7 @@ local LaunchEffects = require(script.Parent.LaunchEffects)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeConfig = require(ReplicatedStorage.Shared.MergeConfig)
 local MergeObjectVisuals = require(ServerStorage.Modules.MergeObjectVisuals)
+local QuestsService = require(script.Parent.Parent.UISystem.QuestsService)
 local StatusUI = require(script.Parent.StatusUI)
 local Types = require(script.Parent.Types)
 local UINotificationService = require(script.Parent.Parent.UISystem.UINotificationService)
@@ -600,6 +601,11 @@ local function runLaunch(player: Player, launch: Types.LaunchState, targetPositi
 			Damage.damageSquishiesNear(targetPlayer, targetPosition, MergeConfig.LAUNCH_IMPACT_RADIUS, damage)
 		end
 	end
+
+	-- Quest metric. Counted at IMPACT, not at launch request: only a drop that
+	-- actually resolved and landed should progress "Launch N Squishies", and
+	-- every early-exit path above returns before reaching here.
+	QuestsService.award(player, "Launches", 1)
 
 	task.wait(MergeConfig.LAUNCH_IMPACT_PAUSE)
 	finishLaunch(player, launch, true)

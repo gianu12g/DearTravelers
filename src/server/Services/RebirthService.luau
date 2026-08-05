@@ -16,6 +16,7 @@ local DataService = require(script.Parent.DataService)
 local Log = require(ReplicatedStorage.Shared.Log)
 local MergeService = require(script.Parent.MergeService)
 local Net = require(ReplicatedStorage.Shared.UISystem.Net)
+local QuestsService = require(ServerStorage.Services.UISystem.QuestsService)
 local RateLimiter = require(ServerStorage.Modules.RateLimiter)
 local RebirthConfig = require(ReplicatedStorage.Shared.RebirthConfig)
 local UINotificationService = require(ServerStorage.Services.UISystem.UINotificationService)
@@ -64,6 +65,10 @@ local function requestRebirth(player: Player)
 		Coins = 0,
 		Rebirths = rebirths + 1,
 	})
+	-- Quest metric. After the Rebirths write above, so a rebirth that failed
+	-- validation earlier in this function never credits progress.
+	QuestsService.award(player, "Rebirths", 1)
+
 	UINotificationService.SendNotification(player, "Success", "Rebirth successful!")
 	UINotificationService.EmitConfetti(player)
 	-- Rebirth has now cleared the board and reset SpawnLevel. Pending paid
