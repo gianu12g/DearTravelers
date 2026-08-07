@@ -52,9 +52,9 @@ local PREVIEW_DURATION = 15
 local ThemeShopController = {}
 
 local SHOP_DIVIDER_TEXT_BY_SLOT: { [CosmeticsCatalog.Slot]: string } = {
-	KeycapThemes = "Owned Themes",
-	SquishyBeams = "- Beam Theme Shop -",
-	MergePops = "- Merge Pop Theme Shop -",
+	KeycapThemes = "- Key Themes Shop  -",
+	SquishyBeams = "- Beam Themes Shop -",
+	MergePops = "- Merge Pop Themes Shop -",
 }
 
 --[[
@@ -101,7 +101,7 @@ end
 -- AutoButtonColor state and UIKit's authored Expand size when that prompt
 -- closes, so a cancelled purchase returns to a neutral button immediately.
 local function resetPurchaseButtonVisual(button: GuiButton)
-	if button.Parent == nil then
+	if not button.Parent then
 		return
 	end
 
@@ -116,7 +116,7 @@ local function resetPurchaseButtonVisual(button: GuiButton)
 	button.AutoButtonColor = false
 
 	task.defer(function()
-		if button.Parent == nil then
+		if not button.Parent then
 			return
 		end
 		button.Active = wasActive
@@ -265,11 +265,7 @@ function ThemeShopController.Start()
 
 	-- Pooled unowned cards sort below zero and owned cards above zero. Force
 	-- the divider to the boundary once rather than relying on its authored
-	-- LayoutOrder never drifting.
-	local ownedText = holder:FindFirstChild("OwnedText")
-	if ownedText ~= nil and ownedText:IsA("GuiObject") then
-		ownedText.LayoutOrder = 0
-	end
+	local shopTitle = holder:FindFirstChild("ShopTitle")
 
 	local activeSlot: CosmeticsCatalog.Slot = "KeycapThemes"
 	local ticketCount = 0
@@ -777,8 +773,8 @@ function ThemeShopController.Start()
 	end
 
 	local function renderSlot()
-		if ownedText ~= nil and ownedText:IsA("TextLabel") then
-			ownedText.Text = SHOP_DIVIDER_TEXT_BY_SLOT[activeSlot]
+		if shopTitle ~= nil and shopTitle:IsA("TextLabel") then
+			shopTitle.Text = SHOP_DIVIDER_TEXT_BY_SLOT[activeSlot]
 		end
 
 		local savedCanvasPosition = scrollFrame.CanvasPosition
